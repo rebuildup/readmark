@@ -66,8 +66,8 @@ ADR と一緒に追加する。
 
 ### `.env.example` の正本
 
-`.env.example` の正本内容は以下。`.env` は gitignore なので、
-開発を始める際に次の内容を repo root の `.env.example` に貼る：
+`.env.example` はリポジトリに正本としてコミットされている。
+開発を始める際はこれを `.env` にコピーして使う：
 
 ```dotenv
 # readmark — local development env schema.
