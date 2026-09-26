@@ -296,7 +296,9 @@ files.
 - ADR-0001 — local-first invariants.
 - ADR-0002 — Document / DocumentSource / DocumentBlob separation.
 - ADR-0003 — format-agnostic document model.
-- ADR-0004 — PDF renderer isolation.
+- ADR-0004 — PDF reader contract and renderer isolation
+  (`ReaderSource<F>` / `Reader<F>` / `ReaderHandle<F>` /
+  `PageHandle<F>` / `ResolvedAnchor`).
 - ADR-0005 — IndexedDB persistence strategy.
 - ADR-0006 — deployment / my-web-2026 integration.
 - ADR-0007 — PDF annotation anchor model (`Anchor<P>` outer +
