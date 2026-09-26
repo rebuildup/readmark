@@ -20,6 +20,16 @@
  *   - The function is still exported (`setupPdfWorker()`) for
  *     tests and for callers that want to assert init has run.
  *
+ * Why this no longer relies on synchronous module evaluation:
+ *   - `setupPdfWorker()` is `async` and lazily imports
+ *     `pdfjs-dist`. We CANNOT promise "by the time this module
+ *     finishes loading, the URL is set" any more — only that the
+ *     fire-and-forget call has been *issued*.
+ *   - Callers that touch pdf.js APIs MUST `await setupPdfWorker()`
+ *     first. `loadPdfDocument()` does this in its browser path.
+ *     The Node path skips the call entirely (legacy build is
+ *     worker-free).
+ *
  * Why idempotent (the `initialized` flag):
  *   - Module-graph re-evaluation under HMR / Vitest can run the
  *     top-level statement more than once. Setting the same URL

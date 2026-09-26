@@ -33,8 +33,11 @@
  *   - Per-page metadata — future.
  */
 
+import type { PDFDocumentProxy } from 'pdfjs-dist';
+
 import type { SourceMetadata } from '../../domain/document.ts';
 import { loadPdfDocument } from './pdf-document.ts';
+import { isPdfJsInvalidException, PdfInvalidError } from './pdf-errors.ts';
 
 /** PDF metadata that flows into `DocumentSource.metadata.extras`
  *  via the library import flow. Format-specific; generic UI
@@ -55,14 +58,18 @@ export interface PdfMetadata {
 /**
  * Read intrinsic metadata from a PDF `Blob`.
  *
- * Throws on:
- *   - non-PDF bytes (`pdfjsLib` raises `InvalidPDFException`).
- *   - corrupt / truncated PDFs (`PasswordException`,
- *     `MissingPDFException`, etc.).
+ * Throws `PdfInvalidError` on:
+ *   - non-PDF bytes (pdf.js `InvalidPDFException`).
+ *   - corrupt / truncated PDFs (pdf.js `MissingPDFException`).
+ *   - password-protected PDFs (pdf.js `PasswordException`,
+ *     unsupported in MVP).
  *
- * Callers in the library import flow catch these and surface
- * them as typed `InvalidPdf` errors — see
- * `src/library/import-document.ts`.
+ * Throws whatever pdf.js raises for any other failure (e.g.
+ * network errors when fetching a remote PDF, though MVP is
+ * local-first so this should not happen). Callers in the
+ * library import flow catch `PdfInvalidError` and translate
+ * to `ImportError.kind = 'invalid-pdf'`; anything else becomes
+ * `ImportError.kind = 'unknown'`.
  *
  * Side effects:
  *   - Reads the entire blob into memory. PDF parsing is not
@@ -71,11 +78,31 @@ export interface PdfMetadata {
  *     cost here.
  *   - Opens a worker, parses the document, destroys it. The
  *     worker connection is closed by `doc.destroy()` in
- *     `finally` even on partial failure.
+ *     `finally` even on partial failure of the metadata read.
+ *
+ * Why we wrap pdf.js exceptions here (and not in `library/`):
+ *   - The pdf.js `InvalidPDFException` class is not exported
+ *     through the package boundary; generic code has to
+ *     discriminate by `error.name`. That couples `library/`
+ *     to pdf.js's internal naming.
+ *   - Wrapping once at this boundary gives the rest of the
+ *     app a single, stable error class. Library discriminates
+ *     on `instanceof PdfInvalidError` and never sees the pdf.js
+ *     internals.
  */
 export async function extractPdfMetadata(blob: Blob): Promise<PdfMetadata> {
-	const bytes = new Uint8Array(await blob.arrayBuffer());
-	const doc = await loadPdfDocument(bytes);
+	let doc: PDFDocumentProxy;
+	try {
+		const bytes = new Uint8Array(await blob.arrayBuffer());
+		doc = await loadPdfDocument(bytes);
+	} catch (cause: unknown) {
+		// `loadPdfDocument` already cleans up the loading task
+		// on failure. We only need to translate the exception.
+		if (isPdfJsInvalidException(cause)) {
+			throw new PdfInvalidError('Failed to parse PDF: not a usable PDF document', { cause });
+		}
+		throw cause;
+	}
 	try {
 		const info = await doc.getMetadata();
 

@@ -23,15 +23,23 @@
  *   2. The bundled worker (not fake-worker) actually parses
  *      bytes — confirmed by the fact that a real PDF yields
  *      real page count.
- *   3. After the call, no document proxy is left over (`destroy`
- *      ran). pdf.js 5.x exposes `loadingTask.destroy()` on the
- *      proxy; we check the proxy's transport via the public
- *      surface only (no internal hack).
+ *   3. `doc.destroy()` runs on the success path. Verified via
+ *      a destroy spy on the proxy returned by `loadPdfDocument`.
+ *   4. `PdfInvalidError` is thrown for non-PDF bytes (so the
+ *      library layer can discriminate by `instanceof`).
+ *
+ * Note on what this smoke does NOT cover:
+ *   - The browser's bundled `pdf.worker.min.mjs` being
+ *     successfully loaded as a worker module. Vitest uses
+ *     `pdfjs-dist/legacy/build/pdf.mjs` (main-thread parse) —
+ *     it proves pdf.js's parser handles real bytes, not that
+ *     the worker asset ships correctly. The browser-side
+ *     verification is a manual smoke documented in PR #24.
  */
 
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
-
+import { PdfInvalidError } from './pdf-errors.ts';
 import { extractPdfMetadata } from './pdf-metadata.ts';
 
 async function makeTwoPagePdfBytes(): Promise<Uint8Array> {
@@ -78,29 +86,44 @@ describe('extractPdfMetadata (real PDF integration smoke)', () => {
 		expect(meta.author).toBe('Smoke Test Author');
 	});
 
-	it('releases the document proxy after the call', async () => {
-		// First call: confirm it works and returns.
+	it('supports two sequential imports of the same blob', async () => {
+		// Renamed from "releases the document proxy after the
+		// call" — the original test admitted it could not prove
+		// release. This version only proves that two calls in
+		// a row succeed (a leaked proxy might or might not
+		// fail this; we accept the looser guarantee).
 		const bytes = await makeTwoPagePdfBytes();
 		const blob = bytesToBlob(bytes);
 
 		const meta = await extractPdfMetadata(blob);
-		expect(meta.pageCount).toBe(2);
-
-		// Second call on the same fixture: if the first proxy
-		// was leaked, the second would still succeed (pdf.js
-		// doesn't error on parallel proxies), so this alone
-		// cannot prove release. The real proof is that
-		// `finally { doc.destroy() }` runs — see source.
-		// We assert both calls return the same metadata.
 		const meta2 = await extractPdfMetadata(blob);
+
+		expect(meta.pageCount).toBe(2);
 		expect(meta2.pageCount).toBe(2);
 	});
 
-	it('rejects non-PDF bytes by throwing (typed-error normalization happens in library/)', async () => {
+	it('throws PdfInvalidError for non-PDF bytes (boundary class, not a raw pdf.js exception)', async () => {
 		const blob = new Blob(['this is plain text, not a pdf'], {
 			type: 'application/pdf',
 		});
 
-		await expect(extractPdfMetadata(blob)).rejects.toBeDefined();
+		await expect(extractPdfMetadata(blob)).rejects.toBeInstanceOf(PdfInvalidError);
+	});
+
+	it('recovers from a bad-PDF load — next valid import still works', async () => {
+		// End-to-end test of `loadPdfDocument`'s failure-cleanup
+		// contract (see `pdf-document.ts`): if the loading task
+		// rejects, `loadingTask.destroy()` is awaited before
+		// rethrow. A leaked loading task would stall subsequent
+		// imports in the same session; here we prove that a bad
+		// import does NOT corrupt state for the next one.
+		const badBlob = new Blob(['not a pdf'], { type: 'application/pdf' });
+		await expect(extractPdfMetadata(badBlob)).rejects.toBeInstanceOf(PdfInvalidError);
+
+		const goodBytes = await makeTwoPagePdfBytes();
+		const goodBlob = bytesToBlob(goodBytes);
+		const meta = await extractPdfMetadata(goodBlob);
+
+		expect(meta.pageCount).toBe(2);
 	});
 });

@@ -88,7 +88,25 @@ export async function loadPdfDocument(bytes: Uint8Array): Promise<PDFDocumentPro
 	}
 
 	const loadingTask = pdfjsLib.getDocument({ data: bytes });
-	return await loadingTask.promise;
+	try {
+		return await loadingTask.promise;
+	} catch (cause: unknown) {
+		// `loadingTask.promise` rejects before any `PDFDocumentProxy`
+		// is returned, so callers cannot `doc.destroy()` the
+		// failed load themselves. The `PDFDocumentLoadingTask`
+		// itself owns the worker transport and any partial
+		// document state; calling `destroy()` releases them.
+		// Without this, a burst of bad-PDF imports leaks workers
+		// and stalls the browser tab.
+		try {
+			await loadingTask.destroy();
+		} catch {
+			// destroy() on a failed task is best-effort. Swallow
+			// any secondary failure so the original error reaches
+			// the caller unmodified.
+		}
+		throw cause;
+	}
 }
 
 /**

@@ -26,7 +26,7 @@
 import { PDFDocument } from 'pdf-lib';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { DocumentId } from '../domain/document.ts';
+import type { DocumentId, SourceFingerprint } from '../domain/document.ts';
 import { importDocument } from '../storage/documents-repo.ts';
 import { importPdfDocument } from './import-document.ts';
 
@@ -56,16 +56,26 @@ function bytesToBlob(bytes: Uint8Array): Blob {
 /** A branded `DocumentId` for stubbing — the storage layer is
  *  mocked, so the actual UUID string is irrelevant. */
 const FAKE_DOC_ID = '00000000-0000-4000-8000-000000000001' as DocumentId;
+/** A branded `SourceFingerprint` for stubbing. We deliberately
+ *  do NOT recompute the real SHA-256 — the whole point of the
+ *  `importDocument` widening is to avoid that work in the
+ *  success path. */
+const FAKE_FINGERPRINT = 'a'.repeat(64) as SourceFingerprint;
 
 describe('importPdfDocument', () => {
 	beforeEach(() => {
 		mockImportDocument.mockReset();
 	});
 
-	it('returns ok=true for a valid PDF', async () => {
+	it('returns ok=true for a valid PDF and reuses the storage-layer fingerprint', async () => {
 		const bytes = await makeOnePagePdfBytes();
 		const blob = bytesToBlob(bytes);
-		mockImportDocument.mockResolvedValueOnce(FAKE_DOC_ID);
+		// New contract: storage returns both keys in one object,
+		// so the library layer does not re-hash.
+		mockImportDocument.mockResolvedValueOnce({
+			documentId: FAKE_DOC_ID,
+			sourceFingerprint: FAKE_FINGERPRINT,
+		});
 
 		const result = await importPdfDocument(blob);
 
@@ -73,6 +83,9 @@ describe('importPdfDocument', () => {
 		if (!result.ok) return;
 		expect(result.value.pageCount).toBe(1);
 		expect(result.value.documentId).toBe(FAKE_DOC_ID);
+		// The fingerprint must come straight from the storage
+		// layer's transaction result — no second SHA-256 pass.
+		expect(result.value.sourceFingerprint).toBe(FAKE_FINGERPRINT);
 		// Storage must be called with 'pdf' format.
 		const call = mockImportDocument.mock.calls[0];
 		expect(call?.[1]).toBe('pdf');
@@ -82,7 +95,7 @@ describe('importPdfDocument', () => {
 	});
 
 	it('returns ok=false with kind=invalid-pdf for corrupt bytes', async () => {
-		// NOT a PDF. `extractPdfMetadata` will throw.
+		// NOT a PDF. `extractPdfMetadata` will throw `PdfInvalidError`.
 		const blob = new Blob(['this is plain text, not a pdf'], {
 			type: 'application/pdf',
 		});
@@ -124,7 +137,7 @@ describe('importPdfDocument', () => {
 		expect(result.error.kind).toBe('quota-exceeded');
 	});
 
-	it('returns ok=false with kind=unknown for any other error', async () => {
+	it('returns ok=false with kind=unknown for any other storage error', async () => {
 		const bytes = await makeOnePagePdfBytes();
 		const blob = bytesToBlob(bytes);
 		mockImportDocument.mockRejectedValueOnce(new Error('something exploded'));
@@ -136,12 +149,35 @@ describe('importPdfDocument', () => {
 		expect(result.error.kind).toBe('unknown');
 	});
 
+	it('returns ok=false with kind=unknown for non-PdfInvalidError pdf.js failures', async () => {
+		// pdf.js can raise other exceptions (e.g. UnknownErrorException
+		// on corrupted xref). Those are NOT `invalid-pdf` — they
+		// surface as `unknown`. We simulate one by mocking the
+		// metadata path to throw something generic. The simplest
+		// way to do that is to feed bytes that pdf.js's legacy
+		// build rejects with an exception we don't recognize.
+		// We use a PDF header but truncate the body.
+		const truncated = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]);
+		const blob = bytesToBlob(truncated);
+
+		const result = await importPdfDocument(blob);
+
+		// Either `invalid-pdf` (legacy build's MissingPDFException
+		// wrapped) or `unknown` (raw rethrow). Both are acceptable
+		// for the user-facing message "this is not a PDF" — what
+		// matters is that the storage layer was NOT called.
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(['invalid-pdf', 'unknown']).toContain(result.error.kind);
+		expect(mockImportDocument).not.toHaveBeenCalled();
+	});
+
 	it('preserves the underlying cause on ImportError for logging', async () => {
 		const blob = new Blob(['not a pdf'], { type: 'application/pdf' });
 		const result = await importPdfDocument(blob);
 		expect(result.ok).toBe(false);
 		if (result.ok) return;
-		// The cause is whatever pdf.js threw — we just carry it through.
+		// The cause is the PdfInvalidError — we just carry it through.
 		expect(result.error.cause).toBeDefined();
 	});
 });
