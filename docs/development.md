@@ -49,17 +49,20 @@ bun install --frozen-lockfile  # CI 用
 
 ## 4. 環境変数
 
-> サンドボックス上 `.env*` ファイル名は使えないため、`README.md` /
-> `AGENTS.md` / 本ファイルのみが env schema の SoT。
-> ローカル開発で `.env` を置きたい場合はファイルを直接作る（gitignore
-> される）。
+> env schema はリポジトリ root の `.env.example` を canonical として
+> 扱う。`.env`, `.env.development`, `.env.production` は gitignore。
+
+MVP で必要な env 変数は 1 つだけ：
 
 | 変数 | デフォルト | 用途 |
 | ---- | ---------- | ---- |
-| `PORT` | `5173` | Vite dev server port |
-| `READMARK_EPHEMERAL` | `false` | true で IndexedDB 永続化を拒否（プレビュー専用） |
-| `READMARK_TELEMETRY` | `false` | true で将来のオプトイン crash reporter を有効化 |
-| `READMARK_ENABLE_EPUB` | `false` | 実験的 EPUB reader を有効化（ADR-0003 まで常に false） |
+| `READMARK_EPHEMERAL` | `false` | true で IndexedDB 永続化を拒否（プレビュー / sandbox mode 用） |
+
+それ以外（`READMARK_TELEMETRY` や `READMARK_ENABLE_EPUB` 等）は MVP
+では **schema にも存在しない**。テレメトリは ADR-0001 で
+「含めない」と決めており、EPUB は ADR-0003 で「post-MVP」と決めて
+いるため、YAGNI に従い schema を膨らませない。必要になった時点で
+ADR と一緒に追加する。
 
 ## 5. 開発フロー
 

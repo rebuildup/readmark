@@ -1,22 +1,28 @@
 /**
  * readmark — Library screen.
  *
- * MVP shell: lists the user's library and shows the import button (disabled
- * until the file picker is wired). The full import UI lands in the first
- * feature ticket after init.
+ * MVP shell: lists the user's library and shows the import button
+ * (disabled until the file picker is wired). The full import UI
+ * lands in the first feature ticket after init.
+ *
+ * The library list is a JOIN over `documents` + their primary
+ * `documentSources`, surfaced through `listLibrary()` as
+ * `LibraryEntry`. We deliberately keep Document and DocumentSource
+ * separate at the data layer; the join lives in the repository,
+ * not in the screen.
  */
 
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Document } from '../domain/document.ts';
-import { listDocuments } from '../storage/documents-repo.ts';
+import type { LibraryEntry } from '../storage/documents-repo.ts';
+import { listLibrary } from '../storage/documents-repo.ts';
 import { Button } from './primitives/button.tsx';
 
 export function LibraryScreen() {
-	const [documents, setDocuments] = useState<readonly Document[] | null>(null);
+	const [entries, setEntries] = useState<readonly LibraryEntry[] | null>(null);
 
 	useEffect(() => {
-		listDocuments().then(setDocuments).catch(console.error);
+		listLibrary().then(setEntries).catch(console.error);
 	}, []);
 
 	return (
@@ -43,17 +49,17 @@ export function LibraryScreen() {
 				</section>
 
 				<section>
-					{documents === null ? (
+					{entries === null ? (
 						<p style={{ color: 'var(--rm-fg-muted)' }}>読み込み中…</p>
-					) : documents.length === 0 ? (
+					) : entries.length === 0 ? (
 						<p style={{ color: 'var(--rm-fg-muted)' }}>
 							ライブラリは空です。上のボタンから文書を追加してください。
 						</p>
 					) : (
 						<ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-							{documents.map((doc) => (
+							{entries.map(({ document, primarySource }) => (
 								<li
-									key={doc.fingerprint}
+									key={document.id}
 									style={{
 										padding: '12px 16px',
 										borderBottom: '1px solid var(--rm-border)',
@@ -63,13 +69,16 @@ export function LibraryScreen() {
 									}}
 								>
 									<div>
-										<div style={{ fontWeight: 500 }}>{doc.metadata.title || '(タイトルなし)'}</div>
+										<div style={{ fontWeight: 500 }}>
+											{document.metadata.title || '(タイトルなし)'}
+										</div>
 										<div style={{ color: 'var(--rm-fg-muted)', fontSize: 14 }}>
-											{doc.metadata.author || '(著者なし)'} ・ {doc.format.toUpperCase()} ・{' '}
-											{(doc.byteSize / 1024 / 1024).toFixed(1)} MB
+											{document.metadata.author || '(著者なし)'} ・{' '}
+											{primarySource.format.toUpperCase()} ・{' '}
+											{(primarySource.byteSize / 1024 / 1024).toFixed(1)} MB
 										</div>
 									</div>
-									<Link to={`/read/${doc.fingerprint}`}>
+									<Link to={`/read/${document.id}`}>
 										<Button variant="secondary">読む</Button>
 									</Link>
 								</li>

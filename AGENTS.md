@@ -15,10 +15,11 @@ the GitHub Issue or PR.
 readmark is a **local-first reading app for the browser**. The MVP
 handles PDF. EPUB / Markdown / text are post-MVP.
 
-readmark is **not part of the my-web-2026 monorepo**. It is a sibling
-repository intended to be embedded by my-web-2026 as a "Tool" via an
-`<iframe>` to a stable URL (see ADR-0006). The two repos do **not**
-share source, dependencies, design tokens, or CI.
+readmark is **not part of the my-web-2026 monorepo**. It is a
+sibling repository. Integration with my-web-2026 (link, embed,
+same-origin co-host, or none) is a downstream decision — see
+ADR-0006. The two repos do **not** share source, dependencies,
+design tokens, or CI.
 
 ## 1. Language policy
 
@@ -42,9 +43,9 @@ share source, dependencies, design tokens, or CI.
 - **No new Python scripts.** (project-init policy.)
 - **Containerfile** — never `Dockerfile`.
 
-Do not add a new dependency to a category that already has one. If a
-choice is required (e.g. "should we use TanStack Query?"), open an
-ADR ticket before installing.
+Do not add a new dependency to a category that already has one. If
+a choice is required (e.g. "should we use TanStack Query?"), open
+an ADR ticket before installing.
 
 ## 3. Architecture boundary (do not bleed)
 
@@ -55,12 +56,11 @@ ownership**, not the rule that creates it.
   pdf.js imports here.
 - `src/storage/` — Dexie schema + repositories. The only folder
   that imports `dexie`.
-- `src/reader/` — reader contract + per-format implementations. PDF
-  lives at `src/reader/pdf/`. **Only this folder imports
+- `src/reader/` — reader contract + per-format implementations.
+  PDF lives at `src/reader/pdf/`. **Only this folder imports
   `pdfjs-dist`.**
-- `src/annotation/` — W3C-style anchor types + (re-)anchoring
-  logic. Format-agnostic; format-specific details come from the
-  reader.
+- `src/annotation/` — anchor types + (re-)anchoring logic.
+  Format-agnostic; format-specific details come from the reader.
 - `src/library/` — library flows (import, list, dedupe).
 - `src/ui/` — React screens. Imports from every layer above, but
   does not bypass repositories to hit Dexie directly.
@@ -77,6 +77,41 @@ Forbidden:
 - Generic `src/components/`, `src/hooks/`, `src/utils/` folders.
   Add code to the owner that needs it.
 
+## 3a. Identity model (recap of ADR-0002)
+
+readmark has three concepts, not two — **do not collapse them**:
+
+- **`Document`** — logical book. `id` is a `DocumentId` (UUID).
+  Holds user-facing identity (title / author / language) and book-
+  level timestamps (`importedAt`, `lastReadAt`). Source-specific
+  fields do NOT belong here.
+- **`DocumentSource`** — physical file attached to a Document.
+  `sourceFingerprint` is a `SourceFingerprint` (SHA-256 of bytes).
+  Holds source-specific properties (`format`, `byteSize`,
+  `pageCount`, format-specific extras).
+- **`DocumentBlob`** — the bytes of one source. Stored separately
+  from `DocumentSource` so eviction can drop bytes without
+  touching metadata or reading state.
+
+Reading state is keyed by **both** keys for everything that has a
+position:
+
+- `ReadingProgress`: composite PK `[documentId, sourceFingerprint]`.
+- `Bookmark` / `Highlight`: `id` + `(documentId, sourceFingerprint,
+  pageIndex)`.
+- `Note` is a discriminated union:
+  - `FreeNote` — no position, no source.
+  - `PositionedNote` — carries `sourceFingerprint` + `pageIndex`.
+
+`Document.lastReadAt` is the only reading-state-shaped field on
+Document — opening any source counts.
+
+In MVP one `Document` ⇒ one `DocumentSource`. The schema already
+supports 1:N; a future "merge two scans of the same book" / "attach
+an EPUB alongside the PDF" UI is a thin layer over the repository,
+not a storage rewrite. Cross-source progress migration is future
+re-anchor work.
+
 ## 4. Quality gates
 
 Three deterministic entry points (mirrors project-init's
@@ -89,10 +124,11 @@ quality-gate shape):
 - CI workflow `.github/workflows/ci.yml` runs `validate:fast` on
   PRs and push to `main` / `release-*` / numeric branches.
 
-Coverage thresholds are not enforced (project-init ADR-0007 of the
-upstream). Do not invent them to "look protected".
+Coverage thresholds are not enforced (project-init ADR-0007 of
+the upstream). Do not invent them to "look protected".
 
-## 5. Sprint workflow (mirrors rebuildup/project-init / my-web-2026)
+## 5. Sprint workflow (mirrors rebuildup/project-init /
+   my-web-2026)
 
 - One Issue = one branch = one PR. Branch name is just the issue
   number (`42`, no `issue/` prefix).
@@ -107,10 +143,14 @@ upstream). Do not invent them to "look protected".
 ## 6. Local-first invariants (recap)
 
 - No server runtime. No backend language in scope.
-- No telemetry in the default build.
-- No `localStorage` for documents or large payloads. IndexedDB only.
+- No telemetry in the default build. (No `READMARK_TELEMETRY` env
+  var — YAGNI. Add it back if / when telemetry is actually
+  implemented.)
+- No `localStorage` for documents or large payloads. IndexedDB
+  only.
 - Reading state and document source are separate stores keyed by
-  content fingerprint (ADR-0002).
+  `DocumentId` (ADR-0002). Source bytes are keyed by
+  `SourceFingerprint`.
 
 ## 7. Decision precedence
 
@@ -119,7 +159,8 @@ In order:
 1. This `AGENTS.md` (always-on invariants).
 2. `docs/adr/*` (long-lived decisions).
 3. Coherent existing implementation in this repo.
-4. Current official framework guidance (Vite, React, pdf.js, Dexie).
+4. Current official framework guidance (Vite, React, pdf.js,
+   Dexie).
 5. Ecosystem convention.
 6. Local best judgment.
 
@@ -129,6 +170,8 @@ violating an invariant.
 ## 8. Secrets
 
 - `.env`, `.env.*` are gitignored. **Do not commit secrets.**
+- `.env.example` is the canonical env schema. See
+  `docs/development.md` §4.
 - A future ticket may integrate Infisical per project-init
   ADR-0023. Out of scope for MVP.
 
@@ -143,7 +186,8 @@ violating an invariant.
 | Worktree / branch ops      | `worktree-workflow`          |
 | Recovery after interruption | `agent-recovery`           |
 
-Install with `bunx skills add rebuildup/project-init --skill <name>`.
+Install with `bunx skills add rebuildup/project-init --skill
+<name>`.
 
 ## 10. Out of scope (do not start)
 
@@ -154,6 +198,10 @@ Install with `bunx skills add rebuildup/project-init --skill <name>`.
 - Writing annotations back into the PDF
 - Covering the bundle with Tailwind / shadcn
 - A backend runtime of any kind
+- Locking the my-web-2026 integration shape (deferred per
+  ADR-0006)
+- Telemetry / crash reporting (excluded per ADR-0001; add when
+  actually built)
 
 ## 11. Recovery
 
