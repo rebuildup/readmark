@@ -12,23 +12,27 @@
  *   - Page rendering / text extraction — see `pdf-page.ts` /
  *     `pdf-text-layer.ts`.
  *
- * Why a side-effect import, not an explicit `init()`:
- *   - Other modules in `src/reader/pdf/` need pdf.js's worker to
- *     be configured BEFORE they call any pdf.js API. A side-effect
- *     import guarantees "by the time this module finishes loading,
- *     the worker URL is set."
- *   - The function is still exported (`setupPdfWorker()`) for
- *     tests and for callers that want to assert init has run.
+ * Why this module uses a fire-and-forget side-effect import:
+ *   - Modules in `src/reader/pdf/` that call pdf.js APIs need
+ *     the worker URL registered before they run. Importing this
+ *     module kicks off the registration; callers that actually
+ *     open a document must additionally `await setupPdfWorker()`
+ *     (see "Synchronization" below).
+ *   - The function is exported so tests can assert init has
+ *     run and so callers can await when timing matters.
  *
- * Why this no longer relies on synchronous module evaluation:
+ * Synchronization (the actual guarantee):
  *   - `setupPdfWorker()` is `async` and lazily imports
- *     `pdfjs-dist`. We CANNOT promise "by the time this module
- *     finishes loading, the URL is set" any more — only that the
- *     fire-and-forget call has been *issued*.
+ *     `pdfjs-dist`. The side-effect import only *issues* the
+ *     registration; the worker URL is set on `GlobalWorkerOptions`
+ *     only when the dynamic import resolves.
  *   - Callers that touch pdf.js APIs MUST `await setupPdfWorker()`
- *     first. `loadPdfDocument()` does this in its browser path.
- *     The Node path skips the call entirely (legacy build is
- *     worker-free).
+ *     before their first `getDocument()`. `loadPdfDocument()`
+ *     does this in its browser path. The Node path skips the
+ *     call entirely (legacy build is worker-free).
+ *   - In other words: importing this module is necessary but not
+ *     sufficient; `loadPdfDocument()` is the synchronization
+ *     point.
  *
  * Why idempotent (the `initialized` flag):
  *   - Module-graph re-evaluation under HMR / Vitest can run the
