@@ -112,6 +112,77 @@ an EPUB alongside the PDF" UI is a thin layer over the repository,
 not a storage rewrite. Cross-source progress migration is future
 re-anchor work.
 
+## 3b. Annotation anchor model (recap of ADR-0007)
+
+readmark has TWO concepts of "position", and they are NOT the
+same type:
+
+- **`Anchor<P>`** (`src/domain/annotation/anchor.ts`) — a
+  text-region annotation position. Used by `Highlight.anchor`,
+  `PositionedNote.anchor`, and (optionally)
+  `Bookmark.anchor`. Format-agnostic outer contract
+  (`format` + opaque `payload`); the format-specific reader
+  fills in the payload shape (`PdfAnchor` for PDF MVP, future
+  EPUB CFI / Markdown line range / text char-offset).
+  **Re-anchored on reopen** — quote-based recovery for PDF,
+  with stale fallback to stored rects.
+- **`DocumentPosition`** (`src/domain/document.ts`) — a sub-page
+  navigation pointer. Used by `ReadingProgress.position` and
+  `Bookmark.position` for "scroll to here" on reopen. Format-
+  agnostic opaque blob (PDF scroll offset, EPUB CFI, …). **NOT
+  re-anchored** — zoom, rotation, and renderer changes can all
+  invalidate it; the MVP contract is "back to this page", not
+  "back to this scroll offset".
+
+For PDF specifically (MVP):
+
+- **`quote` is canonical / recovery**, **`rects` is display**.
+  Both are stored. On open, the reader searches the page's text
+  layer for the quote; if found, rects are refreshed from glyph
+  geometry. If not found, the stored rects are kept and the
+  anchor is flagged "stale" in the UI.
+- **Single page only.** Cross-page selections are two anchors.
+- **Exact match only.** No fuzzy / whitespace / hyphenation
+  handling in MVP.
+- **Rects are in raw PDF user-space** (1/72 inch, untransformed).
+  The reader maps to viewport-space at render time, applying
+  the same runtime rotation + zoom transform that pdf.js applies
+  to the page itself. Storing in raw user-space means runtime
+  rotation does NOT invalidate stored rects — highlights stay
+  aligned at any rotation angle.
+
+`Bookmark.anchor` is `Anchor | null` (optional). A bookmark can
+be either a "pin this page" (no selection, `anchor: null`) or a
+"this specific text on this page" (selection-based,
+`anchor: Anchor`). The MVP must support the former — users add
+bookmarks while reading without making a selection. Forcing a
+selection would block the common case. `pageIndex` is the only
+required positional field.
+
+Generic UI never inspects `Anchor.payload`. It persists and
+routes the anchor opaquely. The format-specific reader casts
+through TWO guards at the boundary:
+
+```ts
+if (isAnchorOfFormat(anchor, 'pdf') && isPdfAnchor(anchor)) {
+  // safe to read anchor.payload.rects / .quote / .page
+}
+```
+
+- `isAnchorOfFormat` (domain-side) reads the `format` field
+  only; returns `boolean`. It does NOT prove the payload is
+  well-formed.
+- `isPdfAnchor` (PDF-side, `src/reader/pdf/anchor.ts`) does
+  full structural validation of the payload and narrows to
+  `Anchor<PdfAnchor>`.
+
+This two-guard pattern is mandatory. A single
+`isAnchorOfFormat<PdfAnchor>` would lie about payload
+well-formedness and is rejected by code review. Adding EPUB /
+Markdown / text is a new `payload` type + new `is<Format>Anchor`
+guard at `src/reader/<format>/anchor.ts` — no change to
+`domain/`, `storage/`, or generic UI.
+
 ## 4. Quality gates
 
 Three deterministic entry points (mirrors project-init's
@@ -219,3 +290,14 @@ files.
 - `docs/release.md` — version / release process.
 - `docs/troubleshooting.md` — known gotchas.
 - rebuildup/project-init — meta-template this repo follows.
+
+## 13. ADR index
+
+- ADR-0001 — local-first invariants.
+- ADR-0002 — Document / DocumentSource / DocumentBlob separation.
+- ADR-0003 — format-agnostic document model.
+- ADR-0004 — PDF renderer isolation.
+- ADR-0005 — IndexedDB persistence strategy.
+- ADR-0006 — deployment / my-web-2026 integration.
+- ADR-0007 — PDF annotation anchor model (`Anchor<P>` outer +
+  `PdfAnchor` payload; quote canonical, rects display).
