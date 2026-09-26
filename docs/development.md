@@ -64,6 +64,36 @@ MVP で必要な env 変数は 1 つだけ：
 いるため、YAGNI に従い schema を膨らませない。必要になった時点で
 ADR と一緒に追加する。
 
+### `.env.example` の正本
+
+`.env.example` の正本内容は以下。`.env` は gitignore なので、
+開発を始める際に次の内容を repo root の `.env.example` に貼る：
+
+```dotenv
+# readmark — local development env schema.
+#
+# Copy this file to .env (gitignored) and edit as needed. The env
+# schema here is the canonical contract between local development
+# and the runtime; CI does not read .env files.
+#
+# Why so few variables?
+#   - MVP is local-first; no backend, no telemetry, no remote
+#     feature flags (ADR-0001, ADR-0003).
+#   - YAGNI: variables for unimplemented features belong with the
+#     ADR that introduces them. Adding `READMARK_TELEMETRY` or
+#     `READMARK_ENABLE_EPUB` here would imply those features are
+#     on the MVP roadmap — they are not.
+
+# When true, IndexedDB persistence is bypassed. Useful for
+# ephemeral preview / sandbox mode where every reload starts
+# from an empty library.
+READMARK_EPHEMERAL=false
+```
+
+CI は `.env.example` を参照しない（`.env*` を読みに行く step が
+ない）。schema が変わったら `.env.example` とこのセクションを同時に
+更新する。
+
 ## 5. 開発フロー
 
 1. Issue を立てる or 既存の Issue を自分にアサイン。

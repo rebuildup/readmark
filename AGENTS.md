@@ -171,7 +171,9 @@ violating an invariant.
 
 - `.env`, `.env.*` are gitignored. **Do not commit secrets.**
 - `.env.example` is the canonical env schema. See
-  `docs/development.md` §4.
+  `docs/development.md` §4. The MVP schema is `READMARK_EPHEMERAL`
+  only. Variables for unimplemented features do not exist; they
+  land here together with the ADR that introduces them.
 - A future ticket may integrate Infisical per project-init
   ADR-0023. Out of scope for MVP.
 
