@@ -119,12 +119,13 @@ same type:
 
 - **`Anchor<P>`** (`src/domain/annotation/anchor.ts`) — a
   text-region annotation position. Used by `Highlight.anchor`,
-  `PositionedNote.anchor`, and `Bookmark.anchor`. Format-
-  agnostic outer contract (`format` + opaque `payload`); the
-  format-specific reader fills in the payload shape (`PdfAnchor`
-  for PDF MVP, future EPUB CFI / Markdown line range / text
-  char-offset). **Re-anchored on reopen** — quote-based recovery
-  for PDF, with stale fallback to stored rects.
+  `PositionedNote.anchor`, and (optionally)
+  `Bookmark.anchor`. Format-agnostic outer contract
+  (`format` + opaque `payload`); the format-specific reader
+  fills in the payload shape (`PdfAnchor` for PDF MVP, future
+  EPUB CFI / Markdown line range / text char-offset).
+  **Re-anchored on reopen** — quote-based recovery for PDF,
+  with stale fallback to stored rects.
 - **`DocumentPosition`** (`src/domain/document.ts`) — a sub-page
   navigation pointer. Used by `ReadingProgress.position` and
   `Bookmark.position` for "scroll to here" on reopen. Format-
@@ -143,15 +144,44 @@ For PDF specifically (MVP):
 - **Single page only.** Cross-page selections are two anchors.
 - **Exact match only.** No fuzzy / whitespace / hyphenation
   handling in MVP.
-- **Rects are in PDF user-space** (1/72 inch). The reader maps
-  to viewport-space at render time.
+- **Rects are in raw PDF user-space** (1/72 inch, untransformed).
+  The reader maps to viewport-space at render time, applying
+  the same runtime rotation + zoom transform that pdf.js applies
+  to the page itself. Storing in raw user-space means runtime
+  rotation does NOT invalidate stored rects — highlights stay
+  aligned at any rotation angle.
+
+`Bookmark.anchor` is `Anchor | null` (optional). A bookmark can
+be either a "pin this page" (no selection, `anchor: null`) or a
+"this specific text on this page" (selection-based,
+`anchor: Anchor`). The MVP must support the former — users add
+bookmarks while reading without making a selection. Forcing a
+selection would block the common case. `pageIndex` is the only
+required positional field.
 
 Generic UI never inspects `Anchor.payload`. It persists and
-routes the anchor opaquely; only the format-specific reader
-casts to `Anchor<PdfAnchor>` to access the typed payload.
-Adding EPUB / Markdown / text is a new `payload` type at
-`src/reader/<format>/anchor.ts` — no change to `domain/`,
-`storage/`, or generic UI.
+routes the anchor opaquely. The format-specific reader casts
+through TWO guards at the boundary:
+
+```ts
+if (isAnchorOfFormat(anchor, 'pdf') && isPdfAnchor(anchor)) {
+  // safe to read anchor.payload.rects / .quote / .page
+}
+```
+
+- `isAnchorOfFormat` (domain-side) reads the `format` field
+  only; returns `boolean`. It does NOT prove the payload is
+  well-formed.
+- `isPdfAnchor` (PDF-side, `src/reader/pdf/anchor.ts`) does
+  full structural validation of the payload and narrows to
+  `Anchor<PdfAnchor>`.
+
+This two-guard pattern is mandatory. A single
+`isAnchorOfFormat<PdfAnchor>` would lie about payload
+well-formedness and is rejected by code review. Adding EPUB /
+Markdown / text is a new `payload` type + new `is<Format>Anchor`
+guard at `src/reader/<format>/anchor.ts` — no change to
+`domain/`, `storage/`, or generic UI.
 
 ## 4. Quality gates
 

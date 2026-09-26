@@ -30,6 +30,15 @@
  * (scroll offset, CFI, …) used by ReadingProgress / Bookmark for
  * "scroll to here" on reopen. `Anchor` is a text-region annotation
  * position. See ADR-0007 for the full split.
+ *
+ * IMPORTANT — payload validation lives in the format-specific
+ * layer, NOT here. `isAnchorOfFormat` is a discriminator check on
+ * the `format` field only. A format-specific guard (e.g.
+ * `isPdfAnchor` in `reader/pdf/anchor.ts`) must validate the
+ * payload shape before any payload field is read. Returning
+ * `anchor is Anchor<PdfAnchor>` from this layer would be a lie —
+ * the `format` string is not enough to prove the payload is
+ * well-formed.
  */
 
 import type { DocumentFormat } from '../document.ts';
@@ -42,7 +51,31 @@ export interface Anchor<P = unknown> {
 }
 
 /** Type guard: was this anchor produced by the given format's
- *  reader? */
-export function isAnchorOfFormat<P>(anchor: Anchor, format: DocumentFormat): anchor is Anchor<P> {
+ *  reader?
+ *
+ *  Reads the `format` field only — does NOT validate that the
+ *  payload has the right shape for that format. A malformed /
+ *  older-version / hand-edited payload from storage will pass
+ *  this check.
+ *
+ *  Return type is `boolean` (not `anchor is Anchor<P>`) on
+ *  purpose: at the domain layer we cannot know what the right
+ *  payload shape is for each format, so we cannot honestly narrow
+ *  `payload` to a typed shape here. Returning a typed guard
+ *  (`anchor is Anchor<PdfAnchor>`) would be a lie — it would
+ *  convince callers that they can read payload fields when in
+ *  fact only the format string was verified.
+ *
+ *  Callers that need typed access to `payload` MUST use a
+ *  format-specific guard, e.g.:
+ *
+ *      if (isAnchorOfFormat(anchor, 'pdf') && isPdfAnchor(anchor)) {
+ *        // safe to read anchor.payload.rects etc.
+ *      }
+ *
+ *  The format-specific guard lives in the format-specific layer
+ *  (`isPdfAnchor` at `reader/pdf/anchor.ts`). Domain code does
+ *  not know what PDF / EPUB / Markdown payloads look like. */
+export function isAnchorOfFormat(anchor: Anchor, format: DocumentFormat): boolean {
 	return anchor.format === format;
 }

@@ -53,6 +53,22 @@
  *     reader fills in the right shape. Generic UI never inspects
  *     the anchor payload — it just hands the object back to the
  *     reader (or persists it opaquely).
+ *
+ * Why `Bookmark.anchor` is optional but `pageIndex` is required:
+ *   - A bookmark can be either:
+ *     (a) "pin this page" — no text selection, just remember the
+ *         page. `anchor: null`.
+ *     (b) "this specific text on this page" — bookmark on a
+ *         selection. `anchor: Anchor`.
+ *   - The MVP UI must support (a) because users add bookmarks
+ *     while reading without making a selection. Forcing a
+ *     selection would block the common case.
+ *   - `pageIndex` is the only required positional field. The
+ *     `position` sub-page pointer is optional (the reader may
+ *     not have a meaningful sub-page position to record).
+ *   - `Highlight.anchor` and `PositionedNote.anchor` are NOT
+ *     optional for the same reason — those annotations only
+ *     exist in response to a selection.
  */
 
 import type { Anchor } from './annotation/index.ts';
@@ -86,8 +102,12 @@ export interface Bookmark {
 	readonly documentId: DocumentId;
 	readonly sourceFingerprint: SourceFingerprint;
 	readonly pageIndex: PageIndex;
-	/** Text-region anchor (what text this bookmark is on). */
-	readonly anchor: Anchor;
+	/** Text-region anchor. `null` for page-only bookmarks
+	 *  ("pin this page" without a selection). Required for
+	 *  selection-based bookmarks ("this specific text on this
+	 *  page"). See the file-level note for why `pageIndex` is
+	 *  always required but `anchor` is optional. */
+	readonly anchor: Anchor | null;
 	/** Optional sub-page "scroll to here" pointer. */
 	readonly position: DocumentPosition | null;
 	readonly title: string;

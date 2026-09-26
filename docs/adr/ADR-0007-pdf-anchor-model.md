@@ -50,14 +50,37 @@ The annotation anchor is split into two layers:
 
 Domain types (`Highlight.anchor`, `PositionedNote.anchor`,
 `Bookmark.anchor`) carry `Anchor` (i.e. `Anchor<unknown>` to the
-generic layer). The format-specific reader casts at the boundary:
+generic layer). The format-specific reader validates the payload
+at the boundary:
 
 ```ts
-if (isAnchorOfFormat<PdfAnchor>(anchor, 'pdf')) {
+if (isAnchorOfFormat(anchor, 'pdf') && isPdfAnchor(anchor)) {
   // anchor is now Anchor<PdfAnchor>; safe to read payload.rects,
   // payload.quote, payload.page
 }
 ```
+
+Two guards in series, on purpose:
+
+- `isAnchorOfFormat(anchor, format)` is the **domain-side
+  discriminator**. It reads the `format` field only and returns
+  `boolean`. It does NOT prove the payload has the right shape.
+  The return type is `boolean` (not `anchor is Anchor<PdfAnchor>`)
+  because the domain layer cannot honestly narrow to a typed
+  payload — only the format string was checked.
+- `isPdfAnchor(anchor)` is the **PDF-side validator**. It is a
+  true type guard (`anchor is Anchor<PdfAnchor>`) and structurally
+  validates the payload shape (`page`, `rects`, `quote.exact`,
+  each `PdfRect`'s fields). It lives in `reader/pdf/anchor.ts`
+  because only that folder knows what a well-formed PDF anchor
+  looks like.
+
+The earlier draft of this ADR proposed a single
+`isAnchorOfFormat<PdfAnchor>(...)` that pretended to be both at
+once. That was a lie — the format field alone is not enough to
+claim the payload is well-formed, and the lie would have
+propagated into every call site that reads payload fields. The
+two-guard design is honest about what each layer knows.
 
 `DocumentPosition` stays as a separate concept (sub-page pointer).
 The two types are NOT interchangeable:
@@ -93,24 +116,60 @@ interface TextQuote {
 For PDF, both are stored, and they have distinct roles:
 
 - **`quote` is the canonical recovery key.** Matched against the
-  PDF's text layer on reopen. Robust to zoom, rotation, font
-  substitution, and renderer changes — none of these alter the
-  underlying glyphs in the PDF's text layer.
+  PDF's text layer on reopen. Robust to zoom, runtime rotation,
+  font substitution, and renderer changes — none of these alter
+  the underlying glyphs in the PDF's text layer.
 - **`rects` is the display position.** Drawn over the rendered
   page. One entry per visual line of the selection (multi-rect
   for cross-line selections).
 
 Rects alone are not a sufficient canonical key. They break under
-page rotation (the rotation transform is deferred — see "Out of
-MVP scope" below), under any layout change that re-flows the page
-(uncommon for PDFs but possible after OCR), and they don't help
-when the user opens the PDF in a different viewer at a different
-zoom and we need to redraw. Text quote is the only thing that
-genuinely identifies the text.
+any layout change that re-flows the page (uncommon for PDFs but
+possible after OCR), and they don't help when the user opens the
+PDF in a different viewer at a different zoom and we need to
+redraw. Text quote is the only thing that genuinely identifies
+the text.
 
 Quote alone is not a sufficient display — the reader needs to know
 where on the page to draw the highlight overlay. Rects give us
 that. Storing both is the right answer.
+
+### Zoom, rotation, and renderer changes — all supported by raw user-space rects
+
+Both runtime rotation and zoom are handled "for free" by storing
+rects in raw PDF user-space. The argument:
+
+- **Raw PDF user-space** is the coordinate system pdf.js exposes
+  via `getTextContent()`. It already accounts for the page's
+  NATIVE rotation (the `/Rotate` attribute on the page
+  dictionary). The page's native orientation is fixed at PDF
+  creation time.
+- **Runtime rotation** (the user spins the page 0/90/180/270 to
+  read a wide table; see `stores/ui-store.ts`) is a *viewport*
+  transform applied by pdf.js during render, on top of the
+  native orientation. It does NOT modify the user-space rects.
+- **Zoom** is a uniform scale on the viewport transform. Same
+  story.
+- **Renderer changes** (different pdf.js build, different
+  browser, different canvas backing) are also a viewport-only
+  concern. Glyphs come back from the PDF's text layer in the
+  same user-space regardless.
+
+Because we store rects in raw user-space, the reader applies the
+*same* viewport transform at render time that pdf.js applies to
+the page itself. Highlights therefore stay aligned under any
+runtime rotation or zoom without any extra math in the anchor
+code.
+
+The failure mode we explicitly avoid: caching viewport-space
+rects (i.e. pre-multiplying by the runtime rotation matrix).
+That WOULD make rotation invalidate stored rects. We don't do
+that. The text-layer extraction gives raw user-space coordinates
+and we use those directly.
+
+This is the reason #7's acceptance criterion ("zoom / rotation
+してもハイライト位置が一致する") is satisfiable in MVP without
+adding rotation-specific code to the anchor recovery algorithm.
 
 ### Recovery algorithm
 
@@ -125,7 +184,8 @@ On open, for each stored PDF anchor:
    - Display the new rects. The anchor is considered fresh.
 2. **If the text quote fails (exact match not found):**
    - Use the stored rects as-is for display. They may now be
-     off (page rotated, OCR corrected), but they are still the
+     off (the text was OCR-corrected, the PDF was re-encoded,
+     a glyph subset was substituted), but they are still the
      best available hint.
    - Flag the anchor as "stale" in the UI. Stale anchors appear
      with a marker; the user can manually reposition or delete
@@ -153,15 +213,10 @@ across page break"; that's future work.
 
 - **Cross-page anchors.** Two highlights instead.
 - **Fuzzy / approximate match.** Exact match only.
-- **Rotated-page rect math.** If the user rotates the page
-  after creating an anchor, the stored rects are stale; recovery
-  applies the rotation transform as a best-effort but does not
-  re-write the stored value. A future ticket handles the
-  rotation transform properly.
-- **Zoom-coupled rects.** Rects are in PDF user-space
-  (1/72 inch). The reader maps to viewport-space at render time.
-  No zoom is stored alongside the anchor.
-- **Image-only anchors** (anchors on figures, equations, tables
+- **Rotation / zoom of the viewport.** NOT in scope to handle
+  here — both are supported by storing rects in raw PDF
+  user-space. See "Zoom, rotation, and renderer changes" above
+  for why this works without any anchor-side math.- **Image-only anchors** (anchors on figures, equations, tables
   with no text). No text layer ⇒ no anchor. MVP renders fine,
   highlighting those regions is unsupported.
 - **Rotated rects / non-axis-aligned highlights.** No free-form
@@ -213,8 +268,14 @@ Negative / explicit costs:
 ## Alternatives considered
 
 - **Rects only (no text quote).** Discarded. Rects alone can't
-  identify the text; they drift under rotation, zoom-coupling,
-  and any future page-level change. Recovery becomes impossible.
+  identify the text; they would be the only thing left if the
+  PDF is re-encoded, OCR-corrected, or has its glyph subset
+  replaced. Even raw user-space rects (which are stable under
+  runtime rotation and zoom, per "Zoom, rotation, and renderer
+  changes" above) still break under those higher-level changes.
+  Text quote is the only thing that genuinely identifies the
+  text across re-encodes. Recovery becomes impossible without
+  it.
 - **Text quote only (no rects).** Discarded. The reader has to
   re-derive rects on every render, paying text-extraction cost
   per highlight even when nothing changed. Caching rects is a

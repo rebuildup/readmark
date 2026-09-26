@@ -108,13 +108,38 @@ Two-layer model (ADR-0007):
   `src/reader/pdf/anchor.ts`. EPUB / Markdown / text add their
   own at `src/reader/<format>/anchor.ts`.
 
-For PDF MVP, `PdfAnchor` carries both `rects` (PDF user-space
-display) and `quote` (text + prefix + suffix context).
-**`quote` is the canonical recovery key**; **`rects` is the
-display position**. On reopen, the reader searches the page's
-text layer for the quote and refreshes rects from glyph geometry
-when found; if not found, the stored rects are kept and the
-anchor is flagged "stale" in the UI.
+For PDF MVP, `PdfAnchor` carries both `rects` (raw PDF
+user-space display) and `quote` (text + prefix + suffix
+context). **`quote` is the canonical recovery key**;
+**`rects` is the display position**. On reopen, the reader
+searches the page's text layer for the quote and refreshes
+rects from glyph geometry when found; if not found, the stored
+rects are kept and the anchor is flagged "stale" in the UI.
+
+Rects live in raw PDF user-space (1/72 inch, untransformed).
+Runtime rotation and zoom are applied at render time, not
+stored alongside the anchor — so both are supported in MVP
+without any anchor-side math.
+
+The format-specific reader uses TWO guards at the boundary to
+read payload fields:
+
+```ts
+if (isAnchorOfFormat(anchor, 'pdf') && isPdfAnchor(anchor)) {
+  // safe to read anchor.payload.rects / .quote / .page
+}
+```
+
+- `isAnchorOfFormat` (domain-side) reads the `format` field
+  only; returns `boolean`. It does NOT prove the payload is
+  well-formed.
+- `isPdfAnchor` (PDF-side, `src/reader/pdf/anchor.ts`) does
+  full structural validation of the payload and narrows to
+  `Anchor<PdfAnchor>`.
+
+A single `isAnchorOfFormat<PdfAnchor>` is rejected by code
+review — the format field alone is not enough to claim the
+payload is well-formed.
 
 `Anchor` is distinct from `DocumentPosition`
 (`src/domain/document.ts`) — `DocumentPosition` is the sub-page
