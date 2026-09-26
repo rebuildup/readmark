@@ -1,26 +1,47 @@
 /**
  * readmark — format-agnostic document model.
  *
- * The Document is the SoT for "what is in the user's library". The actual
- * file bytes live in storage/ as a Blob keyed by `fingerprint`. All
- * reading-state is keyed by `fingerprint`, never by `id`, so re-importing
- * the same PDF produces a stable identity.
+ * Two layers of identity, deliberately separated:
  *
- * Why content hash and not (e.g.) a UUID or filename?
- *   - Re-importing the same file must dedupe (ADR-0002).
- *   - Filenames and `/info` metadata are mutable in PDFs.
- *   - SHA-256 of the raw bytes is collision-resistant for our purposes.
+ *   - `DocumentId`     — LOGICAL identity. A UUID minted on first import.
+ *                        Survives re-imports of the same logical book.
+ *                        Future enhancement: multiple physical sources
+ *                        (e.g. "old PDF scan" + "new EPUB") can share
+ *                        one DocumentId via a "merge" UI (out of MVP
+ *                        scope). All reading state is keyed by this.
+ *
+ *   - `SourceFingerprint` — PHYSICAL identity. SHA-256 of the raw bytes.
+ *                        Stable only for the same bytes. Changes when the
+ *                        file is re-encoded, OCR-corrected, or updated.
+ *                        Highlights are keyed by (DocumentId,
+ *                        SourceFingerprint, anchor) because a highlight is
+ *                        a position in specific bytes.
+ *
+ * In MVP, one DocumentId always maps to exactly one source. The split is
+ * forward-looking: today's import flow can ignore `id` (treat it as equal
+ * to `sourceFingerprint`) but tomorrow's "merge two scans of the same
+ * book" UI doesn't need to rewrite reading state.
+ *
+ * Why not SHA-256 of metadata + bytes (a "rich identity")?
+ *   - PDFs' `/info` metadata is mutable.
+ *   - Same book, different OCR passes → different bytes → different
+ *     fingerprint by design. The user (not the hash) decides whether
+ *     they're "the same book."
  *
  * Why is `format` a closed string and not just 'pdf'?
  *   - The MVP only handles PDF, but the storage / UI must not assume it
- *     (ADR-0003 — format-agnostic document model). EPUB / Markdown / text
- *     come later and re-use every boundary here.
+ *     (ADR-0003). EPUB / Markdown / text come later and re-use every
+ *     boundary here.
  */
 
 export type DocumentFormat = 'pdf' | 'epub' | 'markdown' | 'text';
 
-/** SHA-256 hex string of the raw document bytes. Stable across re-imports. */
-export type DocumentFingerprint = string & { readonly __brand: 'DocumentFingerprint' };
+/** LOGICAL identity. UUID v4. Minted once on first import of a source. */
+export type DocumentId = string & { readonly __brand: 'DocumentId' };
+
+/** PHYSICAL identity. SHA-256 hex of the raw document bytes. Stable only
+ *  for the same bytes. */
+export type SourceFingerprint = string & { readonly __brand: 'SourceFingerprint' };
 
 export interface DocumentMetadata {
 	/** Page count or equivalent chapter count. Optional — not all formats
@@ -37,7 +58,10 @@ export interface DocumentMetadata {
 }
 
 export interface Document {
-	readonly fingerprint: DocumentFingerprint;
+	/** Logical identity. Reading state is keyed by this. */
+	readonly id: DocumentId;
+	/** Physical identity. Tied to specific bytes; changes on re-encode. */
+	readonly sourceFingerprint: SourceFingerprint;
 	readonly format: DocumentFormat;
 	/** Size of the stored Blob in bytes. */
 	readonly byteSize: number;
@@ -48,10 +72,21 @@ export interface Document {
 	readonly metadata: DocumentMetadata;
 }
 
-/** Type guard so we can't pass arbitrary strings to fingerprint-typed APIs. */
-export function asDocumentFingerprint(hex: string): DocumentFingerprint {
-	if (!/^[0-9a-f]{64}$/.test(hex)) {
-		throw new Error(`Invalid document fingerprint: ${hex}`);
+// --- type guards ---------------------------------------------------------
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
+export function asDocumentId(uuid: string): DocumentId {
+	if (!UUID_RE.test(uuid)) {
+		throw new Error(`Invalid document id (expected UUID): ${uuid}`);
 	}
-	return hex as DocumentFingerprint;
+	return uuid as DocumentId;
+}
+
+export function asSourceFingerprint(hex: string): SourceFingerprint {
+	if (!SHA256_HEX_RE.test(hex)) {
+		throw new Error(`Invalid source fingerprint (expected SHA-256 hex): ${hex}`);
+	}
+	return hex as SourceFingerprint;
 }
