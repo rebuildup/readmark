@@ -15,14 +15,20 @@ readmark はファイルビューアではなく、読書アプリです。
 
 - 文書本体（PDF 等）と読書状態（最終閲覧位置・栞・ハイライト・メモ）は
   分離して管理します（[ADR-0002](./docs/adr/ADR-0002-document-source-and-reading-state-separation.md)）。
-- 文書は SHA-256 で識別するので、同じファイルを再 import しても読書状態が
-  失われません。
+- identity は 2 層に分かれます：
+  - **`DocumentId`**（論理的）— UUID。読書状態のキー。
+  - **`SourceFingerprint`**（物理的）— バイト列の SHA-256。ハイライト
+    のキー（特定のバイト列の中の位置だから）。
+  - MVP では 1:1。将来的に「同じ本の複数版を束ねる」UI を足せる形に
+    なっています。
 - 永続化はすべて IndexedDB（Dexie）。`localStorage` に大きなデータは
   入れません。
 - PDF レンダラーは `src/reader/pdf/` に閉じ込め、アプリの他の層は
   `pdfjs-dist` を直接 import しません
   （[ADR-0004](./docs/adr/ADR-0004-pdf-renderer-isolation.md)）。
-- ネットワーク・アカウント・サーバーは MVP に存在しません。
+- ネットワーク・アカウント・サーバ・バックエンドは MVP に存在しません。
+- my-web-2026 との統合方式（リンク / iframe / 同一origin）は意図的に
+  未決定です（[ADR-0006](./docs/adr/ADR-0006-deployment-and-integration-options.md)）。
 
 ## クイックスタート
 
@@ -68,7 +74,7 @@ readmark/
 │  ├─ main.tsx           # entry
 │  ├─ App.tsx            # router shell
 │  ├─ styles.css         # デザイントークン + 最小スタイル
-│  ├─ domain/            # format-agnostic types
+│  ├─ domain/            # format-agnostic types（Document / ReadingState）
 │  ├─ storage/           # Dexie スキーマ + repositories
 │  ├─ reader/            # reader 契約 + per-format 実装（pdf はここ）
 │  ├─ annotation/        # W3C-inspired anchor model
@@ -76,7 +82,7 @@ readmark/
 │  ├─ ui/                # React 画面
 │  ├─ stores/            # Zustand（UI state のみ）
 │  ├─ platform/          # navigator.storage 等の薄いラッパー
-│  ├─ lib/               # utilities
+│  ├─ lib/               # utilities（fingerprint.ts）
 │  └─ test/              # vitest setup
 ├─ public/
 │  └─ favicon.svg
@@ -100,13 +106,15 @@ readmark/
 10. 栞・ハイライト・メモの一覧
 11. 一覧から該当位置へのジャンプ
 
-含しない：
+含まない：
 
 - アカウント / サーバ / クラウド同期
 - 複数端末同期
 - PDF ファイル自体への annotation 書き込み
 - EPUB / Markdown / テキスト対応
 - AI 機能
+- テレメトリ
+- my-web-2026 との統合方式の固定
 
 ## 開発ルール
 
@@ -121,15 +129,16 @@ readmark/
 ## my-web-2026 との関係
 
 readmark は rebuildup/my-web-2026 リポジトリから独立した別リポジトリで
-開発します。最終的に my-web-2026 からは `<iframe>` で埋め込まれることを
-想定しています（[ADR-0006](./docs/adr/ADR-0006-tool-embed-contract.md)）。
+開発します。最終的にどう統合するか（リンク / iframe / 同一 origin）は
+意図的に未決定です（[ADR-0006](./docs/adr/ADR-0006-deployment-and-integration-options.md)）。
+readmark は単体で価値を持つ独立 Web アプリとして成立しています。
 
 両リポジトリは：
 
 - ソースを共有しません
 - デザイントークンを共有しません
 - CI を共有しません
-- release タグで同期されます
+- 同期されるタイミングもありません（明示的に切った）
 
 ## ライセンス
 

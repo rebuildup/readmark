@@ -18,14 +18,15 @@
 │                             ▼                     ▼              │
 │  ┌──────────────────────────────────────────────────────────────┐│
 │  │             Domain 層 (format-agnostic types)                 ││
-│  │   Document, DocumentFingerprint, ReadingProgress, Bookmark, …  ││
+│  │   DocumentId, SourceFingerprint, ReadingProgress, Bookmark,  ││
+│  │   Highlight, Note                                              ││
 │  └──────────────────────────────────────────────────────────────┘│
 │                             │                                     │
 │                             ▼                                     │
 │  ┌──────────────────────────────────────────────────────────────┐│
 │  │   Storage 層 (Dexie → IndexedDB)                              ││
-│  │   documents, documentBlobs, bookmarks, highlights, notes,      ││
-│  │   readingProgress                                              ││
+│  │   documents (id), documentBlobs (sourceFingerprint),           ││
+│  │   bookmarks/highlights/notes/readingProgress (documentId)      ││
 │  └──────────────────────────────────────────────────────────────┘│
 │                                                                   │
 └───────────────────────────────────────────────────────────────────┘
@@ -35,11 +36,6 @@
 ┌───────────────────────────────────────────────────────────────────┐
 │  CDN / static host  ◀──  nginx (Containerfile)                    │
 └───────────────────────────────────────────────────────────────────┘
-                              ▲
-                              │  <iframe src="https://readmark.<domain>/">
-┌───────────────────────────────────────────────────────────────────┐
-│  my-web-2026 (Tool consumer) — separate repo / separate origin     │
-└───────────────────────────────────────────────────────────────────┘
 ```
 
 Key points:
@@ -48,9 +44,8 @@ Key points:
   IndexedDB under one origin. There is no server-side runtime.
 - **No network in MVP.** The app makes no outbound requests during
   normal use.
-- **Tool consumer is a separate origin.** readmark cannot read
-  my-web-2026 state and vice versa. Communication is `postMessage`
-  only (none in MVP).
+- **Integration with my-web-2026 is intentionally undecided**
+  (ADR-0006). readmark is a standalone web app.
 
 ## 2. Layer contracts
 
@@ -58,15 +53,21 @@ Key points:
 
 - Format-agnostic types only.
 - No imports from React, Dexie, pdf.js, browser APIs.
-- Two files today: `document.ts`, `reading-state.ts`.
+- Two files today: `document.ts` (Document / DocumentId /
+  SourceFingerprint), `reading-state.ts` (ReadingProgress /
+  Bookmark / Highlight / Note).
 
 ### Storage layer (`src/storage/`)
 
 - The only folder that imports `dexie`.
 - Exports repositories (`documents-repo.ts`, …) and the schema
   (`db.ts`).
-- Schema is keyed by `DocumentFingerprint` for everything reading-
-  state-related; blobs are stored separately so they can be evicted
+- **Two-layer identity** (ADR-0002):
+  - `documents` keyed by `id` (DocumentId).
+  - `documentBlobs` keyed by `sourceFingerprint`.
+  - Reading state keyed by `documentId`. Highlights additionally
+    store `sourceFingerprint`.
+- Blob is stored separately from metadata so it can be evicted
   without losing reading state.
 
 ### Reader layer (`src/reader/`)
@@ -108,13 +109,15 @@ Key points:
 ## 3. Data flow — opening a document
 
 1. User clicks a document in the Library.
-2. UI calls `getDocumentBlob(fingerprint)` from the documents
-   repository.
-3. Repository reads from IndexedDB (`documentBlobs` table).
-4. UI hands the blob to the Reader (`PdfReader.open(blob)`).
-5. Reader returns a `ReaderHandle` that exposes pages and anchors.
-6. UI renders the Reader, passing the handle into React state.
-7. As the user scrolls / jumps, the Reader reports new positions
+2. UI navigates to `/read/:documentId`.
+3. ReaderScreen looks up the Document by `documentId`
+   (`getDocument(documentId)`).
+4. UI hands the resulting `SourceFingerprint` to
+   `getDocumentBlob(sourceFingerprint)` to fetch the bytes.
+5. UI hands the blob to the Reader (`PdfReader.open(blob)`).
+6. Reader returns a `ReaderHandle` that exposes pages and anchors.
+7. UI renders the Reader, passing the handle into React state.
+8. As the user scrolls / jumps, the Reader reports new positions
    and the UI calls `updateReadingProgress(...)` and
    `touchLastReadAt(...)`.
 
@@ -123,8 +126,9 @@ Key points:
 1. User selects text in a rendered PDF page.
 2. The Reader produces a `DocumentPosition` (PDF-specific shape,
    opaque to generic code) plus the selected string.
-3. UI calls `createHighlight({ fingerprint, pageIndex, anchor,
-   selectedText })` from the highlights repository.
+3. UI calls `createHighlight({ documentId, sourceFingerprint,
+   pageIndex, anchor, selectedText })` from the highlights
+   repository.
 4. Repository writes to the `highlights` table; the UI re-fetches
    and re-renders the highlight overlay.
 
@@ -144,13 +148,14 @@ Key points:
 | --------------------- | ------------------------------------------------------- |
 | EPUB                  | New `reader/epub/` impl behind the same `Reader` contract. |
 | Markdown              | New `reader/markdown/` impl.                            |
+| "Merge two sources under one DocumentId" UI | New `library/document-merge.ts` flow. Schema already supports it. |
 | Sync                  | New `storage/sync/` adapter on top of repositories.     |
 | Export reading state  | New `export/` folder; consumes repos as read-only.      |
-| `<postMessage>` host  | New `platform/post-message.ts`; both sides opt in.      |
+| Integration with my-web-2026 | Deferred per ADR-0006. Pick a shape when there's evidence. |
 
 Each extension is additive; none require touching unrelated folders.
 
 ## 7. References
 
 - ADRs in `docs/adr/`.
-- `AGENTS.md` §3 (architecture boundary).
+- `AGENTS.md` §3 (architecture boundary), §3a (identity model).
