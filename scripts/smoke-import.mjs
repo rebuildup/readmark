@@ -103,31 +103,81 @@ async function withPreview(fn) {
 	});
 	// Track actual child termination via the 'exit' event. We CANNOT
 	// use `proc.killed` for this — see the killPreview comment for
-	// why — so we set a marker on the object itself.
+	// why — so we set markers on the object itself. `__rmStderr`
+	// captures Vite's stderr so we can surface it in fail() messages.
 	proc.__rmExited = false;
-	proc.on('exit', () => {
-		proc.__rmExited = true;
+	proc.__rmExitedCode = null;
+	proc.__rmStderr = '';
+	let sawListenUrl = false;
+	proc.stderr.on('data', (chunk) => {
+		proc.__rmStderr += chunk.toString();
 	});
-	// Wait for the server to be ready by polling the root URL. With
-	// `bun run preview --strictPort` (set in package.json), a busy
-	// 4173 fails fast rather than silently binding to a fallback port
-	// — so if this loop exhausts, the smoke attaches to a *new* server
-	// that readmark actually started.
-	for (let i = 0; i < 50; i++) {
-		try {
-			const res = await fetch(PREVIEW_URL);
-			if (res.ok) break;
-		} catch {
-			/* still starting */
+	proc.stdout.on('data', (chunk) => {
+		// Vite prints its bound URL exactly once, on successful bind:
+		//   "  ➜  Local:   http://127.0.0.1:4173/"
+		// Only our spawned child prints this line — a stale server
+		// on 4173 cannot. Decoupling readiness from `fetch(...)`'s
+		// 200 response closes the last false-green path: with
+		// `--strictPort`, our child exits non-zero on port collision
+		// before any listen URL is printed, so the ready predicate
+		// never fires.
+		const text = chunk.toString();
+		if (/Local:\s*http:\/\/127\.0\.0\.1:4173/.test(text)) {
+			sawListenUrl = true;
 		}
-		await wait(200);
-	}
+	});
+	proc.on('exit', (code) => {
+		proc.__rmExited = true;
+		proc.__rmExitedCode = code;
+	});
 	try {
+		// Ready loop: declare "ready" only when our child has printed
+		// its bound URL AND is still alive at the moment we declare.
+		// Polling every 100ms catches either side: the URL line shows
+		// up within ~1s on a healthy start, the exit event fires
+		// within ~1s when `--strictPort` rejects a busy 4173.
+		let ready = false;
+		for (let i = 0; i < 100; i++) {
+			if (proc.__rmExited) {
+				fail(
+					`preview server exited before ready ` +
+						`(code=${proc.__rmExitedCode}); ` +
+						`stderr:\n${proc.__rmStderr || '<empty>'}`,
+				);
+			}
+			if (sawListenUrl) {
+				ready = true;
+				break;
+			}
+			await wait(100);
+		}
+		if (!ready) {
+			if (proc.__rmExited) {
+				fail(
+					`preview server exited during ready loop ` +
+						`(code=${proc.__rmExitedCode}); ` +
+						`stderr:\n${proc.__rmStderr || '<empty>'}`,
+				);
+			}
+			fail(
+				`preview server did not print listen URL within 10s; ` +
+					`stderr tail:\n${proc.__rmStderr.slice(-400) || '<empty>'}`,
+			);
+		}
+		// Final guard for the brief race: URL printed, then the child
+		// dies before we hand off to `fn()`. Cheap to check.
+		if (proc.__rmExited) {
+			fail(
+				`preview server died immediately after printing listen URL ` +
+					`(code=${proc.__rmExitedCode}); ` +
+					`stderr:\n${proc.__rmStderr || '<empty>'}`,
+			);
+		}
 		return await fn();
 	} finally {
-		// `finally` is the only reliable cleanup path. `fail()` below
-		// throws instead of calling `process.exit`, so this finally
-		// always runs — see SmokeFailure comment.
+		// `finally` is the only reliable cleanup path. `fail()` throws
+		// `SmokeFailure` instead of calling `process.exit`, so this
+		// finally runs even on the early-exit branches above.
 		killPreview(proc);
 	}
 }
