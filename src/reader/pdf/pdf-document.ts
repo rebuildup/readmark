@@ -25,6 +25,19 @@
  *     is gated; the TYPE leaking via this file is reviewed
  *     case-by-case in #11 when the page handle is added).
  *
+ * Why we pick the legacy build under Node:
+ *   - pdf.js 5.x's main entry (`pdfjs-dist`) is browser-targeted
+ *     and expects to fetch the worker from a URL. Under Node
+ *     (Vitest) that URL is unresolvable and pdf.js warns
+ *     "Please use the `legacy` build in Node.js environments."
+ *   - The legacy build (`pdfjs-dist/legacy/build/pdf.mjs`)
+ *     contains the same parser, runs without a worker on the
+ *     main thread, and is the recommended entry for Node-side
+ *     tooling.
+ *   - In the browser we keep the main entry so the real worker
+ *     (set up by `pdf-worker.ts`) handles parsing off the main
+ *     thread.
+ *
  * In scope for #2:
  *   - `loadPdfDocument(bytes)` — the smoke-test entry point.
  *     #11 will replace this with the full Reader/ReaderHandle
@@ -36,9 +49,15 @@
  */
 
 import type { PDFDocumentProxy } from 'pdfjs-dist';
-import { getDocument } from 'pdfjs-dist';
 
 import { READMARK_PDF_WORKER_URL, setupPdfWorker } from './pdf-worker.ts';
+
+/** `true` when running under Node (not a browser DOM).
+ *
+ *  We cannot use `typeof window === 'undefined'` because Vitest
+ *  with happy-dom polyfills `window`. We use `process.versions.node`
+ *  which only Node sets — happy-dom does not. */
+const IS_NODE = typeof process !== 'undefined' && process.versions?.node !== undefined;
 
 /**
  * Load a PDF document from bytes. Returns the live proxy.
@@ -51,23 +70,69 @@ import { READMARK_PDF_WORKER_URL, setupPdfWorker } from './pdf-worker.ts';
  * readers. `PdfReaderHandle.close()` (#11) wraps this.
  *
  * Side effects:
- *   - Calls `setupPdfWorker()` for defense-in-depth. In normal
- *     use the worker is already initialized via the
- *     `pdf-worker.ts` side-effect import, but re-running is
- *     cheap and avoids "I forgot to import pdf-worker" bugs
- *     in callers.
+ *   - Calls `setupPdfWorker()` for defense-in-depth in the
+ *     browser. Under Node, the legacy build runs on the main
+ *     thread and the worker URL is irrelevant; we still touch
+ *     the constant so a bundler that tree-shakes the side-effect
+ *     import keeps the URL live for the browser path.
  */
 export async function loadPdfDocument(bytes: Uint8Array): Promise<PDFDocumentProxy> {
-	// Defense-in-depth: ensure worker URL is set even if a caller
-	// skipped the `pdf-worker.ts` side-effect import.
-	setupPdfWorker();
+	const pdfjsLib = await importPdfJs();
 
-	// Touch the constant so a bundler that tree-shakes the
-	// side-effect import still keeps the URL live. (Vite respects
-	// side effects in ESM imports, but this guard documents the
-	// dependency.)
-	void READMARK_PDF_WORKER_URL;
+	// Browser: defense-in-depth. Node: legacy build runs without
+	// a worker, but `setupPdfWorker` is a no-op safe call (it just
+	// touches `GlobalWorkerOptions.workerSrc` on the unused entry).
+	if (!IS_NODE) {
+		await setupPdfWorker();
+		void READMARK_PDF_WORKER_URL;
+	}
 
-	const loadingTask = getDocument({ data: bytes });
-	return await loadingTask.promise;
+	const loadingTask = pdfjsLib.getDocument({ data: bytes });
+	try {
+		return await loadingTask.promise;
+	} catch (cause: unknown) {
+		// `loadingTask.promise` rejects before any `PDFDocumentProxy`
+		// is returned, so callers cannot `doc.destroy()` the
+		// failed load themselves. The `PDFDocumentLoadingTask`
+		// itself owns the worker transport and any partial
+		// document state; calling `destroy()` releases them.
+		// Without this, a burst of bad-PDF imports leaks workers
+		// and stalls the browser tab.
+		try {
+			await loadingTask.destroy();
+		} catch {
+			// destroy() on a failed task is best-effort. Swallow
+			// any secondary failure so the original error reaches
+			// the caller unmodified.
+		}
+		throw cause;
+	}
+}
+
+/**
+ * Resolve the pdf.js entry point appropriate for the current
+ * environment. Kept in its own function so the dynamic-import
+ * shape is obvious and the `@vite-ignore` comment (which prevents
+ * Vite from rewriting the specifier) is right next to it.
+ *
+ * Why `@vite-ignore`:
+ *   - Without it, Vite tries to bundle `pdfjs-dist/legacy/build/
+ *     pdf.mjs` into the production browser bundle, which:
+ *       (a) bloats the bundle with code the browser never runs,
+ *       (b) fails to resolve under Vite because the `legacy/`
+ *           subpath is not exported from pdfjs-dist's `exports`
+ *           map (only `pdfjs-dist` is).
+ *   - `@vite-ignore` makes Vite leave the specifier alone; the
+ *     native ESM resolver then loads the file in Node. In the
+ *     browser, this branch is dead (we pick the main entry) so
+ *     the specifier is never reached.
+ */
+async function importPdfJs(): Promise<typeof import('pdfjs-dist')> {
+	if (IS_NODE) {
+		// `/* @vite-ignore */` is the documented Vite hint for
+		// "do not rewrite this dynamic import at build time".
+		const mod = await import(/* @vite-ignore */ 'pdfjs-dist/legacy/build/pdf.mjs');
+		return mod as unknown as typeof import('pdfjs-dist');
+	}
+	return await import('pdfjs-dist');
 }

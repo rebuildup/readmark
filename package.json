@@ -12,7 +12,7 @@
 	"scripts": {
 		"dev": "vite",
 		"build": "tsc -b --noCheck && vite build",
-		"preview": "vite preview --host 127.0.0.1 --port 4173",
+		"preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
 		"typecheck": "tsc -b --noEmit",
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",
@@ -41,6 +41,8 @@
 		"@types/react-dom": "^19.3.0",
 		"@vitejs/plugin-react": "^5.2.0",
 		"happy-dom": "^20.14.5",
+		"pdf-lib": "^1.17.1",
+		"playwright": "^1.63.0",
 		"typescript": "^5.9.3",
 		"vite": "^7.3.6",
 		"vitest": "^3.2.7"

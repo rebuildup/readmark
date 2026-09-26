@@ -120,14 +120,26 @@ export interface ImportOptions {
 	readonly sourceMetadata?: SourceMetadata;
 }
 
+/** The identity pair returned by `importDocument`. Callers that
+ *  need both keys (the library import flow in #3, e.g. to show
+ *  "this is the same file as X") get them in a single object so
+ *  we do not re-hash the blob after the IndexedDB commit. */
+export interface ImportResult {
+	readonly documentId: DocumentId;
+	readonly sourceFingerprint: SourceFingerprint;
+}
+
 /** Import (or re-import) a file. Idempotent by SourceFingerprint:
  *  re-importing the same bytes refreshes the source record and
- *  its blob. Returns the (preserved or minted) DocumentId. */
+ *  its blob. Returns the (preserved or minted) DocumentId plus
+ *  the physical SourceFingerprint (which the caller already
+ *  knows is the dedup key — we just return it so the caller
+ *  does not have to re-hash). */
 export async function importDocument(
 	blob: Blob,
 	format: DocumentFormat,
 	options: ImportOptions = {},
-): Promise<DocumentId> {
+): Promise<ImportResult> {
 	const sourceFingerprint = await fingerprintBlob(blob);
 	const now = Date.now();
 	const db = getDb();
@@ -181,7 +193,7 @@ export async function importDocument(
 		},
 	);
 
-	return id;
+	return { documentId: id, sourceFingerprint };
 }
 
 /** Bump `Document.lastReadAt`. Called by the reader whenever a

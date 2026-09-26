@@ -1,29 +1,54 @@
 /**
  * readmark — Library screen.
  *
- * MVP shell: lists the user's library and shows the import button
- * (disabled until the file picker is wired). The full import UI
- * lands in the first feature ticket after init.
- *
  * The library list is a JOIN over `documents` + their primary
  * `documentSources`, surfaced through `listLibrary()` as
  * `LibraryEntry`. We deliberately keep Document and DocumentSource
  * separate at the data layer; the join lives in the repository,
  * not in the screen.
+ *
+ * The screen owns only:
+ *   - The mount of `<DocumentImport>`.
+ *   - The trigger to re-fetch `listLibrary()` after an import
+ *     (so the new entry appears without a manual reload).
+ *
+ * The actual import flow (`extractPdfMetadata` → `importDocument`)
+ * lives in `src/library/import-document.ts`. The React shell for
+ * the file picker lives in `<DocumentImport>`.
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+
+import type { ImportSuccess } from '../library/import-document.ts';
 import type { LibraryEntry } from '../storage/documents-repo.ts';
 import { listLibrary } from '../storage/documents-repo.ts';
+import { DocumentImport } from './document-import.tsx';
 import { Button } from './primitives/button.tsx';
 
 export function LibraryScreen() {
 	const [entries, setEntries] = useState<readonly LibraryEntry[] | null>(null);
 
-	useEffect(() => {
-		listLibrary().then(setEntries).catch(console.error);
+	const refresh = useCallback(() => {
+		listLibrary()
+			.then(setEntries)
+			.catch((err: unknown) => {
+				console.error('listLibrary failed', err);
+				setEntries([]);
+			});
 	}, []);
+
+	useEffect(() => {
+		refresh();
+	}, [refresh]);
+
+	const handleImported = useCallback(
+		(_result: ImportSuccess) => {
+			// Re-fetch the library so the new entry shows up.
+			refresh();
+		},
+		[refresh],
+	);
 
 	return (
 		<div className="rm-app">
@@ -43,9 +68,7 @@ export function LibraryScreen() {
 					<p style={{ color: 'var(--rm-fg-muted)', marginTop: 0 }}>
 						ローカルに保持された文書のリスト。import で追加、クリックで読書状態を復元します。
 					</p>
-					<Button variant="primary" disabled aria-disabled="true">
-						PDF を import（MVP で有効化）
-					</Button>
+					<DocumentImport onImported={handleImported} />
 				</section>
 
 				<section>
