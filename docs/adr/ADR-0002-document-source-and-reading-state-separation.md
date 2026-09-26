@@ -47,55 +47,93 @@ them separate means:
 - Sync, when added, syncs only reading state (a few KB per
   document), not the document itself (often hundreds of MB).
 
-## Two layers of identity (added on review, 2026-09-26)
+## Two layers of identity, with three concepts (revised on review)
 
-After initial review we discovered one more reason to keep the
-separation crisp: **a single "fingerprint = identity" model
-collapses two things that should be different**.
+After initial review we discovered that the original "DocumentId +
+SourceFingerprint, one Document carries one source" model still
+collapsed two responsibilities that should be different. This ADR
+is the canonical model; `docs/architecture.md` and `AGENTS.md` §3a
+restate it.
 
-- `DocumentId` — LOGICAL identity. A UUID minted on first import.
-  Survives re-imports of the same logical book. Future enhancement:
-  multiple physical sources ("old PDF scan" + "new EPUB" of the
-  same book) can share one DocumentId via a "merge" UI.
-- `SourceFingerprint` — PHYSICAL identity. SHA-256 of the raw
-  bytes. Stable only for the same bytes. Changes on re-encode,
-  OCR correction, or any byte-level edit.
+### Three concepts
 
-Why we want both:
+1. **`Document`** — LOGICAL book. A reader's "this book in my
+   library." Survives re-imports and survives adding/removing
+   sources. Carries:
+   - `id` (`DocumentId`, UUID).
+   - User-facing identity (`metadata.title`, `metadata.author`,
+     `metadata.language`). Initial values come from the first
+     source's intrinsic metadata.
+   - Book-level timestamps (`importedAt`, `lastReadAt`).
 
-- **Re-downloads / OCR corrections / "metadata-only updated" PDFs**.
-  These produce different bytes (different `SourceFingerprint`)
-  but the user reads them as "the same book". Naively using the
-  fingerprint as identity would lose all reading state on each
-  update. With the split, the user can map both sources under one
-  `DocumentId` (future ticket).
-- **Multiple formats of the same book** (PDF + EPUB). The user might
-  read the PDF at home and the EPUB on a phone. Same `DocumentId`,
-  different `SourceFingerprint`. Highlights are scoped to one
-  source because they are positions in specific bytes; reading
-  progress can be scoped to the document and replayed per source.
-- **Highlights vs. reading progress**. Reading progress attaches
-  to the logical document — "I'm on page 47 of this book" — and
-  should survive byte changes. Highlights are positions in bytes and
-  must be tied to a specific source.
+2. **`DocumentSource`** — PHYSICAL source. One file attached to a
+   Document. Carries:
+   - `sourceFingerprint` (`SourceFingerprint`, SHA-256 of bytes).
+   - `documentId` (FK → Document).
+   - Source-specific properties (`format`, `byteSize`,
+     `importedAt`, `metadata.pageCount`,
+     `metadata.extras`).
 
-In MVP, one DocumentId always maps to exactly one source. The
-split is forward-looking: today's import flow uses the fingerprint
-as a dedup key but mints a fresh UUID; tomorrow's "merge two scans
-of the same book" UI does not need to rewrite any reading state.
+3. **`DocumentBlob`** — the bytes of one source. Stored separately
+   from `DocumentSource` so the bytes can be evicted under quota
+   pressure without touching metadata or reading state.
+
+### Why three concepts, not two
+
+- `Document` must NOT carry `format` / `byteSize` /
+  `sourceFingerprint` — those are properties of the file, not of
+  the book. Putting them on Document forces 1:1 in the schema and
+  blocks "same book, two formats" without a rewrite.
+- `DocumentSource` and `DocumentBlob` are separate tables keyed by
+  the same fingerprint so the bytes can be evicted independently
+  of the metadata. Eviction policy is future work; the
+  architectural invariant is "dropping `documentBlobs` rows is
+  safe."
+
+### Why every positional reading-state type carries `sourceFingerprint`
+
+A position is meaningless outside the specific bytes that produced
+it. PDF page 47 and EPUB "chapter 4, position 12" are NOT the same
+place even when they refer to the same logical book. So:
+
+- `ReadingProgress` — composite PK `[documentId, sourceFingerprint]`.
+  One row per source.
+- `Bookmark` — `id` + `(documentId, sourceFingerprint, pageIndex)`.
+- `Highlight` — `id` + `(documentId, sourceFingerprint, pageIndex)`.
+- `Note` is a discriminated union:
+  - `FreeNote` — no position, no source. Lives in the book.
+  - `PositionedNote` — carries `sourceFingerprint` + `pageIndex` +
+    `anchor`. The discriminator prevents a class of bugs where a
+    pageIndex leaks across sources.
+
+`Document.lastReadAt` is the only reading-state-shaped field on
+Document — "any source of this book was opened recently" is book-
+level. Everything else is per-source.
+
+### MVP is 1:1
+
+In MVP, one Document always owns exactly one DocumentSource. The
+schema already supports 1:N. The "merge two scans of the same
+book" / "attach an EPUB alongside the PDF" UX is a thin layer over
+the repository — no storage rewrite required.
 
 ## Decision
 
-readmark splits data into three stores with the following keys:
+readmark splits data into four logical stores with the following
+keys:
 
-1. **`documents` table** — metadata + DocumentId. Primary key is
-   `id` (UUID). Secondary index on `sourceFingerprint` for dedup.
-2. **`documentBlobs` table** — raw bytes, keyed by
-   `sourceFingerprint`. Future: same DocumentId may own multiple
-   `documentBlobs` rows. For MVP: 1:1 with `documents`.
-3. **Reading-state tables** (`readingProgress`, `bookmarks`,
-   `highlights`, `notes`) — all keyed by `documentId`. Highlights
-   additionally store `sourceFingerprint`.
+1. **`documents` table** — `Document` records. Primary key is `id`
+   (UUID). Metadata only — no bytes, no source-specific fields.
+2. **`documentSources` table** — `DocumentSource` records. Primary
+   key is `sourceFingerprint`. FK to `documents.id` via
+   `documentId`. Source-specific properties only.
+3. **`documentBlobs` table** — bytes, keyed by `sourceFingerprint`.
+   Evictable. The bytes' owner is looked up via `documentSources`.
+4. **Reading-state tables** (`readingProgress`, `bookmarks`,
+   `highlights`, `notes`) — all carry both `documentId` and
+   `sourceFingerprint` (except `FreeNote`, which carries neither).
+   Compound indexes enable one-read lookups by
+   `(documentId, sourceFingerprint, pageIndex)`.
 
 The document is **never written back to**. Specifically:
 
@@ -113,19 +151,21 @@ Positive:
   backup-able.
 - Adding a new format doesn't change the reading-state shape.
 - Future sync is reading-state-only.
-- The DocumentId / SourceFingerprint split is forward-compatible
-  with multi-source documents without a schema rewrite.
+- The Document ↔ DocumentSource split is forward-compatible with
+  multi-source documents without a schema rewrite.
+- Bytes are evictable independently of metadata.
 
 Negative / explicit costs:
 
-- If the document is evicted (browser data deleted), reading state
-  is orphaned. UX will surface this: "you have notes for X, but
-  the file is missing — re-import to recover."
+- If the bytes are evicted (browser data deleted), reading state
+  is orphaned. UX surfaces this: "you have notes for X, but the
+  file is missing — re-import to recover." (ReaderScreen's
+  `missing-blob` state.)
 - The user cannot open readmark state in another PDF reader.
   Trade-off is acceptable; export-to-PDF is a possible future
   ticket.
-- The split introduces a tiny bit more cognitive load: "two ids?"
-  Mitigated by the in-codebase narrative and `AGENTS.md` §3.
+- The model is more elaborate than "one Document = one file."
+  Mitigated by the in-codebase narrative and `AGENTS.md` §3a.
 
 ## Alternatives considered
 
@@ -136,12 +176,15 @@ Negative / explicit costs:
     doesn't grant.
   - Re-importing from a different path loses the sidecar.
   - Portability is solvable later with a one-shot export flow.
-- **Per-document annotation store keyed by UUID, not fingerprint.**
-  Rejected — re-imports must dedupe; fingerprint is the only
-  stable physical identity.
+- **`DocumentId` only, dedup by file metadata.** Rejected —
+  metadata is mutable; we need a fingerprint of bytes.
 - **`SourceFingerprint` only (no `DocumentId`).** Rejected on
   review — collapses logical and physical identity, loses reading
   state across re-encodes.
+- **`Document` with single `sourceFingerprint` column
+  (initial PR #17 v1).** Rejected on second-round review — still
+  forces 1:1 in the schema; reading-state types other than
+  Highlight silently rely on "the one source" without saying so.
 
 ## References
 

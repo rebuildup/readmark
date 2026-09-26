@@ -17,16 +17,20 @@
 │                             │                     │              │
 │                             ▼                     ▼              │
 │  ┌──────────────────────────────────────────────────────────────┐│
-│  │             Domain 層 (format-agnostic types)                 ││
-│  │   DocumentId, SourceFingerprint, ReadingProgress, Bookmark,  ││
-│  │   Highlight, Note                                              ││
+│  │   Domain 層 (format-agnostic types)                           ││
+│  │   Document / DocumentSource / DocumentBlob,                   ││
+│  │   ReadingProgress / Bookmark / Highlight /                    ││
+│  │   (FreeNote | PositionedNote)                                 ││
 │  └──────────────────────────────────────────────────────────────┘│
 │                             │                                     │
 │                             ▼                                     │
 │  ┌──────────────────────────────────────────────────────────────┐│
 │  │   Storage 層 (Dexie → IndexedDB)                              ││
-│  │   documents (id), documentBlobs (sourceFingerprint),           ││
-│  │   bookmarks/highlights/notes/readingProgress (documentId)      ││
+│  │   documents         — Document (id)                           ││
+│  │   documentSources   — DocumentSource (sourceFingerprint)      ││
+│  │   documentBlobs     — DocumentBlob (sourceFingerprint)        ││
+│  │   bookmarks / highlights / notes / readingProgress — keyed by ││
+│  │     (documentId, sourceFingerprint, …)                        ││
 │  └──────────────────────────────────────────────────────────────┘│
 │                                                                   │
 └───────────────────────────────────────────────────────────────────┘
@@ -53,22 +57,33 @@ Key points:
 
 - Format-agnostic types only.
 - No imports from React, Dexie, pdf.js, browser APIs.
-- Two files today: `document.ts` (Document / DocumentId /
-  SourceFingerprint), `reading-state.ts` (ReadingProgress /
-  Bookmark / Highlight / Note).
+- Three concept files today:
+  - `document.ts` — `Document` (logical), `DocumentSource`
+    (physical), `DocumentBlob` (bytes), identity types.
+  - `reading-state.ts` — `ReadingProgress`, `Bookmark`,
+    `Highlight`, `Note` (discriminated union).
 
 ### Storage layer (`src/storage/`)
 
 - The only folder that imports `dexie`.
-- Exports repositories (`documents-repo.ts`, …) and the schema
-  (`db.ts`).
-- **Two-layer identity** (ADR-0002):
-  - `documents` keyed by `id` (DocumentId).
-  - `documentBlobs` keyed by `sourceFingerprint`.
-  - Reading state keyed by `documentId`. Highlights additionally
-    store `sourceFingerprint`.
-- Blob is stored separately from metadata so it can be evicted
-  without losing reading state.
+- Exports the schema (`db.ts`) and repositories
+  (`documents-repo.ts`).
+- **Three identity-keyed tables** (ADR-0002):
+  - `documents` keyed by `id` (DocumentId) — metadata only.
+  - `documentSources` keyed by `sourceFingerprint` — source
+    metadata.
+  - `documentBlobs` keyed by `sourceFingerprint` — bytes. The
+    blob is never duplicated onto `documents`; the invariant is
+    "drop `documentBlobs` rows under quota pressure without
+    touching `documents` or reading-state."
+- Reading state is keyed by `(documentId, sourceFingerprint)`:
+  - `readingProgress` has composite PK
+    `[documentId+sourceFingerprint]`.
+  - `bookmarks` / `highlights` index on
+    `[documentId+sourceFingerprint+pageIndex]`.
+  - `notes` is a single table with a `kind` discriminator
+    (`free` | `positioned`). `FreeNote` rows have an empty
+    `sourceFingerprint` slot; `PositionedNote` rows fill it.
 
 ### Reader layer (`src/reader/`)
 
@@ -110,27 +125,39 @@ Key points:
 
 1. User clicks a document in the Library.
 2. UI navigates to `/read/:documentId`.
-3. ReaderScreen looks up the Document by `documentId`
-   (`getDocument(documentId)`).
-4. UI hands the resulting `SourceFingerprint` to
-   `getDocumentBlob(sourceFingerprint)` to fetch the bytes.
-5. UI hands the blob to the Reader (`PdfReader.open(blob)`).
-6. Reader returns a `ReaderHandle` that exposes pages and anchors.
-7. UI renders the Reader, passing the handle into React state.
-8. As the user scrolls / jumps, the Reader reports new positions
-   and the UI calls `updateReadingProgress(...)` and
-   `touchLastReadAt(...)`.
+3. ReaderScreen calls `getDocument(documentId)` (metadata only).
+4. ReaderScreen calls `getPrimarySource(documentId)` to resolve
+   the physical identity.
+5. ReaderScreen calls `getDocumentBlob(sourceFingerprint)` for
+   the bytes.
+6. UI hands the blob to the Reader (`PdfReader.open(blob)`).
+7. Reader returns a `ReaderHandle` that exposes pages and anchors.
+8. UI renders the Reader, passing the handle into React state.
+9. On success, ReaderScreen calls `touchLastReadAt(documentId)`.
+10. As the user scrolls / jumps, the Reader reports new positions
+    and the UI calls `updateReadingProgress(documentId,
+    sourceFingerprint, ...)` and other reading-state writes.
+
+If any step returns `null`, ReaderScreen surfaces the failure
+(`not-found` or `missing-blob` state). The `missing-blob` state is
+the visible consequence of "eviction dropped the bytes but kept
+the metadata."
 
 ## 4. Data flow — adding a highlight
 
 1. User selects text in a rendered PDF page.
 2. The Reader produces a `DocumentPosition` (PDF-specific shape,
-   opaque to generic code) plus the selected string.
+   opaque to generic code) plus the selected string and the
+   `sourceFingerprint` of the source being read.
 3. UI calls `createHighlight({ documentId, sourceFingerprint,
    pageIndex, anchor, selectedText })` from the highlights
    repository.
 4. Repository writes to the `highlights` table; the UI re-fetches
    and re-renders the highlight overlay.
+
+A `FreeNote` is added without source or pageIndex; a
+`PositionedNote` requires both. The discriminated union forces
+this distinction at the type level.
 
 ## 5. Failure modes
 
@@ -139,6 +166,7 @@ Key points:
 | Browser data deleted                | Library shows empty state; orphan-state UX is a follow-up ticket. |
 | IndexedDB quota exceeded            | Import flow refuses and shows the quota estimate.   |
 | Persistent storage denied           | UX marks the library as "may be evicted".           |
+| Bytes evicted but metadata kept     | ReaderScreen shows `missing-blob` state; user re-imports. |
 | PDF file malformed                  | Reader throws a typed error; UI shows a recovery flow. |
 | Worker fails to load                | PDF rendering falls back to a synchronous flag (TODO). |
 
@@ -148,9 +176,11 @@ Key points:
 | --------------------- | ------------------------------------------------------- |
 | EPUB                  | New `reader/epub/` impl behind the same `Reader` contract. |
 | Markdown              | New `reader/markdown/` impl.                            |
-| "Merge two sources under one DocumentId" UI | New `library/document-merge.ts` flow. Schema already supports it. |
+| Multi-source per Document | Repository already supports 1:N — only the UI for "attach a second source" is missing. |
+| Cross-source re-anchor | Re-anchor job: walk a `PositionedNote` / `Bookmark` / `Highlight` from one `SourceFingerprint` to another under the same `DocumentId`. Algorithm is out of MVP scope. |
 | Sync                  | New `storage/sync/` adapter on top of repositories.     |
 | Export reading state  | New `export/` folder; consumes repos as read-only.      |
+| Eviction policy       | Drop `documentBlobs` rows first; keep `documents` and reading state. UI surfaces the gap (already wired as `missing-blob`). |
 | Integration with my-web-2026 | Deferred per ADR-0006. Pick a shape when there's evidence. |
 
 Each extension is additive; none require touching unrelated folders.

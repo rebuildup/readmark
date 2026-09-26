@@ -79,19 +79,38 @@ Forbidden:
 
 ## 3a. Identity model (recap of ADR-0002)
 
-readmark has two layers of document identity — **do not collapse
-them**:
+readmark has three concepts, not two — **do not collapse them**:
 
-- **`DocumentId`** (logical): UUID. Survives re-imports of the same
-  logical book. Reading state is keyed by this.
-- **`SourceFingerprint`** (physical): SHA-256 hex of the raw bytes.
-  Stable only for the same bytes. A highlight is a position in
-  specific bytes and is keyed by `(documentId, sourceFingerprint,
-  anchor)`.
+- **`Document`** — logical book. `id` is a `DocumentId` (UUID).
+  Holds user-facing identity (title / author / language) and book-
+  level timestamps (`importedAt`, `lastReadAt`). Source-specific
+  fields do NOT belong here.
+- **`DocumentSource`** — physical file attached to a Document.
+  `sourceFingerprint` is a `SourceFingerprint` (SHA-256 of bytes).
+  Holds source-specific properties (`format`, `byteSize`,
+  `pageCount`, format-specific extras).
+- **`DocumentBlob`** — the bytes of one source. Stored separately
+  from `DocumentSource` so eviction can drop bytes without
+  touching metadata or reading state.
 
-In MVP one `DocumentId` ⇒ one `SourceFingerprint`. The split is
-forward-looking — a future "merge two scans of the same book" UI
-won't need a storage rewrite.
+Reading state is keyed by **both** keys for everything that has a
+position:
+
+- `ReadingProgress`: composite PK `[documentId, sourceFingerprint]`.
+- `Bookmark` / `Highlight`: `id` + `(documentId, sourceFingerprint,
+  pageIndex)`.
+- `Note` is a discriminated union:
+  - `FreeNote` — no position, no source.
+  - `PositionedNote` — carries `sourceFingerprint` + `pageIndex`.
+
+`Document.lastReadAt` is the only reading-state-shaped field on
+Document — opening any source counts.
+
+In MVP one `Document` ⇒ one `DocumentSource`. The schema already
+supports 1:N; a future "merge two scans of the same book" / "attach
+an EPUB alongside the PDF" UI is a thin layer over the repository,
+not a storage rewrite. Cross-source progress migration is future
+re-anchor work.
 
 ## 4. Quality gates
 

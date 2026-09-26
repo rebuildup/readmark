@@ -15,12 +15,27 @@ readmark はファイルビューアではなく、読書アプリです。
 
 - 文書本体（PDF 等）と読書状態（最終閲覧位置・栞・ハイライト・メモ）は
   分離して管理します（[ADR-0002](./docs/adr/ADR-0002-document-source-and-reading-state-separation.md)）。
-- identity は 2 層に分かれます：
-  - **`DocumentId`**（論理的）— UUID。読書状態のキー。
-  - **`SourceFingerprint`**（物理的）— バイト列の SHA-256。ハイライト
-    のキー（特定のバイト列の中の位置だから）。
-  - MVP では 1:1。将来的に「同じ本の複数版を束ねる」UI を足せる形に
-    なっています。
+- 概念は 3 つに分かれます：
+  - **`Document`**（論理的 book）— `DocumentId`（UUID）を持つ。タイトル・
+    著者・言語などの user-facing identity と、book 単位のタイムスタンプ
+    （`importedAt` / `lastReadAt`）を保持。source 固有の値は載せない。
+  - **`DocumentSource`**（物理的 file）— `SourceFingerprint`（バイト列の
+    SHA-256）と `DocumentId` を持つ。`format` / `byteSize` / `pageCount`
+    など source 固有のプロパティを保持。
+  - **`DocumentBlob`** — source のバイト列のみ。quota eviction で
+    `DocumentSource` のメタデータや読書状態に手を入れずに落とせるよう、
+    別テーブル。
+- 位置を持つ読書状態は **`Document` + `DocumentSource` のペアで識別**：
+  - `ReadingProgress` は composite primary key `[documentId,
+    sourceFingerprint]`、source ごとに 1 行。
+  - `Bookmark` / `Highlight` は `(documentId, sourceFingerprint,
+    pageIndex)` で index。
+  - `Note` は `FreeNote`（位置なし、source なし）と `PositionedNote`
+    （source + page 持ち）の discriminated union。PDF p.47 と EPUB の
+    「chapter 4 position 12」が混ざるバグを型で防ぐ。
+- MVP では 1 Document に対して 1 DocumentSource。schema は 1:N を
+  既にサポートしているので、「同じ本の PDF 版と EPUB 版を束ねる」UI
+  は storage を書き換えずに追加できる。
 - 永続化はすべて IndexedDB（Dexie）。`localStorage` に大きなデータは
   入れません。
 - PDF レンダラーは `src/reader/pdf/` に閉じ込め、アプリの他の層は
