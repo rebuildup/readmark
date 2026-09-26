@@ -7,16 +7,30 @@
  *   - the URL points to the bundled worker (not a fake-worker stub)
  *
  * Actual PDF loading is NOT exercised here — that's covered in
- * #11 (PdfReaderHandle). The full worker pipeline needs the
+ * `pdf-metadata.test.ts`. The full worker pipeline needs the
  * browser environment; this test runs in Node via Vitest and
  * only checks the URL string set on GlobalWorkerOptions.
+ *
+ * Why the dynamic import of `pdfjs-dist` here:
+ *   - We only need `GlobalWorkerOptions` to inspect the URL.
+ *   - Statically importing `pdfjs-dist` triggers a
+ *     "Please use the legacy build in Node.js environments"
+ *     warning from pdf.js itself. The legacy build (used by
+ *     `pdf-document.ts`) doesn't expose the same shape on
+ *     `GlobalWorkerOptions`, so we import the modern entry
+ *     lazily and just read the field.
  */
 
-import * as pdfjsLib from 'pdfjs-dist';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 describe('pdf-worker', () => {
-	const ORIGINAL_SRC = pdfjsLib.GlobalWorkerOptions.workerSrc;
+	let pdfjsLib: typeof import('pdfjs-dist');
+	let ORIGINAL_SRC: string;
+
+	beforeAll(async () => {
+		pdfjsLib = await import('pdfjs-dist');
+		ORIGINAL_SRC = pdfjsLib.GlobalWorkerOptions.workerSrc;
+	});
 
 	afterEach(() => {
 		// Restore the original workerSrc so test ordering doesn't leak.
@@ -34,9 +48,9 @@ describe('pdf-worker', () => {
 	it('is idempotent — calling setup twice does not re-set the URL', async () => {
 		const { setupPdfWorker } = await import('./pdf-worker.ts');
 		const first = pdfjsLib.GlobalWorkerOptions.workerSrc;
-		setupPdfWorker();
-		setupPdfWorker();
-		setupPdfWorker();
+		await setupPdfWorker();
+		await setupPdfWorker();
+		await setupPdfWorker();
 		const second = pdfjsLib.GlobalWorkerOptions.workerSrc;
 		expect(second).toBe(first);
 	});

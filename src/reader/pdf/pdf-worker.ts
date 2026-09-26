@@ -28,9 +28,18 @@
  *   - If a future test wants to swap the worker URL, it can call
  *     `setupPdfWorker({ force: true, src: ... })` (not in MVP
  *     surface; reserved hook).
+ *
+ * Why the dynamic import of `pdfjs-dist`:
+ *   - The legacy build (`pdfjs-dist/legacy/build/pdf.mjs`) used
+ *     in Node tests (see `pdf-document.ts`) does not consume
+ *     `GlobalWorkerOptions.workerSrc` and would emit a warning
+ *     ("Please use the legacy build in Node.js environments")
+ *     if the modern entry was statically imported.
+ *   - We `await import('pdfjs-dist')` lazily, only when
+ *     `setupPdfWorker()` actually runs in a browser-shaped
+ *     environment. The Node path skips the import entirely.
  */
 
-import * as pdfjsLib from 'pdfjs-dist';
 // `?url` is a Vite suffix: returns the resolved asset URL string.
 // ADR-0004 / vite.config.ts: worker is excluded from optimizeDeps
 // and uses ESM format (`worker.format: 'es'`).
@@ -45,19 +54,31 @@ export const READMARK_PDF_WORKER_URL: string = pdfWorkerUrl;
 /**
  * Idempotent worker registration. Safe to call multiple times.
  *
+ * Browser-only: under Node (Vitest), this is a no-op because
+ * the legacy build (loaded by `pdf-document.ts`) does not use
+ * a worker. We avoid importing the modern `pdfjs-dist` entry
+ * statically so Node tests do not see the
+ * "Please use the legacy build in Node.js environments" warning.
+ *
  * Called automatically on module evaluation (see bottom of file).
  */
-export function setupPdfWorker(): void {
+export async function setupPdfWorker(): Promise<void> {
 	if (initialized) return;
-	// pdfjs's getter exists even before any set; reading first avoids
-	// a redundant write when the URL is already correct.
+	// Skip the worker registration under Node. The legacy build
+	// ignores `workerSrc` anyway, and touching `GlobalWorkerOptions`
+	// on the unused modern entry would emit a deprecation warning.
+	if (typeof process !== 'undefined' && process.versions?.node !== undefined) {
+		return;
+	}
+	const pdfjsLib = await import('pdfjs-dist');
 	if (pdfjsLib.GlobalWorkerOptions.workerSrc !== pdfWorkerUrl) {
 		pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 	}
 	initialized = true;
 }
 
-// Side-effect: register the worker as soon as this module is imported.
-// Callers should `import './pdf-worker.ts'` (or any module that
-// re-exports from it) BEFORE calling `getDocument()`.
-setupPdfWorker();
+// Side-effect: register the worker as soon as this module is imported
+// in a browser-shaped environment. Callers should `import './pdf-worker.ts'`
+// (or any module that re-exports from it) BEFORE calling `getDocument()`.
+// Under Node this resolves to a no-op promise (no pdfjs-dist import).
+void setupPdfWorker();
