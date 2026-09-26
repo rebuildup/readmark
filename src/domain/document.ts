@@ -1,76 +1,118 @@
 /**
  * readmark — format-agnostic document model.
  *
- * Two layers of identity, deliberately separated:
+ * Three concept types form the spine of the model. Each owns one
+ * responsibility and lives in its own IndexedDB table:
  *
- *   - `DocumentId`     — LOGICAL identity. A UUID minted on first import.
- *                        Survives re-imports of the same logical book.
- *                        Future enhancement: multiple physical sources
- *                        (e.g. "old PDF scan" + "new EPUB") can share
- *                        one DocumentId via a "merge" UI (out of MVP
- *                        scope). All reading state is keyed by this.
+ *   - `Document`        — LOGICAL book. A reader's "this book in my
+ *                         library." Survives re-imports of the same
+ *                         logical work and survives adding/removing
+ *                         sources. Holds user-facing identity (title,
+ *                         author, language) and book-level timestamps
+ *                         (importedAt, lastReadAt).
  *
- *   - `SourceFingerprint` — PHYSICAL identity. SHA-256 of the raw bytes.
- *                        Stable only for the same bytes. Changes when the
- *                        file is re-encoded, OCR-corrected, or updated.
- *                        Highlights are keyed by (DocumentId,
- *                        SourceFingerprint, anchor) because a highlight is
- *                        a position in specific bytes.
+ *   - `DocumentSource`  — PHYSICAL source. One file (PDF / EPUB /
+ *                         Markdown / text) attached to a Document.
+ *                         Holds source-specific properties (format,
+ *                         byteSize, pageCount, format-specific
+ *                         metadata). The bytes themselves are NOT
+ *                         here — see `DocumentBlob` below.
  *
- * In MVP, one DocumentId always maps to exactly one source. The split is
- * forward-looking: today's import flow can ignore `id` (treat it as equal
- * to `sourceFingerprint`) but tomorrow's "merge two scans of the same
- * book" UI doesn't need to rewrite reading state.
+ *   - `DocumentBlob`    — the bytes of one source. Stored separately
+ *                         from `documentSources` so the bytes can be
+ *                         evicted under storage pressure without
+ *                         touching metadata or reading state.
  *
- * Why not SHA-256 of metadata + bytes (a "rich identity")?
+ * Identity rules:
+ *
+ *   - `DocumentId`        — UUID, LOGICAL. Minted once per Document.
+ *                           Stable across re-imports of the same
+ *                           logical work. Reading state is keyed by
+ *                           this in combination with a
+ *                           `SourceFingerprint`.
+ *   - `SourceFingerprint` — SHA-256 hex, PHYSICAL. Stable only for
+ *                           the same bytes. Re-encoding, OCR pass,
+ *                           re-export — all change the fingerprint.
+ *                           Highlight / Bookmark / ReadingProgress
+ *                           / PositionedNote all carry this because
+ *                           a position is meaningless outside the
+ *                           specific bytes that produced it.
+ *
+ * MVP is 1:1 (one Document ↔ one DocumentSource). The schema already
+ * supports 1:N. A future "merge two scans of the same book" UI is a
+ * thin layer over the repository — no storage rewrite required.
+ *
+ * Why not a "rich identity" (SHA-256 of metadata + bytes)?
  *   - PDFs' `/info` metadata is mutable.
  *   - Same book, different OCR passes → different bytes → different
  *     fingerprint by design. The user (not the hash) decides whether
  *     they're "the same book."
  *
  * Why is `format` a closed string and not just 'pdf'?
- *   - The MVP only handles PDF, but the storage / UI must not assume it
- *     (ADR-0003). EPUB / Markdown / text come later and re-use every
- *     boundary here.
+ *   - The MVP only handles PDF, but the storage / UI must not assume
+ *     it (ADR-0003). EPUB / Markdown / text come later and re-use
+ *     every boundary here.
  */
 
 export type DocumentFormat = 'pdf' | 'epub' | 'markdown' | 'text';
 
-/** LOGICAL identity. UUID v4. Minted once on first import of a source. */
+/** LOGICAL identity. UUID v4. Minted once per Document. */
 export type DocumentId = string & { readonly __brand: 'DocumentId' };
 
-/** PHYSICAL identity. SHA-256 hex of the raw document bytes. Stable only
- *  for the same bytes. */
+/** PHYSICAL identity. SHA-256 hex of the raw bytes. Stable only for
+ *  the same bytes. */
 export type SourceFingerprint = string & { readonly __brand: 'SourceFingerprint' };
 
+/** User-facing metadata for a Document. Initial values are copied
+ *  from the source's intrinsic metadata at import time. The user
+ *  may override them later (out of MVP scope). */
 export interface DocumentMetadata {
-	/** Page count or equivalent chapter count. Optional — not all formats
-	 *  expose a fixed count up-front (e.g. reflowable EPUB). */
-	readonly pageCount?: number;
-	/** Title parsed from the format's intrinsic metadata. May be empty. */
 	readonly title?: string;
-	/** Author parsed from intrinsic metadata. May be empty. */
 	readonly author?: string;
-	/** Language tag (BCP 47) if the format exposes one. */
+	/** BCP 47 language tag if known. */
 	readonly language?: string;
-	/** Format-specific extras. NEVER depend on this from generic code. */
-	readonly extras?: Readonly<Record<string, unknown>>;
 }
 
 export interface Document {
-	/** Logical identity. Reading state is keyed by this. */
+	/** Logical identity. */
 	readonly id: DocumentId;
-	/** Physical identity. Tied to specific bytes; changes on re-encode. */
+	readonly metadata: DocumentMetadata;
+	/** Earliest source-import timestamp (ms since epoch). */
+	readonly importedAt: number;
+	/** Most recent open timestamp (ms since epoch). Updated when any
+	 *  source of this Document is opened. `null` if never opened. */
+	readonly lastReadAt: number | null;
+}
+
+/** Source-specific properties derived from the file. Generic code
+ *  reads `format` and `byteSize`; format-specific UI may read the
+ *  rest. */
+export interface SourceMetadata {
+	/** Page count for paged formats; chapter count for reflowable. */
+	readonly pageCount?: number;
+	/** Format-specific extras. NEVER depend on this from generic
+	 *  code. */
+	readonly extras?: Readonly<Record<string, unknown>>;
+}
+
+export interface DocumentSource {
+	/** Physical identity. SHA-256 of the raw bytes. */
 	readonly sourceFingerprint: SourceFingerprint;
+	/** Logical parent. */
+	readonly documentId: DocumentId;
 	readonly format: DocumentFormat;
 	/** Size of the stored Blob in bytes. */
 	readonly byteSize: number;
-	/** First import timestamp (ms since epoch). Stable across re-imports. */
+	/** When this source was attached to the Document (ms since
+	 *  epoch). Independent of `Document.importedAt` so the same
+	 *  Document can later receive a second source. */
 	readonly importedAt: number;
-	/** Last opened timestamp (ms since epoch). Updated by the reader. */
-	readonly lastReadAt: number | null;
-	readonly metadata: DocumentMetadata;
+	readonly metadata: SourceMetadata;
 }
+
+/** A position inside a document. Format-specific. Never inspect
+ *  from generic UI; pass it back to the reader. */
+export type DocumentPosition = Readonly<Record<string, unknown>>;
 
 // --- type guards ---------------------------------------------------------
 
