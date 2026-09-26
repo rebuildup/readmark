@@ -1,0 +1,59 @@
+# readmark — .gitignore
+# Convention-driven ignore list (rebuildup/project-init policy-integrity).
+# Local-only / ephemeral paths under .tmp/ and .reference/ are NEVER committed.
+
+# --- mise / toolchain runtime ---
+.mise/
+.mise.local.toml
+
+# --- bun / node ---
+node_modules/
+.bun/
+bun.lockb
+.pnpm-store/
+
+# --- build / generated ---
+dist/
+dist-ssr/
+build/
+*.tsbuildinfo
+.vite/
+.cache/
+
+# --- test / coverage ---
+coverage/
+.nyc_output/
+*.lcov
+
+# --- editors / OS ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*~
+
+# --- environment / secrets ---
+.env
+.env.*
+!.env.example
+!.env.development.example
+!.env.production.example
+.dev.vars
+.dev.vars.*
+
+# --- project-init conventions (always gitignored) ---
+.tmp/
+.reference/
+
+# --- log / runtime ---
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- project-specific ---
+# Generated library metadata cache (Dexie schema dump if added later).
+storage/.meta/

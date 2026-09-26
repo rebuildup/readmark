@@ -1,0 +1,9 @@
+# readmark — CODEOWNERS
+#
+# Default reviewer is the repository owner. Adjust per layer if a
+# contributor with deep ownership of one area joins.
+
+* @rebuildup
+
+/src/reader/pdf/ @rebuildup
+/src/storage/ @rebuildup

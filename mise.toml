@@ -1,0 +1,19 @@
+# mise: project-local toolchain bootstrap (ADR-0022 of rebuildup/project-init).
+#
+# Every required tool is pinned to an exact version here OR pinned via an
+# ecosystem-native canonical lockfile (package.json#packageManager + bun.lock).
+# `mise install` populates `.mise/`; `mise run <task>` resolves through this
+# file. `mise install --locked` must fail loudly if any required tool is
+# missing from this file or its lockfile — never silently resolve.
+
+[tools]
+bun = "1.4.2"
+node = "24.11.0"
+ripgrep = "14.1.0"
+
+[env]
+# Disable corepack in CI / mise-managed shells — packageManager pin in
+# package.json is the single source of truth (ADR of rebuildup/project-init).
+COREPACK_ENABLE_STRICT = "0"
+# Force JavaScript toolchain resolution through bun (ADR — JS/TS stack discipline).
+NPM_CONFIG_USER_AGENT = "bun"

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="readmark">
+  <title>readmark</title>
+  <rect width="64" height="64" rx="12" fill="#0d1d4d"/>
+  <path d="M16 16h32v32H16z" fill="none" stroke="#f5f7ff" stroke-width="3"/>
+  <path d="M22 22h20M22 30h20M22 38h14" stroke="#3a6cff" stroke-width="3" stroke-linecap="round"/>
+</svg>

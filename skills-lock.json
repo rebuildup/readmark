@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "skills": {
+    "engineering-decisions": {
+      "source": "rebuildup/project-init",
+      "sourceType": "github",
+      "skillPath": "skills/engineering-decisions/SKILL.md",
+      "computedHash": "8a954f49cbaa2de41ec0477c95951ee6e8ea979b058f08f237a0542e0ac90157"
+    },
+    "github-delivery": {
+      "source": "rebuildup/project-init",
+      "sourceType": "github",
+      "skillPath": "skills/github-delivery/SKILL.md",
+      "computedHash": "0fe5f7beca0bf65e9bf2e272004096b68bb03ad4424f1ac4bf26f48b6a4420b8"
+    },
+    "quality-gate": {
+      "source": "rebuildup/project-init",
+      "sourceType": "github",
+      "skillPath": "skills/quality-gate/SKILL.md",
+      "computedHash": "5d787c6a0c8a57195f869db917f8d0dbc352d891dc25d88351486c1055198e61"
+    },
+    "worktree-workflow": {
+      "source": "rebuildup/project-init",
+      "sourceType": "github",
+      "skillPath": "skills/worktree-workflow/SKILL.md",
+      "computedHash": "b100c3b254f1c30555b12dc34f9398bb61d81deb92acf844b12500f7dcbda6a6"
+    },
+    "writing-discipline": {
+      "source": "rebuildup/project-init",
+      "sourceType": "github",
+      "skillPath": "skills/writing-discipline/SKILL.md",
+      "computedHash": "8fc981b012b8fff0ad25633adbf8826be05fd79bd45b7e570024de416c1a3073"
+    }
+  }
+}

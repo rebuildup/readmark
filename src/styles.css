@@ -1,0 +1,113 @@
+/* readmark — base styles.
+ *
+ * No Tailwind / Panda / shadcn — the app is local-first, so bundle size
+ * matters, and we want zero coupling to my-web-2026's design system
+ * (see ADR-0006 — Tool boundary is the build artefact, not the stylesheet).
+ *
+ * Tokens follow a deliberately small set of CSS custom properties. Components
+ * read tokens, never raw hex values, so theming stays one-file-deep.
+ */
+
+:root {
+	--rm-fg: #0b1020;
+	--rm-fg-muted: #5b6478;
+	--rm-bg: #f7f8fa;
+	--rm-bg-surface: #ffffff;
+	--rm-bg-subtle: #eef0f4;
+	--rm-bg-inverse: #0b1020;
+	--rm-fg-inverse: #f7f8fa;
+	--rm-accent: #3a6cff;
+	--rm-accent-fg: #ffffff;
+	--rm-border: #e0e3ea;
+	--rm-border-strong: #b9bfcc;
+
+	--rm-radius-sm: 4px;
+	--rm-radius-md: 8px;
+	--rm-radius-lg: 16px;
+
+	--rm-font-sans: "Noto Sans JP", "Hiragino Kaku Gothic ProN", system-ui, -apple-system, sans-serif;
+	--rm-font-heading:
+		"Zen Kaku Gothic New", "Hiragino Kaku Gothic ProN", system-ui, -apple-system, sans-serif;
+	--rm-font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+	--rm-shadow-sm: 0 1px 2px rgba(11, 16, 32, 0.06);
+	--rm-shadow-md: 0 4px 12px rgba(11, 16, 32, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--rm-fg: #f7f8fa;
+		--rm-fg-muted: #9aa3b6;
+		--rm-bg: #0b1020;
+		--rm-bg-surface: #141a2e;
+		--rm-bg-subtle: #1c2440;
+		--rm-border: #2a3454;
+		--rm-border-strong: #3f4a6e;
+	}
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body,
+#app-root {
+	margin: 0;
+	padding: 0;
+	height: 100%;
+}
+
+body {
+	font-family: var(--rm-font-sans);
+	font-size: 16px;
+	line-height: 1.6;
+	color: var(--rm-fg);
+	background: var(--rm-bg);
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3 {
+	font-family: var(--rm-font-heading);
+	margin: 0 0 0.5em;
+	letter-spacing: 0.01em;
+}
+
+button {
+	font-family: inherit;
+	font-size: inherit;
+	cursor: pointer;
+}
+
+a {
+	color: var(--rm-accent);
+	text-decoration: none;
+}
+
+a:hover {
+	text-decoration: underline;
+}
+
+code,
+pre {
+	font-family: var(--rm-font-mono);
+	font-size: 0.9em;
+}
+
+.rm-app {
+	min-height: 100%;
+	display: grid;
+	grid-template-rows: auto 1fr;
+}
+
+.rm-shell {
+	padding: 24px;
+	max-width: 1200px;
+	margin: 0 auto;
+	width: 100%;
+}

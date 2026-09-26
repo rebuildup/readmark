@@ -1,0 +1,20 @@
+# readmark — editorconfig
+# Mirrors rebuildup/project-init's formatting contract: tabs, LF, UTF-8,
+# trim trailing whitespace, final newline.
+
+root = true
+
+[*]
+indent_style = tab
+indent_size = 2
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false

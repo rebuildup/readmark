@@ -1,0 +1,80 @@
+# readmark — CI.
+#
+# Why each part:
+# - Triggers: PR + push to main / release-X.Y.Z / numeric branches.
+#   Numeric branches correspond to ticket branches per AGENTS.md §5.
+# - Required checks: deliberately NOT set in branch protection.
+#   rebuildup/project-init's policy is to avoid required-status-check
+#   names that could deadlock the ruleset. The CI runs but does not
+#   gate merge. The release PR is gated by manual review (0 approvals
+#   on solo; no-op gate today).
+# - Concurrency: per-workflow + per-ref; in-progress runs cancel on
+#   new pushes (same pattern as rebuildup/my-web-2026 ci.yml).
+# - mise: install with --locked. If mise.toml or bun.lock drift, the
+#   workflow fails loudly.
+# - bun install: --frozen-lockfile. Same idea.
+# - validate:fast: typecheck + lint + test. Build is excluded to keep
+#   PR feedback < 60s; release PRs additionally run validate locally.
+
+name: ci
+
+on:
+  pull_request:
+    branches: [main, "release-*"]
+  push:
+    branches: [main, "release-*", "[0-9]+"]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate-fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MISE_YES: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mise
+        uses: jdx/mise-action@v2
+
+      - name: Toolchain check
+        run: mise install --locked
+
+      - name: Cache bun install
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock', 'mise.toml') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Format check (biome ci)
+        run: bun run lint
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests
+        run: bun run test
+
+      - name: Build (smoke)
+        run: bun run build
+
+      - name: Upload build artefact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: readmark-dist
+          path: dist/
+          retention-days: 7

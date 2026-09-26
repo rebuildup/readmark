@@ -1,0 +1,51 @@
+{
+	"name": "readmark",
+	"version": "0.0.1",
+	"private": true,
+	"description": "A local-first reading app for the browser. PDFs in MVP; EPUB/Markdown/text next. Designed to be embedded as a Tool by my-web-2026.",
+	"type": "module",
+	"license": "MIT",
+	"engines": {
+		"bun": ">=1.4.0"
+	},
+	"packageManager": "bun@1.4.2",
+	"scripts": {
+		"dev": "vite",
+		"build": "tsc -b --noCheck && vite build",
+		"preview": "vite preview --host 127.0.0.1 --port 4173",
+		"typecheck": "tsc -b --noEmit",
+		"lint": "biome check .",
+		"lint:fix": "biome check --write .",
+		"format": "biome format --write .",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"test:coverage": "vitest run --coverage",
+		"validate": "bun run typecheck && bun run lint && bun run test && bun run build",
+		"validate:fast": "bun run typecheck && bun run lint && bun run test",
+		"skills": "bunx skills"
+	},
+	"dependencies": {
+		"dexie": "^4.4.6",
+		"pdfjs-dist": "^5.4.624",
+		"react": "^19.3.0",
+		"react-dom": "^19.3.0",
+		"react-router-dom": "^7.18.4",
+		"zustand": "^5.0.15"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.14",
+		"@testing-library/jest-dom": "^6.6.3",
+		"@testing-library/react": "^16.3.3",
+		"@types/node": "^22.10.0",
+		"@types/react": "^19.3.0",
+		"@types/react-dom": "^19.3.0",
+		"@vitejs/plugin-react": "^5.2.0",
+		"happy-dom": "^20.14.5",
+		"typescript": "^5.9.3",
+		"vite": "^7.3.6",
+		"vitest": "^3.2.7"
+	},
+	"trustedDependencies": [
+		"@biomejs/biome"
+	]
+}
