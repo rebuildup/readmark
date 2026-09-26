@@ -57,6 +57,16 @@ async function makeTestPdfBytes() {
 /**
  * Kill a child preview server reliably.
  *
+ * Why we track `exited` via the 'exit' event instead of using
+ * `proc.killed` / `proc.exitCode`:
+ *   - `ChildProcess.killed` is set the moment `proc.kill()` *sends*
+ *     a signal — not when the process actually terminates. After
+ *     SIGTERM it's already `true`, so a `!proc.killed && exitCode
+ *     === null` check would never enter the SIGKILL escalation
+ *     branch. The Node docs are explicit on this.
+ *   - We bind an 'exit' handler at spawn time and consult that flag
+ *     here. That gives a true "is the child gone?" signal.
+ *
  * Why both SIGTERM and SIGKILL:
  *   - SIGTERM lets Vite flush its build-cache writes and exit cleanly.
  *   - Some Vite processes hang on SIGTERM under load. After 1s we
@@ -69,14 +79,14 @@ async function makeTestPdfBytes() {
  *     uncaught rejection above all share the same cleanup path.
  */
 function killPreview(proc) {
-	if (proc.killed || proc.exitCode !== null) return;
+	if (proc.__rmExited) return;
 	try {
 		proc.kill('SIGTERM');
 	} catch {
 		/* already gone */
 	}
 	setTimeout(() => {
-		if (!proc.killed && proc.exitCode === null) {
+		if (!proc.__rmExited) {
 			try {
 				proc.kill('SIGKILL');
 			} catch {
@@ -91,7 +101,18 @@ async function withPreview(fn) {
 		stdio: ['ignore', 'pipe', 'pipe'],
 		env: { ...process.env, NODE_ENV: 'production' },
 	});
-	// Wait for the server to be ready by polling the root URL.
+	// Track actual child termination via the 'exit' event. We CANNOT
+	// use `proc.killed` for this — see the killPreview comment for
+	// why — so we set a marker on the object itself.
+	proc.__rmExited = false;
+	proc.on('exit', () => {
+		proc.__rmExited = true;
+	});
+	// Wait for the server to be ready by polling the root URL. With
+	// `bun run preview --strictPort` (set in package.json), a busy
+	// 4173 fails fast rather than silently binding to a fallback port
+	// — so if this loop exhausts, the smoke attaches to a *new* server
+	// that readmark actually started.
 	for (let i = 0; i < 50; i++) {
 		try {
 			const res = await fetch(PREVIEW_URL);
@@ -112,6 +133,75 @@ async function withPreview(fn) {
 }
 
 const log = (msg) => console.log(`[smoke] ${msg}`);
+
+/**
+ * Wait for the import button to round-trip through a busy=true →
+ * busy=false transition.
+ *
+ * Why this is two waits in one (observing the transition), not
+ * "wait for aria-busy !== 'true'":
+ *   - After `setInputFiles`, there is a window before React commits
+ *     `setBusy(true)`. A locator check that runs in that window
+ *     sees `false` and resolves immediately — we'd never observe
+ *     that the import actually started, only that it ended.
+ *   - True→false proves the handler both ran and returned. If the
+ *     `setInputFiles` event never reaches the change handler
+ *     (eg. the input is removed), busy never flips to true and
+ *     the first sub-wait times out → `fail()`.
+ *
+ * Why use `window.__rmSawBusy` instead of a no-op `expect.toHave*`:
+ *   - Playwright's `expect()` lives in `@playwright/test`, which
+ *     this script does not import (vanilla Playwright + Bun). We
+ *     reach for `waitForFunction` and stitch the two halves via
+ *     a closure-scoped flag.
+ */
+async function waitForBusyRoundTrip(page, label) {
+	const SENTINEL = '__rmSawBusy__' + Math.random().toString(36).slice(2);
+	// Inject the sentinel on first observation.
+	await page.evaluate((key) => {
+		if (!(key in window)) {
+			Object.defineProperty(window, key, { value: false, writable: true, configurable: true });
+		}
+	}, SENTINEL);
+	// Phase 1: wait for aria-busy="true". `polling: 30` (instead of
+	// the default 'raf') so we sample the DOM at ≤30ms cadence and
+	// catch the busy=true window on sub-frame imports. Without
+	// `await Promise.resolve()` between setBusy(true) and the
+	// downstream await, React 19's automatic batching collapses
+	// both states into one render and this wait would never resolve.
+	await page.waitForFunction(
+		(key) => {
+			const busy = document
+				.querySelector('[data-testid="rm-import-button"]')
+				?.getAttribute('aria-busy');
+			if (busy === 'true') {
+				window[key] = true;
+				return true;
+			}
+			return false;
+		},
+		SENTINEL,
+		{ timeout: 15_000, polling: 30 },
+	);
+	// Phase 2: wait for the busy→idle transition (and only that,
+	// not the initial idle state — guarded by the sentinel).
+	await page.waitForFunction(
+		(key) => {
+			const busy = document
+				.querySelector('[data-testid="rm-import-button"]')
+				?.getAttribute('aria-busy');
+			if (!window[key]) return false;
+			return busy !== 'true';
+		},
+		SENTINEL,
+		{ timeout: 15_000, polling: 30 },
+	);
+	// Reset so subsequent round-trips start clean.
+	await page.evaluate((key) => {
+		window[key] = false;
+	}, SENTINEL);
+	log(`${label} round-tripped (import button busy=true → busy=false)`);
+}
 
 /**
  * Read a Playwright locator's count until it stabilizes across
@@ -207,20 +297,7 @@ async function main() {
 			mimeType: 'application/pdf',
 			buffer: Buffer.from(pdfBytes),
 		});
-
-		// Wait for the first import to round-trip by anchoring on
-		// the button's `aria-busy` attribute. The transition busy
-		// → idle proves `handleFile` ran end-to-end (setBusy(true)
-		// inside try, setBusy(false) in finally).
-		await page.waitForFunction(
-			() =>
-				document.querySelector('[data-testid="rm-import-button"]')?.getAttribute('aria-busy') !==
-				'true',
-			null,
-			{ timeout: 15_000 },
-		);
-		log('import #1 round-tripped (import button busy→idle)');
-
+		await waitForBusyRoundTrip(page, 'import #1');
 		// The library list should now have exactly one entry. Use
 		// the stable-read helper so we don't catch the count mid-write.
 		const libraryItems = page.locator('main ul li');
@@ -312,31 +389,12 @@ async function main() {
 		log('documents=1 documentSources=1 documentBlobs=1');
 
 		// --- Re-import the same PDF: should NOT add a row ---
-		//
-		// Important: don't anchor on `successToast.waitFor({ visible })`
-		// here. The toast from import #1 may still be on screen when
-		// we trigger import #2, so the locator resolves immediately
-		// without confirming that import #2 actually ran. A fixed
-		// `await wait(500)` is no better — IndexedDB writes can take
-		// longer, and 500ms is not a guarantee that import #2 even
-		// started.
 		await fileInput.setInputFiles({
 			name: 'smoke.pdf',
 			mimeType: 'application/pdf',
 			buffer: Buffer.from(pdfBytes),
 		});
-		// Anchor on the import button's `aria-busy`. While `handleFile`
-		// is running, the button is busy; once it returns, busy clears.
-		// If import #2 never fired (eg. change handler missed), busy
-		// never flips and this wait times out — we get a real signal.
-		await page.waitForFunction(
-			() =>
-				document.querySelector('[data-testid="rm-import-button"]')?.getAttribute('aria-busy') !==
-				'true',
-			null,
-			{ timeout: 15_000 },
-		);
-		log('re-import round-tripped (import button busy→idle)');
+		await waitForBusyRoundTrip(page, 're-import');
 		// Settle: poll until the library-item count is stable across
 		// three consecutive reads (200 ms apart). If dedup works, we
 		// stay at 1; if dedup were broken the count would briefly hit

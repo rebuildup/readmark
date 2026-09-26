@@ -59,6 +59,14 @@ export function DocumentImport({ onImported, navigateOnSuccess = 'library' }: Do
 		setBusy(true);
 		setError(null);
 		setLastImport(null);
+		// Force a microtask boundary so React commits `busy=true`
+		// before the import's first await. Without this, React 19's
+		// automatic batching may collapse setBusy(true) and the
+		// downstream state changes into one render commit for
+		// sub-frame imports — the smoke (`scripts/smoke-import.mjs`)
+		// would never observe aria-busy="true" long enough to prove
+		// the change handler actually ran.
+		await Promise.resolve();
 		try {
 			const result = await importPdfDocument(file);
 			if (result.ok) {
