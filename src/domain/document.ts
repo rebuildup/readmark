@@ -110,8 +110,18 @@ export interface DocumentSource {
 	readonly metadata: SourceMetadata;
 }
 
-/** A position inside a document. Format-specific. Never inspect
- *  from generic UI; pass it back to the reader. */
+/** A sub-page navigation pointer inside a document. Format-specific.
+ *  Used by ReadingProgress / Bookmark's `position` field for "scroll
+ *  to here" on reopen. NOT an annotation anchor — see `Anchor<P>`
+ *  in `domain/annotation/anchor.ts` for that (ADR-0007).
+ *
+ *  Generic code persists this opaquely; the format-specific reader
+ *  fills it in (PDF scroll offset, EPUB CFI, …) and reads it back
+ *  on open. Sub-page positions are deliberately NOT re-anchored —
+ *  zoom, rotation, font-substitution, and renderer changes can all
+ *  invalidate them; re-opening just gets you back "to this page"
+ *  and that's the MVP contract.
+ */
 export type DocumentPosition = Readonly<Record<string, unknown>>;
 
 // --- type guards ---------------------------------------------------------

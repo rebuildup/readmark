@@ -98,6 +98,30 @@ Key points:
 - Format-agnostic; the format-specific reader fills in
   format-specific fields.
 
+Two-layer model (ADR-0007):
+
+- **Outer** — `Anchor<P>` (`src/domain/annotation/anchor.ts`).
+  Generic. Two fields: `format: DocumentFormat` and
+  `payload: P`. Generic code persists and routes this opaquely;
+  it never inspects `payload`.
+- **Inner** — format-specific payloads. PDF's is `PdfAnchor` at
+  `src/reader/pdf/anchor.ts`. EPUB / Markdown / text add their
+  own at `src/reader/<format>/anchor.ts`.
+
+For PDF MVP, `PdfAnchor` carries both `rects` (PDF user-space
+display) and `quote` (text + prefix + suffix context).
+**`quote` is the canonical recovery key**; **`rects` is the
+display position**. On reopen, the reader searches the page's
+text layer for the quote and refreshes rects from glyph geometry
+when found; if not found, the stored rects are kept and the
+anchor is flagged "stale" in the UI.
+
+`Anchor` is distinct from `DocumentPosition`
+(`src/domain/document.ts`) — `DocumentPosition` is the sub-page
+"scroll to here" pointer used by `ReadingProgress` /
+`Bookmark.position`. It is NOT re-anchored; it just gets you
+"back to this page."
+
 ### UI layer (`src/ui/`)
 
 - React 19.3 with react-router-dom 7.
@@ -146,14 +170,21 @@ the metadata."
 ## 4. Data flow — adding a highlight
 
 1. User selects text in a rendered PDF page.
-2. The Reader produces a `DocumentPosition` (PDF-specific shape,
-   opaque to generic code) plus the selected string and the
-   `sourceFingerprint` of the source being read.
+2. The Reader produces an `Anchor<PdfAnchor>` (a `format: 'pdf'`
+   plus `payload: { page, rects, quote }`) and the selected
+   string. Both the anchor and the selected string flow out; the
+   selected string mirrors `anchor.payload.quote.exact` so the
+   sidebar can list highlights without consulting the reader.
 3. UI calls `createHighlight({ documentId, sourceFingerprint,
    pageIndex, anchor, selectedText })` from the highlights
    repository.
 4. Repository writes to the `highlights` table; the UI re-fetches
    and re-renders the highlight overlay.
+
+On reopen, the Reader runs the recovery algorithm (ADR-0007):
+search for the stored quote on the page; if found, refresh
+rects from glyph geometry; if not, keep stored rects and flag
+the anchor "stale."
 
 A `FreeNote` is added without source or pageIndex; a
 `PositionedNote` requires both. The discriminated union forces
@@ -187,5 +218,7 @@ Each extension is additive; none require touching unrelated folders.
 
 ## 7. References
 
-- ADRs in `docs/adr/`.
-- `AGENTS.md` §3 (architecture boundary), §3a (identity model).
+- ADRs in `docs/adr/` (notably ADR-0007 — PDF annotation anchor
+  model — for the `Anchor<P>` / `PdfAnchor` split).
+- `AGENTS.md` §3 (architecture boundary), §3a (identity model),
+  §3b (anchor model recap).

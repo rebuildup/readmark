@@ -112,6 +112,47 @@ an EPUB alongside the PDF" UI is a thin layer over the repository,
 not a storage rewrite. Cross-source progress migration is future
 re-anchor work.
 
+## 3b. Annotation anchor model (recap of ADR-0007)
+
+readmark has TWO concepts of "position", and they are NOT the
+same type:
+
+- **`Anchor<P>`** (`src/domain/annotation/anchor.ts`) — a
+  text-region annotation position. Used by `Highlight.anchor`,
+  `PositionedNote.anchor`, and `Bookmark.anchor`. Format-
+  agnostic outer contract (`format` + opaque `payload`); the
+  format-specific reader fills in the payload shape (`PdfAnchor`
+  for PDF MVP, future EPUB CFI / Markdown line range / text
+  char-offset). **Re-anchored on reopen** — quote-based recovery
+  for PDF, with stale fallback to stored rects.
+- **`DocumentPosition`** (`src/domain/document.ts`) — a sub-page
+  navigation pointer. Used by `ReadingProgress.position` and
+  `Bookmark.position` for "scroll to here" on reopen. Format-
+  agnostic opaque blob (PDF scroll offset, EPUB CFI, …). **NOT
+  re-anchored** — zoom, rotation, and renderer changes can all
+  invalidate it; the MVP contract is "back to this page", not
+  "back to this scroll offset".
+
+For PDF specifically (MVP):
+
+- **`quote` is canonical / recovery**, **`rects` is display**.
+  Both are stored. On open, the reader searches the page's text
+  layer for the quote; if found, rects are refreshed from glyph
+  geometry. If not found, the stored rects are kept and the
+  anchor is flagged "stale" in the UI.
+- **Single page only.** Cross-page selections are two anchors.
+- **Exact match only.** No fuzzy / whitespace / hyphenation
+  handling in MVP.
+- **Rects are in PDF user-space** (1/72 inch). The reader maps
+  to viewport-space at render time.
+
+Generic UI never inspects `Anchor.payload`. It persists and
+routes the anchor opaquely; only the format-specific reader
+casts to `Anchor<PdfAnchor>` to access the typed payload.
+Adding EPUB / Markdown / text is a new `payload` type at
+`src/reader/<format>/anchor.ts` — no change to `domain/`,
+`storage/`, or generic UI.
+
 ## 4. Quality gates
 
 Three deterministic entry points (mirrors project-init's
@@ -219,3 +260,14 @@ files.
 - `docs/release.md` — version / release process.
 - `docs/troubleshooting.md` — known gotchas.
 - rebuildup/project-init — meta-template this repo follows.
+
+## 13. ADR index
+
+- ADR-0001 — local-first invariants.
+- ADR-0002 — Document / DocumentSource / DocumentBlob separation.
+- ADR-0003 — format-agnostic document model.
+- ADR-0004 — PDF renderer isolation.
+- ADR-0005 — IndexedDB persistence strategy.
+- ADR-0006 — deployment / my-web-2026 integration.
+- ADR-0007 — PDF annotation anchor model (`Anchor<P>` outer +
+  `PdfAnchor` payload; quote canonical, rects display).

@@ -84,7 +84,7 @@ readmark/
 │  ├─ development.md
 │  ├─ release.md
 │  ├─ troubleshooting.md
-│  └─ adr/               # ADR-0001 〜 ADR-0006
+│  └─ adr/               # ADR-0001 〜 ADR-0007
 ├─ src/
 │  ├─ main.tsx           # entry
 │  ├─ App.tsx            # router shell
@@ -92,7 +92,7 @@ readmark/
 │  ├─ domain/            # format-agnostic types（Document / ReadingState）
 │  ├─ storage/           # Dexie スキーマ + repositories
 │  ├─ reader/            # reader 契約 + per-format 実装（pdf はここ）
-│  ├─ annotation/        # W3C-inspired anchor model
+│  ├─ annotation/        # フォーマット非依存 anchor（ADR-0007）
 │  ├─ library/           # ライブラリ系フロー
 │  ├─ ui/                # React 画面
 │  ├─ stores/            # Zustand（UI state のみ）
