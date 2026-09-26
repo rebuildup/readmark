@@ -32,7 +32,12 @@ import { chromium } from 'playwright';
 // prepend it so the headless shell can resolve its libs.
 const CHROME_LIBS = `${process.env.HOME}/chrome-libs/usr/lib/x86_64-linux-gnu`;
 const extraLd =
-	(await Bun.file(CHROME_LIBS).exists().catch(() => false)) || (await Bun.file(`${CHROME_LIBS}/libnspr4.so`).exists().catch(() => false))
+	(await Bun.file(CHROME_LIBS)
+		.exists()
+		.catch(() => false)) ||
+	(await Bun.file(`${CHROME_LIBS}/libnspr4.so`)
+		.exists()
+		.catch(() => false))
 		? CHROME_LIBS
 		: '';
 
@@ -83,7 +88,9 @@ async function main() {
 
 		const browser = await chromium.launch({
 			args: ['--no-sandbox', '--disable-dev-shm-usage'],
-			env: extraLd ? { ...process.env, LD_LIBRARY_PATH: `${extraLd}:${process.env.LD_LIBRARY_PATH ?? ''}` } : undefined,
+			env: extraLd
+				? { ...process.env, LD_LIBRARY_PATH: `${extraLd}:${process.env.LD_LIBRARY_PATH ?? ''}` }
+				: undefined,
 		});
 		const context = await browser.newContext();
 		const page = await context.newPage();
