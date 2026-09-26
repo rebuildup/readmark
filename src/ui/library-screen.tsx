@@ -1,9 +1,9 @@
 /**
  * readmark — Library screen.
  *
- * MVP shell: lists the user's library and shows the import button (disabled
- * until the file picker is wired). The full import UI lands in the first
- * feature ticket after init.
+ * MVP shell: lists the user's library and shows the import button
+ * (disabled until the file picker is wired). The full import UI lands
+ * in the first feature ticket after init.
  */
 
 import { useEffect, useState } from 'react';
@@ -53,7 +53,7 @@ export function LibraryScreen() {
 						<ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
 							{documents.map((doc) => (
 								<li
-									key={doc.fingerprint}
+									key={doc.id}
 									style={{
 										padding: '12px 16px',
 										borderBottom: '1px solid var(--rm-border)',
@@ -69,7 +69,7 @@ export function LibraryScreen() {
 											{(doc.byteSize / 1024 / 1024).toFixed(1)} MB
 										</div>
 									</div>
-									<Link to={`/read/${doc.fingerprint}`}>
+									<Link to={`/read/${doc.id}`}>
 										<Button variant="secondary">読む</Button>
 									</Link>
 								</li>
