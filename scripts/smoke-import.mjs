@@ -54,6 +54,38 @@ async function makeTestPdfBytes() {
 	return await pdf.save();
 }
 
+/**
+ * Kill a child preview server reliably.
+ *
+ * Why both SIGTERM and SIGKILL:
+ *   - SIGTERM lets Vite flush its build-cache writes and exit cleanly.
+ *   - Some Vite processes hang on SIGTERM under load. After 1s we
+ *     escalate to SIGKILL so the next smoke run can't connect to a
+ *     half-dead server left listening on 4173 (which would make a
+ *     following run hit a stale build and false-green).
+ *
+ * Why this is a separate function instead of inline `proc.kill`:
+ *   - `withPreview`'s finally, `SmokeFailure` throws, and any
+ *     uncaught rejection above all share the same cleanup path.
+ */
+function killPreview(proc) {
+	if (proc.killed || proc.exitCode !== null) return;
+	try {
+		proc.kill('SIGTERM');
+	} catch {
+		/* already gone */
+	}
+	setTimeout(() => {
+		if (!proc.killed && proc.exitCode === null) {
+			try {
+				proc.kill('SIGKILL');
+			} catch {
+				/* race: reaped between the check and the kill */
+			}
+		}
+	}, 1000).unref();
+}
+
 async function withPreview(fn) {
 	const proc = spawn('bun', ['run', 'preview'], {
 		stdio: ['ignore', 'pipe', 'pipe'],
@@ -72,14 +104,62 @@ async function withPreview(fn) {
 	try {
 		return await fn();
 	} finally {
-		proc.kill('SIGTERM');
+		// `finally` is the only reliable cleanup path. `fail()` below
+		// throws instead of calling `process.exit`, so this finally
+		// always runs — see SmokeFailure comment.
+		killPreview(proc);
 	}
 }
 
 const log = (msg) => console.log(`[smoke] ${msg}`);
+
+/**
+ * Read a Playwright locator's count until it stabilizes across
+ * three consecutive reads (200 ms apart).
+ *
+ * Why a settle loop instead of a one-shot count read:
+ *   - React + Dexie + IndexedDB form an async chain. A single
+ *     read after `waitFor` can land mid-render or mid-write
+ *     and report a stale count.
+ *   - Three consecutive identical reads at 200 ms intervals is
+ *     a cheap "no more writes pending" signal. If the value
+ *     is still changing, we fail loudly (caught by `fail()`)
+ *     rather than reporting a false-green.
+ */
+async function readStableCount(locator) {
+	let last = -1;
+	let stable = 0;
+	for (let i = 0; i < 25; i++) {
+		const current = await locator.count();
+		if (current === last) {
+			stable++;
+			if (stable >= 3) return current;
+		} else {
+			stable = 0;
+			last = current;
+		}
+		await wait(200);
+	}
+	fail(`count did not stabilize (last=${last}); possible UI churn`);
+}
+
+/**
+ * Signal a failure WITHOUT calling `process.exit`. Exiting here
+ * would skip `withPreview`'s `finally`, leaving the preview server
+ * bound to 4173 — the next smoke run would then attach to the
+ * stale build and report false-green. Throw instead; the top-level
+ * `main().catch()` translates the throw into exit code 1, AFTER
+ * the server is killed.
+ */
+class SmokeFailure extends Error {
+	constructor(msg) {
+		super(msg);
+		this.name = 'SmokeFailure';
+	}
+}
 const fail = (msg) => {
 	console.error(`[smoke] FAIL: ${msg}`);
-	process.exit(1);
+	throw new SmokeFailure(msg);
 };
 
 async function main() {
@@ -128,15 +208,24 @@ async function main() {
 			buffer: Buffer.from(pdfBytes),
 		});
 
-		// Wait for the success toast to appear ("X ページを取り込みました").
-		const successToast = page.locator('text=/ページを取り込みました/');
-		await successToast.waitFor({ state: 'visible', timeout: 15_000 });
-		log('success toast visible');
+		// Wait for the first import to round-trip by anchoring on
+		// the button's `aria-busy` attribute. The transition busy
+		// → idle proves `handleFile` ran end-to-end (setBusy(true)
+		// inside try, setBusy(false) in finally).
+		await page.waitForFunction(
+			() =>
+				document.querySelector('[data-testid="rm-import-button"]')?.getAttribute('aria-busy') !==
+				'true',
+			null,
+			{ timeout: 15_000 },
+		);
+		log('import #1 round-tripped (import button busy→idle)');
 
-		// The library list should now have exactly one entry.
+		// The library list should now have exactly one entry. Use
+		// the stable-read helper so we don't catch the count mid-write.
 		const libraryItems = page.locator('main ul li');
 		await libraryItems.first().waitFor({ state: 'visible', timeout: 5_000 });
-		const firstCount = await libraryItems.count();
+		const firstCount = await readStableCount(libraryItems);
 		if (firstCount !== 1) fail(`expected 1 library entry after first import, got ${firstCount}`);
 		log(`library has ${firstCount} entry after first import`);
 
@@ -223,17 +312,39 @@ async function main() {
 		log('documents=1 documentSources=1 documentBlobs=1');
 
 		// --- Re-import the same PDF: should NOT add a row ---
+		//
+		// Important: don't anchor on `successToast.waitFor({ visible })`
+		// here. The toast from import #1 may still be on screen when
+		// we trigger import #2, so the locator resolves immediately
+		// without confirming that import #2 actually ran. A fixed
+		// `await wait(500)` is no better — IndexedDB writes can take
+		// longer, and 500ms is not a guarantee that import #2 even
+		// started.
 		await fileInput.setInputFiles({
 			name: 'smoke.pdf',
 			mimeType: 'application/pdf',
 			buffer: Buffer.from(pdfBytes),
 		});
-		// Wait for the success toast to reappear.
-		await successToast.waitFor({ state: 'visible', timeout: 15_000 });
-		await wait(500); // give IndexedDB writes a tick to settle
-		const secondCount = await libraryItems.count();
-		if (secondCount !== 1) fail(`expected 1 library entry after re-import, got ${secondCount}`);
-		log(`library still has ${secondCount} entry after re-import (fingerprint dedup works)`);
+		// Anchor on the import button's `aria-busy`. While `handleFile`
+		// is running, the button is busy; once it returns, busy clears.
+		// If import #2 never fired (eg. change handler missed), busy
+		// never flips and this wait times out — we get a real signal.
+		await page.waitForFunction(
+			() =>
+				document.querySelector('[data-testid="rm-import-button"]')?.getAttribute('aria-busy') !==
+				'true',
+			null,
+			{ timeout: 15_000 },
+		);
+		log('re-import round-tripped (import button busy→idle)');
+		// Settle: poll until the library-item count is stable across
+		// three consecutive reads (200 ms apart). If dedup works, we
+		// stay at 1; if dedup were broken the count would briefly hit
+		// 2 and settle. Either way, the value we read here is the
+		// post-import truth.
+		const stableCount = await readStableCount(libraryItems);
+		if (stableCount !== 1) fail(`expected 1 library entry after re-import, got ${stableCount}`);
+		log(`library still has ${stableCount} entry after re-import (fingerprint dedup works)`);
 
 		const dbStats2 = await page.evaluate(async () => {
 			const dbs = await indexedDB.databases();

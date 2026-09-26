@@ -100,7 +100,13 @@ export function DocumentImport({ onImported, navigateOnSuccess = 'library' }: Do
 				style={{ display: 'none' }}
 				data-testid="rm-document-import-input"
 			/>
-			<Button variant="primary" onClick={handleButtonClick} disabled={busy} aria-busy={busy}>
+			<Button
+				variant="primary"
+				onClick={handleButtonClick}
+				disabled={busy}
+				aria-busy={busy}
+				data-testid="rm-import-button"
+			>
 				{buttonLabel}
 			</Button>
 
@@ -124,6 +130,7 @@ export function DocumentImport({ onImported, navigateOnSuccess = 'library' }: Do
 			{lastImport !== null && error === null && (
 				<div
 					role="status"
+					data-testid="rm-import-status"
 					style={{
 						marginTop: 12,
 						padding: '8px 12px',
