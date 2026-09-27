@@ -33,9 +33,17 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import type { DocumentId, SourceFingerprint } from '../domain/document.ts';
 import type { PageIndex } from '../domain/reading-state.ts';
 import { nextRotation, PDF_PAGE_CLASS, viewportSize } from '../reader/pdf/index.ts';
+import {
+	currentPositionFrom,
+	type PageExtent,
+	type ScrollPosition,
+	scrollTopForPosition,
+} from '../reader/position.ts';
 import type { ReaderHandle, RenderOptions } from '../reader/types.ts';
+import { saveReadingPosition } from '../storage/reading-state-repo.ts';
 import { Button } from './primitives/button.tsx';
 import { LibraryLink } from './primitives/library-link.tsx';
 
@@ -48,6 +56,18 @@ export const ZOOM_LEVELS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3] as const;
  *  materialized. Two screens of slack keeps a fast scroll from
  *  outrunning the render, without paying for the whole file. */
 const PREFETCH_MARGIN = '200% 0px';
+
+/** How long a settled position waits before it is written.
+ *
+ *  A scroll produces one event per frame; writing a row per frame
+ *  would put a hundred IndexedDB transactions per second of reading
+ *  into a local-first app for no benefit — the position only has to
+ *  survive a crash, not every intermediate scroll offset. Just under a
+ *  second is long enough to coalesce a flick and short enough that a
+ *  reader who closes the tab right after stopping still keeps their
+ *  place (the unmount flush covers the rest).
+ */
+const SAVE_DEBOUNCE_MS = 800;
 
 /** A4 portrait in points, used to reserve space for a page nobody has
  *  measured yet. Only a placeholder: the first page that renders
@@ -141,13 +161,30 @@ function PdfPageView({ handle, index, options, reserved, onMeasured, onError }: 
 	);
 }
 
-interface ReaderViewProps {
+export interface ReaderViewProps {
 	readonly handle: ReaderHandle<'pdf'>;
 	readonly pageCount: number;
 	readonly title: string;
+	/** Both keys of the progress row. Reading state is keyed by the
+	 *  pair, not by the document (ADR-0002). */
+	readonly documentId: DocumentId;
+	readonly sourceFingerprint: SourceFingerprint;
+	/** Where this reader was last time, if anywhere. Restored once the
+	 *  page's box is measured; `null` for a first read. */
+	readonly initialPosition: {
+		readonly currentPage: PageIndex;
+		readonly position: ScrollPosition;
+	} | null;
 }
 
-export function ReaderView({ handle, pageCount, title }: ReaderViewProps) {
+export function ReaderView({
+	handle,
+	pageCount,
+	title,
+	documentId,
+	sourceFingerprint,
+	initialPosition,
+}: ReaderViewProps) {
 	const [zoom, setZoom] = useState<number>(1);
 	const [rotation, setRotation] = useState<0 | 90 | 180 | 270>(0);
 	const [footprints, setFootprints] = useState<ReadonlyMap<PageIndex, PageFootprint>>(
@@ -156,6 +193,58 @@ export function ReaderView({ handle, pageCount, title }: ReaderViewProps) {
 	const [renderError, setRenderError] = useState<string | null>(null);
 	const [currentPage, setCurrentPage] = useState<PageIndex | null>(null);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
+
+	// Progress bookkeeping, all in refs: none of it drives a render,
+	// and putting a pending write in state would re-render the reader
+	// on every scroll.
+	//
+	// `restoredRef` is the gate that matters. Until the stored position
+	// has been applied (or found to be inapplicable), the scroll
+	// handler must not save: an unmeasured layout reports a position
+	// of "page 1, offset 0", and writing that would destroy the very
+	// position being restored.
+	const restoredRef = useRef(initialPosition === null);
+	const pendingRef = useRef<{ pageIndex: PageIndex; position: ScrollPosition } | null>(null);
+	const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	// The position recomputation, so the restore can ask for it
+	// directly: setting `scrollTop` is not guaranteed to raise a scroll
+	// event (and does not in every test environment), and the header
+	// label has to agree with where the reader actually is.
+	const updatePositionRef = useRef<(() => void) | null>(null);
+
+	/** Write the pending position now, if there is one. */
+	const flushSave = useCallback(() => {
+		if (saveTimerRef.current !== null) {
+			clearTimeout(saveTimerRef.current);
+			saveTimerRef.current = null;
+		}
+		const pending = pendingRef.current;
+		if (pending === null) return;
+		pendingRef.current = null;
+		void saveReadingPosition({
+			documentId,
+			sourceFingerprint,
+			currentPage: pending.pageIndex,
+			position: pending.position,
+		}).catch((error: unknown) => {
+			// A failed progress write is not worth interrupting a read
+			// over: the position is advisory, and the next one will
+			// overwrite it.
+			console.error('readmark: could not save reading position', error);
+		});
+	}, [documentId, sourceFingerprint]);
+
+	const scheduleSave = useCallback(
+		(pageIndex: PageIndex, position: ScrollPosition) => {
+			pendingRef.current = { pageIndex, position };
+			if (saveTimerRef.current !== null) return;
+			saveTimerRef.current = setTimeout(() => {
+				saveTimerRef.current = null;
+				flushSave();
+			}, SAVE_DEBOUNCE_MS);
+		},
+		[flushSave],
+	);
 
 	// One object for the whole document, so a zoom change re-renders
 	// every visible page against the same viewport and each page's
@@ -198,9 +287,11 @@ export function ReaderView({ handle, pageCount, title }: ReaderViewProps) {
 		setRenderError('このページの描画に失敗しました。時間をおいて再度お試しください。');
 	}, []);
 
-	// Current page: the first page whose box reaches the middle of the
-	// viewport. #5 turns this into persisted progress; until then it
-	// only labels where the reader is.
+	// The reader's position, on every scroll frame that is not already
+	// waiting for one. `currentPositionFrom` decides which page holds
+	// the viewport's midpoint and how far into it the reader is; the
+	// same call feeds the header label and the saved row, so the label
+	// and the stored position can never disagree.
 	useEffect(() => {
 		const scroller = scrollRef.current;
 		if (scroller === null) return;
@@ -210,38 +301,93 @@ export function ReaderView({ handle, pageCount, title }: ReaderViewProps) {
 			// Everything in one coordinate space: viewport rects.
 			// `offsetTop` is relative to the offset parent while
 			// `scrollTop` is relative to the scroller's content, and
-			// the two differ by the header height — enough to label the
-			// reader as being on the page above the one they are on.
+			// the two differ by the header height — enough to save the
+			// reader a page off from where they are.
 			const scrollerBox = scroller.getBoundingClientRect();
-			const middle = scrollerBox.top + scroller.clientHeight / 2;
-			const hosts = Array.from(scroller.querySelectorAll<HTMLElement>('[data-page-index]'));
-			let best: PageIndex | null = null;
-			for (const host of hosts) {
+			const extents: PageExtent[] = Array.from(
+				scroller.querySelectorAll<HTMLElement>('[data-page-index]'),
+			).map((host) => {
 				const box = host.getBoundingClientRect();
-				if (box.top + box.height / 2 < middle) continue;
-				best = Number(host.dataset.pageIndex) as PageIndex;
-				break;
-			}
-			if (best === null) {
-				const last = hosts[hosts.length - 1];
-				best = last === undefined ? null : (Number(last.dataset.pageIndex) as PageIndex);
-			}
-			setCurrentPage((previous) => (previous === best ? previous : best));
+				return {
+					pageIndex: Number(host.dataset.pageIndex) as PageIndex,
+					top: box.top - scrollerBox.top + scroller.scrollTop,
+					height: box.height,
+				};
+			});
+
+			const position = currentPositionFrom(extents, scroller.scrollTop, scroller.clientHeight);
+			if (position === null) return;
+			setCurrentPage((previous) =>
+				previous === position.pageIndex ? previous : position.pageIndex,
+			);
+			if (!restoredRef.current) return;
+			scheduleSave(position.pageIndex, { pageOffsetRatio: position.pageOffsetRatio });
 		};
 		const onScroll = () => {
 			if (frame !== 0) return;
 			frame = requestAnimationFrame(update);
 		};
 		scroller.addEventListener('scroll', onScroll, { passive: true });
+		updatePositionRef.current = update;
 		update();
 		return () => {
+			updatePositionRef.current = null;
 			scroller.removeEventListener('scroll', onScroll);
 			if (frame !== 0) cancelAnimationFrame(frame);
 		};
-		// Mount-only on purpose: the listener reads the page hosts from
-		// the DOM at scroll time, and `pageCount` is fixed for as long
-		// as this view is mounted (the screen opens the document first).
-	}, []);
+		// Mount-only: the listener reads the page hosts from the DOM at
+		// scroll time, and the page count is fixed for as long as this
+		// view is mounted. `scheduleSave` is stable.
+	}, [scheduleSave]);
+
+	// Restore the stored position, once the target page has a measured
+	// box. Before that the page stack is a column of provisional
+	// heights, and a scroll offset computed against it would land
+	// somewhere arbitrary — so the effect re-runs as pages report
+	// their real sizes (`footprints`) and stops as soon as it applies.
+	useEffect(() => {
+		if (restoredRef.current) return;
+		if (initialPosition === null) {
+			restoredRef.current = true;
+			return;
+		}
+		const scroller = scrollRef.current;
+		if (scroller === null) return;
+		const host = scroller.querySelector<HTMLElement>(
+			`[data-page-index="${initialPosition.currentPage}"]`,
+		);
+		const box = host?.getBoundingClientRect();
+		if (host === null || box === undefined || box.height === 0) return;
+
+		const scrollerBox = scroller.getBoundingClientRect();
+		scroller.scrollTop = scrollTopForPosition(
+			{
+				pageIndex: initialPosition.currentPage,
+				top: box.top - scrollerBox.top + scroller.scrollTop,
+				height: box.height,
+			},
+			initialPosition.position,
+		);
+		restoredRef.current = true;
+		// Recompute rather than waiting for a scroll event: the header
+		// label has to show the page the reader was restored to, and a
+		// programmatic `scrollTop` assignment does not reliably raise
+		// one. Any save this schedules writes the restored position —
+		// the same value that is already stored, so it is a no-op
+		// upsert rather than a change of place.
+		updatePositionRef.current?.();
+		// biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the measured sizes, which is the condition the restore waits for
+	}, [footprints, initialPosition]);
+
+	// Leaving the screen (or closing the document) flushes whatever is
+	// still debounced. Without this, closing the tab during a read
+	// would lose the last stretch of progress.
+	useEffect(
+		() => () => {
+			flushSave();
+		},
+		[flushSave],
+	);
 
 	return (
 		<div className="rm-app rm-app--reader">

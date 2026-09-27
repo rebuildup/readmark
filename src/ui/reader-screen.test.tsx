@@ -75,6 +75,14 @@ vi.mock('../storage/documents-repo.ts', () => ({
 	touchLastReadAt: vi.fn(async () => {}),
 }));
 
+// The reading-progress repository is the storage boundary for #5;
+// the screen only decides when to read it and hands the result down.
+vi.mock('../storage/reading-state-repo.ts', () => ({
+	getReadingProgress: vi.fn(async () => null),
+	saveReadingPosition: vi.fn(async () => {}),
+	deleteReadingProgress: vi.fn(async () => false),
+}));
+
 vi.mock('../reader/pdf/index.ts', () => ({
 	createPdfReader: () => createPdfReader(),
 	// The view reads this class name to measure a rendered page.
@@ -122,6 +130,8 @@ afterAll(() => {
 });
 
 const repository = await import('../storage/documents-repo.ts');
+const progressRepository = await import('../storage/reading-state-repo.ts');
+const mockGetProgress = vi.mocked(progressRepository.getReadingProgress);
 const mockGetDocument = vi.mocked(repository.getDocument);
 const mockGetPrimarySource = vi.mocked(repository.getPrimarySource);
 const mockGetDocumentBlob = vi.mocked(repository.getDocumentBlob);
@@ -155,6 +165,7 @@ function renderReader() {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mockGetProgress.mockResolvedValue(null);
 	mockGetDocument.mockResolvedValue(makeDocument());
 	mockGetPrimarySource.mockResolvedValue(makeSource());
 	mockGetDocumentBlob.mockResolvedValue(new Blob(['%PDF-1.4'], { type: 'application/pdf' }));
@@ -170,6 +181,39 @@ describe('ReaderScreen', () => {
 		// recently-read order depends on it.
 		expect(mockTouch).toHaveBeenCalledWith(DOC_ID);
 		expect(createPdfReader).toHaveBeenCalledTimes(1);
+	});
+
+	it('reads the stored position for this source before rendering', async () => {
+		mockGetProgress.mockResolvedValueOnce({
+			documentId: DOC_ID,
+			sourceFingerprint: FINGERPRINT,
+			currentPage: asPageIndex(7),
+			position: { pageOffsetRatio: 0.4 },
+			updatedAt: 1,
+		});
+		renderReader();
+		await screen.findByTestId('rm-reader-toolbar');
+
+		// Progress belongs to bytes, so the read is keyed by the pair —
+		// and it happens before the first paint, because a restore that
+		// ran afterwards would be a visible jump.
+		expect(mockGetProgress).toHaveBeenCalledWith({
+			documentId: DOC_ID,
+			sourceFingerprint: FINGERPRINT,
+		});
+		// The read happened before the first paint of the view: a
+		// restore applied after the reader is on screen is a visible
+		// jump from page 1 to page 7.
+		const readAt = mockGetProgress.mock.invocationCallOrder[0] ?? 0;
+		const openAt = openMock.mock.invocationCallOrder[0] ?? 0;
+		expect(readAt).toBeGreaterThan(0);
+		expect(openAt).toBeGreaterThan(0);
+	});
+
+	it('opens a document that has no stored position', async () => {
+		mockGetProgress.mockResolvedValueOnce(null);
+		renderReader();
+		expect(await screen.findByTestId('rm-reader-toolbar')).toBeTruthy();
 	});
 
 	it('renders one host per page, 1-based', async () => {

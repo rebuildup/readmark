@@ -30,7 +30,9 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 
-import { asDocumentId, type DocumentId } from '../domain/document.ts';
+import { asDocumentId, type DocumentId, type SourceFingerprint } from '../domain/document.ts';
+import type { PageIndex, ReadingProgress } from '../domain/reading-state.ts';
+import type { ScrollPosition } from '../reader/position.ts';
 import type { ReaderHandle } from '../reader/types.ts';
 import {
 	getDocument,
@@ -38,6 +40,7 @@ import {
 	getPrimarySource,
 	touchLastReadAt,
 } from '../storage/documents-repo.ts';
+import { getReadingProgress } from '../storage/reading-state-repo.ts';
 import { LibraryLink } from './primitives/library-link.tsx';
 import { ReaderView } from './reader-view.tsx';
 
@@ -51,6 +54,14 @@ type ReaderState =
 			handle: ReaderHandle<'pdf'>;
 			pageCount: number;
 			title: string;
+			documentId: DocumentId;
+			sourceFingerprint: SourceFingerprint;
+			/** Where this reader was last time. `null` for a first
+			 *  read, which is not an error. */
+			storedPosition: {
+				readonly currentPage: PageIndex;
+				readonly position: ScrollPosition;
+			} | null;
 	  };
 
 export function ReaderScreen() {
@@ -111,6 +122,13 @@ export function ReaderScreen() {
 				opened = handle;
 				const pageCount = await handle.pageCount();
 				if (cancelled) return;
+				// Read before rendering the view: a restore that runs
+				// after the first paint would be a visible jump.
+				const progress = await getReadingProgress({
+					documentId: id,
+					sourceFingerprint: source.sourceFingerprint,
+				});
+				if (cancelled) return;
 				// `lastReadAt` means "this source was opened", not
 				// "this file was looked at": a corrupt or
 				// password-protected PDF that never opened must not
@@ -124,6 +142,9 @@ export function ReaderScreen() {
 					handle,
 					pageCount,
 					title: document.metadata.title ?? '(タイトルなし)',
+					documentId: id,
+					sourceFingerprint: source.sourceFingerprint,
+					storedPosition: readStoredPosition(progress),
 				});
 			} catch (error: unknown) {
 				console.error('readmark: reader failed to open', error);
@@ -141,7 +162,16 @@ export function ReaderScreen() {
 	// Ready documents get their own shell (header with toolbar plus the
 	// scroll container), so the two never render two headers.
 	if (state.kind === 'ready') {
-		return <ReaderView handle={state.handle} pageCount={state.pageCount} title={state.title} />;
+		return (
+			<ReaderView
+				handle={state.handle}
+				pageCount={state.pageCount}
+				title={state.title}
+				documentId={state.documentId}
+				sourceFingerprint={state.sourceFingerprint}
+				initialPosition={state.storedPosition}
+			/>
+		);
 	}
 
 	return (
@@ -170,4 +200,26 @@ export function ReaderScreen() {
 			</main>
 		</div>
 	);
+}
+
+/**
+ * Read a stored position into the shape the view restores from.
+ *
+ * A stored page that no longer exists in this source (a document
+ * edited under a reused fingerprint is impossible, but a schema
+ * migration or a hand-edited store is not) and a stored `position`
+ * that is not one of ours are both treated as "no position": the
+ * reader opens at the top, which is a smaller failure than scrolling
+ * to a page that is not there.
+ */
+function readStoredPosition(
+	progress: ReadingProgress | null,
+): { readonly currentPage: PageIndex; readonly position: ScrollPosition } | null {
+	if (progress === null) return null;
+	const ratio = progress.position?.pageOffsetRatio;
+	if (typeof ratio !== 'number' || !Number.isFinite(ratio)) return null;
+	return {
+		currentPage: progress.currentPage,
+		position: { pageOffsetRatio: Math.min(1, Math.max(0, ratio)) },
+	};
 }
