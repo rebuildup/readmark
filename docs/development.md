@@ -48,6 +48,7 @@ bun install --frozen-lockfile  # CI 用
 | `bun run skills` | `bunx skills` のショートカット |
 | `bun scripts/smoke-import.mjs` | import フロー（#3）のブラウザ smoke |
 | `bun scripts/smoke-library.mjs` | ライブラリ一覧（#4）のブラウザ smoke |
+| `bun scripts/smoke-reader.mjs` | Reader（#11）のブラウザ smoke |
 
 ### ブラウザ smoke
 
@@ -64,6 +65,10 @@ bun scripts/smoke-library.mjs
 Storage を触る変更（import / delete / schema）は、unit test だけでは
 「DOM から消えたが store には残っている」ような取りこぼしを検出できな
 い。該当する場合は smoke を走らせてから PR を Ready にする。
+
+描画・layout・Selection に依存する変更（reader / text layer / zoom /
+rotation）も同じで、happy-dom には canvas も layout も実 Selection も
+無いので、主張の根拠は smoke 側になる。
 
 ## 4. 環境変数
 

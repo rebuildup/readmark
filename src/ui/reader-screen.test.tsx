@@ -24,6 +24,14 @@ import type {
 	SourceFingerprint,
 } from '../domain/document.ts';
 import { asPageIndex, type PageIndex } from '../domain/reading-state.ts';
+// The real implementation, imported from its own module rather than
+// through the reader's entry point: that entry point pulls in
+// pdf-worker.ts, whose `?url` import is a Vite specifier the test
+// resolver cannot load.
+import {
+	nextRotation as realNextRotation,
+	viewportSize as realViewportSize,
+} from '../reader/pdf/pdf-coords.ts';
 import type { PageHandle, ReaderHandle, ReaderSource } from '../reader/types.ts';
 import { ReaderScreen } from './reader-screen.tsx';
 
@@ -71,8 +79,8 @@ vi.mock('../reader/pdf/index.ts', () => ({
 	createPdfReader: () => createPdfReader(),
 	// The view reads this class name to measure a rendered page.
 	PDF_PAGE_CLASS: 'rm-page',
-	nextRotation: (rotation: number, delta: number) =>
-		((((rotation + delta) % 360) + 360) % 360) as 0 | 90 | 180 | 270,
+	nextRotation: realNextRotation,
+	viewportSize: realViewportSize,
 }));
 
 /**

@@ -27,7 +27,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { PageIndex } from '../domain/reading-state.ts';
-import { nextRotation } from '../reader/pdf/index.ts';
+import { nextRotation, viewportSize } from '../reader/pdf/index.ts';
 import type { ReaderHandle, RenderOptions } from '../reader/types.ts';
 import { Button } from './primitives/button.tsx';
 import { LibraryLink } from './primitives/library-link.tsx';
@@ -41,6 +41,15 @@ export const ZOOM_LEVELS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3] as const;
  *  materialized. Two screens of slack keeps a fast scroll from
  *  outrunning the render, without paying for the whole file. */
 const PREFETCH_MARGIN = '200% 0px';
+
+/** A4 portrait in points, used to reserve space for a page nobody has
+ *  measured yet. Only a placeholder: the first page that renders
+ *  replaces it for the whole document, and each page corrects its own
+ *  size as it materializes. Without a non-zero provisional height the
+ *  pages would all stack at the top of the scroller, every one of them
+ *  inside the viewport, and the reader would render the whole file at
+ *  once while believing it was lazy. */
+const PROVISIONAL_PAGE = { width: 595, height: 842 };
 
 /** Wrapper class of a rendered page. The screen measures it to reserve
  *  scroll space, so it is part of the contract, not styling. */
@@ -64,8 +73,10 @@ interface PdfPageViewProps {
 function PdfPageView({ handle, index, options, reserved, onMeasured, onError }: PdfPageViewProps) {
 	const hostRef = useRef<HTMLDivElement | null>(null);
 	// Latched: once a page is materialized it stays rendered, so
-	// scrolling back up re-attaches existing pixels.
-	const [materialized, setMaterialized] = useState(false);
+	// scrolling back up re-attaches existing pixels. Page 1 starts
+	// materialized because a reader always shows it, and because its
+	// size is what reserves space for the rest.
+	const [materialized, setMaterialized] = useState(index === 1);
 
 	useEffect(() => {
 		const host = hostRef.current;
@@ -151,6 +162,13 @@ export function ReaderView({ handle, pageCount, title }: ReaderViewProps) {
 	const pages = useMemo(
 		() => Array.from({ length: pageCount }, (_, index) => (index + 1) as PageIndex),
 		[pageCount],
+	);
+
+	// Rotation-aware, so a turned page reserves a landscape slot from
+	// the start rather than jumping when it is measured.
+	const provisional = useMemo(
+		() => viewportSize(PROVISIONAL_PAGE.width, PROVISIONAL_PAGE.height, zoom, rotation),
+		[rotation, zoom],
 	);
 
 	const handleMeasured = useCallback((index: PageIndex, footprint: PageFootprint) => {
@@ -261,7 +279,7 @@ export function ReaderView({ handle, pageCount, title }: ReaderViewProps) {
 								handle={handle}
 								index={index}
 								options={options}
-								reserved={footprint ?? { width: 0, height: 0 }}
+								reserved={footprint ?? provisional}
 								onMeasured={handleMeasured}
 								onError={handleError}
 							/>
