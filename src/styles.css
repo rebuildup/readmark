@@ -400,6 +400,16 @@ pre {
 	 * all, and it keeps the toolbar fixed while the document scrolls. */
 	height: 100%;
 	overflow: hidden;
+	/* Row 2 holds the optional panel and the scroller side by side.
+	 * `.rm-app` declares `grid-template-rows: auto 1fr`, so the
+	 * columns come from a template the panel opts into — a grid item
+	 * that lands in an implicit row would take the scroller's height
+	 * with it. */
+	grid-template-columns: 1fr;
+}
+
+.rm-app--reader:has(.rm-panel) {
+	grid-template-columns: minmax(0, 1fr) 280px;
 }
 
 .rm-reader-header {
@@ -505,4 +515,96 @@ pre {
 	color: var(--rm-fg-muted);
 	max-width: 520px;
 	margin: 40px auto;
+}
+
+/* --- side panel --------------------------------------------------------- */
+
+.rm-panel {
+	border-left: 1px solid var(--rm-border);
+	background: var(--rm-bg-surface);
+	padding: 12px 8px;
+	overflow: auto;
+	min-width: 0;
+}
+
+/* The reader's panel is a grid item that comes after the header and
+ * the scroller, so auto-placement would drop it into the header's row
+ * and give it the header's height. It belongs beside the whole reading
+ * column — the full height of the document area, from under the
+ * toolbar down. */
+.rm-panel--reader {
+	grid-column: 2;
+	grid-row: 1 / -1;
+}
+
+.rm-panel__header {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 0 8px 8px;
+}
+
+.rm-panel__title {
+	margin: 0;
+	font-size: 15px;
+}
+
+.rm-panel__empty {
+	padding: 0 8px;
+	font-size: 14px;
+}
+
+.rm-panel__list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.rm-panel__item {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	border-radius: var(--rm-radius-md);
+}
+
+.rm-panel__item:hover {
+	background: var(--rm-bg-subtle);
+}
+
+.rm-panel__jump {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 2px;
+	padding: 8px;
+	border: none;
+	border-radius: var(--rm-radius-md);
+	background: transparent;
+	color: var(--rm-fg);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.rm-panel__jump:hover {
+	background: var(--rm-bg-subtle);
+}
+
+.rm-panel__jump-label {
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.rm-panel__jump-hint {
+	color: var(--rm-fg-muted);
+	font-size: 12px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 100%;
 }

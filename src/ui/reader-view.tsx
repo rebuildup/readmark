@@ -34,17 +34,65 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { DocumentId, SourceFingerprint } from '../domain/document.ts';
-import type { PageIndex } from '../domain/reading-state.ts';
+import type { Bookmark, PageIndex } from '../domain/reading-state.ts';
 import { nextRotation, PDF_PAGE_CLASS, viewportSize } from '../reader/pdf/index.ts';
 import { currentPositionFrom, type PageExtent, type ScrollPosition } from '../reader/position.ts';
 import type { ReaderHandle, RenderOptions } from '../reader/types.ts';
+import { addBookmark, deleteBookmark, listBookmarks } from '../storage/bookmarks-repo.ts';
 import { saveReadingPosition } from '../storage/reading-state-repo.ts';
+import { useUiStore } from '../stores/ui-store.ts';
+import { BookmarkDeleteDialog, BookmarksPanel } from './bookmarks-panel.tsx';
 import { Button } from './primitives/button.tsx';
 import { LibraryLink } from './primitives/library-link.tsx';
 import { jumpToPage } from './scroll-to-page.ts';
 
+/**
+ * Where the reader is, in the reader's own coordinate space: which page
+ * holds the viewport's midpoint, and how far into it they are.
+ *
+ * Everything in one space — viewport rects. `offsetTop` is relative to
+ * the offset parent while `scrollTop` is relative to the scroller's
+ * content, and the two differ by the header height: enough to save the
+ * reader a page off from where they are.
+ *
+ * The header label, the saved progress row and the bookmark button all
+ * read the position through this one call, so those three can never
+ * disagree about where the reader is.
+ */
+function readPosition(
+	scroller: HTMLElement,
+): { pageIndex: PageIndex; pageOffsetRatio: number } | null {
+	const scrollerBox = scroller.getBoundingClientRect();
+	const extents: PageExtent[] = Array.from(
+		scroller.querySelectorAll<HTMLElement>('[data-page-index]'),
+	).map((host) => {
+		const box = host.getBoundingClientRect();
+		return {
+			pageIndex: Number(host.dataset.pageIndex) as PageIndex,
+			top: box.top - scrollerBox.top + scroller.scrollTop,
+			height: box.height,
+		};
+	});
+	return currentPositionFrom(extents, scroller.scrollTop, scroller.clientHeight);
+}
+
+/**
+ * A mark's stored offset, or the top of its page.
+ *
+ * `position` is a `DocumentPosition` — an opaque record by contract —
+ * so the one field this reader understands is read defensively: a mark
+ * written by another shape, or by a version that stored nothing, jumps
+ * to the start of its page, which is the honest reading of "somewhere
+ * on this page".
+ */
+function storedOffset(position: Bookmark['position']): ScrollPosition {
+	const ratio = position?.pageOffsetRatio;
+	if (typeof ratio !== 'number' || !Number.isFinite(ratio)) return { pageOffsetRatio: 0 };
+	return { pageOffsetRatio: Math.min(1, Math.max(0, ratio)) };
+}
+
 /** Zoom stops the toolbar steps through. Discrete rather than
- *  multiplicative so "zoom in" can land back on 100% instead of
+ *  multiplicative so "zoom in" can land back at 100% instead of
  *  drifting to 112% and staying there. */
 export const ZOOM_LEVELS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3] as const;
 
@@ -200,7 +248,11 @@ export function ReaderView({
 	);
 	const [renderError, setRenderError] = useState<string | null>(null);
 	const [currentPage, setCurrentPage] = useState<PageIndex | null>(null);
+	const [bookmarks, setBookmarks] = useState<readonly Bookmark[]>([]);
+	const [pendingDelete, setPendingDelete] = useState<Bookmark | null>(null);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
+	const sidePanel = useUiStore((state) => state.sidePanel);
+	const setSidePanel = useUiStore((state) => state.setSidePanel);
 
 	// Progress bookkeeping, all in refs: none of it drives a render,
 	// and putting a pending write in state would re-render the reader
@@ -230,7 +282,6 @@ export function ReaderView({
 	// does not have to be re-created on every measurement.
 	const footprintsRef = useRef(footprints);
 	footprintsRef.current = footprints;
-
 	/** Write the pending position now, if there is one. */
 	const flushSave = useCallback(() => {
 		if (saveTimerRef.current !== null) {
@@ -331,24 +382,7 @@ export function ReaderView({
 		let frame = 0;
 		const update = () => {
 			frame = 0;
-			// Everything in one coordinate space: viewport rects.
-			// `offsetTop` is relative to the offset parent while
-			// `scrollTop` is relative to the scroller's content, and
-			// the two differ by the header height — enough to save the
-			// reader a page off from where they are.
-			const scrollerBox = scroller.getBoundingClientRect();
-			const extents: PageExtent[] = Array.from(
-				scroller.querySelectorAll<HTMLElement>('[data-page-index]'),
-			).map((host) => {
-				const box = host.getBoundingClientRect();
-				return {
-					pageIndex: Number(host.dataset.pageIndex) as PageIndex,
-					top: box.top - scrollerBox.top + scroller.scrollTop,
-					height: box.height,
-				};
-			});
-
-			const position = currentPositionFrom(extents, scroller.scrollTop, scroller.clientHeight);
+			const position = readPosition(scroller);
 			if (position === null) return;
 			setCurrentPage((previous) =>
 				previous === position.pageIndex ? previous : position.pageIndex,
@@ -465,6 +499,85 @@ export function ReaderView({
 		// biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the measured sizes, which is the condition the restore waits for
 	}, [footprints, initialPosition, pageCount]);
 
+	// The bookmark list is read once per open and reconciled locally
+	// after every add or delete, so opening the panel is instant and a
+	// second tab's changes are picked up the next time the document is
+	// opened. A live cross-tab sync is out of scope.
+	useEffect(() => {
+		let cancelled = false;
+		void listBookmarks({ documentId, sourceFingerprint })
+			.then((rows) => {
+				if (!cancelled) setBookmarks(rows);
+			})
+			.catch((error: unknown) => {
+				// A failed read leaves the panel empty rather than
+				// blocking the reader; the marks are still there.
+				console.error('readmark: could not read bookmarks', error);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [documentId, sourceFingerprint]);
+
+	/** Mark the page the reader is on, at the offset they are at. */
+	const handleAddBookmark = useCallback(async () => {
+		const scroller = scrollRef.current;
+		if (scroller === null) return;
+		// Read at the moment of the click rather than from the last
+		// scroll event: pages finish measuring in between, and a mark
+		// should point at where the reader is now. It is the position
+		// the progress row stores, computed the same way, so jumping
+		// back to the mark lands where the reader actually was.
+		const position = readPosition(scroller);
+		if (position === null) return;
+		try {
+			const added = await addBookmark({
+				documentId,
+				sourceFingerprint,
+				pageIndex: position.pageIndex,
+				anchor: null,
+				position: { pageOffsetRatio: position.pageOffsetRatio },
+			});
+			setBookmarks((previous) => [...previous, added]);
+			setSidePanel('bookmarks');
+		} catch (error: unknown) {
+			console.error('readmark: could not add a bookmark', error);
+		}
+	}, [documentId, setSidePanel, sourceFingerprint]);
+
+	const handleJump = useCallback(
+		(bookmark: Bookmark) => {
+			const scroller = scrollRef.current;
+			if (scroller === null) return;
+			void jumpToPage({
+				scroller,
+				pageIndex: bookmark.pageIndex,
+				// A mark with no usable stored offset jumps to the top of
+				// its page, which is the honest thing to do with
+				// "somewhere on this page".
+				position: storedOffset(bookmark.position),
+				pageCount,
+				measuredHeight: (pageIndex) => footprintsRef.current.get(pageIndex)?.height,
+				// The reader has asked to be somewhere else; a jump
+				// already in progress is not theirs to finish.
+				shouldAbort: () => readerMovedRef.current,
+			});
+		},
+		[pageCount],
+	);
+
+	const handleConfirmDelete = useCallback(async () => {
+		if (pendingDelete === null) return;
+		const target = pendingDelete;
+		setPendingDelete(null);
+		try {
+			await deleteBookmark(target.id);
+			setBookmarks((previous) => previous.filter((row) => row.id !== target.id));
+		} catch (error: unknown) {
+			console.error('readmark: could not delete a bookmark', error);
+		}
+	}, [pendingDelete]);
+
 	// Leaving the screen (or closing the document) flushes whatever is
 	// still debounced. Without this, closing the tab during a read
 	// would lose the last stretch of progress.
@@ -524,11 +637,44 @@ export function ReaderView({
 					>
 						回転
 					</Button>
+					<Button
+						variant="ghost"
+						onClick={() => void handleAddBookmark()}
+						disabled={currentPage === null}
+						data-testid="rm-add-bookmark"
+						aria-label="栞を追加"
+					>
+						栞を追加
+					</Button>
+					<Button
+						variant="ghost"
+						onClick={() => setSidePanel(sidePanel === 'bookmarks' ? 'none' : 'bookmarks')}
+						data-testid="rm-toggle-bookmarks"
+						aria-pressed={sidePanel === 'bookmarks'}
+					>
+						栞
+					</Button>
 					<span className="rm-reader-zoom" data-testid="rm-reader-page-indicator">
 						{currentPage === null ? `- / ${pageCount}` : `${currentPage} / ${pageCount}`}
 					</span>
 				</div>
 			</header>
+
+			{sidePanel === 'bookmarks' && (
+				<BookmarksPanel
+					bookmarks={bookmarks}
+					documentTitle={title}
+					onJump={handleJump}
+					onDelete={(bookmark) => setPendingDelete(bookmark)}
+				/>
+			)}
+			{pendingDelete !== null && (
+				<BookmarkDeleteDialog
+					label={`${pendingDelete.pageIndex} ページ`}
+					onConfirm={() => void handleConfirmDelete()}
+					onCancel={() => setPendingDelete(null)}
+				/>
+			)}
 
 			<div className="rm-reader-scroll" ref={scrollRef} data-testid="rm-reader-scroll">
 				{/*
