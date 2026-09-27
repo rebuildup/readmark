@@ -34,31 +34,24 @@ describe('currentPositionFrom', () => {
 		expect(currentPositionFrom([], 0, 600)).toBeNull();
 	});
 
-	it('reports page 1 at the top of the document', () => {
+	it('reports the page under the viewport midpoint', () => {
+		// Three 800px pages, a 600px window: the midpoint starts at
+		// 300, which is inside page 1.
 		expect(currentPositionFrom(pages(3), 0, 600)).toEqual({
 			pageIndex: 1,
-			pageOffsetRatio: 0,
+			pageOffsetRatio: 300 / 800,
 		});
+		// Midpoint 1100 is inside page 2 (800..1600).
+		expect(currentPositionFrom(pages(3), 800, 600)?.pageIndex).toBe(2);
 	});
 
-	it('advances the ratio as the page is scrolled through', () => {
-		// Viewport 600 tall, pages 800 tall. The viewport midpoint is
-		// at scrollTop + 300, and a page holds the reader until that
-		// midpoint passes the page's own centre (400 for page 1).
-		const early = currentPositionFrom(pages(3), 50, 600);
-		expect(early?.pageIndex).toBe(1);
-		expect(early?.pageOffsetRatio).toBeCloseTo(50 / 800, 6);
-
-		// Past page 1's centre the reader is on page 2, whose top edge
-		// is still below the viewport top: the ratio clamps to 0.
-		const handedOver = currentPositionFrom(pages(3), 300, 600);
-		expect(handedOver?.pageIndex).toBe(2);
-		expect(handedOver?.pageOffsetRatio).toBe(0);
-
-		// Once the viewport top is inside page 2 the ratio advances.
-		const intoPage2 = currentPositionFrom(pages(3), 850, 600);
-		expect(intoPage2?.pageIndex).toBe(2);
-		expect(intoPage2?.pageOffsetRatio).toBeCloseTo(50 / 800, 6);
+	it('advances the ratio as the reader moves through a page', () => {
+		// Midpoint 600: half way into page 1.
+		expect(currentPositionFrom(pages(3), 300, 600)?.pageOffsetRatio).toBeCloseTo(600 / 800, 9);
+		// Midpoint 1000: 200px into page 2.
+		const next = currentPositionFrom(pages(3), 700, 600);
+		expect(next?.pageIndex).toBe(2);
+		expect(next?.pageOffsetRatio).toBeCloseTo(200 / 800, 9);
 	});
 
 	it('clamps the ratio when the scroller is past the last page', () => {
@@ -68,8 +61,8 @@ describe('currentPositionFrom', () => {
 	});
 
 	it('handles a last page shorter than the viewport', () => {
-		// Page 3 is 200px tall in a 600px viewport: the midpoint can
-		// never land inside it, so the fallback is the last page at 1.
+		// Page 3 is 200px tall in a 600px viewport: the midpoint lands
+		// past it, so the fallback is the last page at 1.
 		const mixed = [...pages(2), { pageIndex: asPageIndex(3), top: 1600, height: 200 }];
 		expect(currentPositionFrom(mixed, 1600, 600)).toEqual({
 			pageIndex: 3,
@@ -87,25 +80,26 @@ describe('scrollTopForPosition', () => {
 			if (current === null) throw new Error('expected a position');
 			const page = stack.find((candidate) => candidate.pageIndex === current.pageIndex);
 			if (page === undefined) throw new Error('expected the page in the stack');
-			const restored = scrollTopForPosition(page, current);
-			// Reconstructing from the restored offset has to land on
-			// the same page and ratio: that is the whole contract.
+			const restored = scrollTopForPosition(page, current, clientHeight);
+			// Reconstructing from the restored offset has to land on the
+			// same page and ratio: that is the whole contract, and the
+			// reason the ratio is anchored to the viewport's midpoint.
 			const again = currentPositionFrom(stack, restored, clientHeight);
 			expect(again?.pageIndex).toBe(current.pageIndex);
-			expect(again?.pageOffsetRatio).toBeCloseTo(current.pageOffsetRatio, 6);
+			expect(again?.pageOffsetRatio).toBeCloseTo(current.pageOffsetRatio, 9);
 		}
 	});
 
 	it('does not scroll above the top of the content', () => {
 		const page: PageExtent = { pageIndex: asPageIndex(1), top: 0, height: 800 };
-		expect(scrollTopForPosition(page, { pageOffsetRatio: 0 })).toBe(0);
+		// 0 of the page at the midpoint is 300px above the content.
+		expect(scrollTopForPosition(page, { pageOffsetRatio: 0 }, 600)).toBe(0);
 	});
 
-	it('lands the page top at the ratio, independent of the window size', () => {
+	it('places the midpoint at the stored offset into the page', () => {
 		const page: PageExtent = { pageIndex: asPageIndex(4), top: 2400, height: 800 };
-		// 25% into page 4: 200px past its top. Nothing here depends on
-		// a viewport height, which is what makes a position recorded on
-		// one screen meaningful on another.
-		expect(scrollTopForPosition(page, { pageOffsetRatio: 0.25 })).toBe(2600);
+		// A quarter into page 4: the midpoint sits at 2400 + 200, and
+		// the scroll offset is that minus half a viewport.
+		expect(scrollTopForPosition(page, { pageOffsetRatio: 0.25 }, 600)).toBe(2300);
 	});
 });

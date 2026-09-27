@@ -60,13 +60,19 @@ const log = (msg) => console.log(`[smoke] ${msg}`);
 // smoke would pass without ever testing laziness.
 const PAGE_COUNT = 12;
 
+/** Page heights, cycled. They differ on purpose: a restore that reads
+ *  a page's *reserved* height instead of its measured one looks
+ *  correct on a document whose pages are all the same size, and drifts
+ *  on one whose pages are not. */
+const PAGE_HEIGHTS = [900, 560, 1180, 720];
+
 /** A multi-page PDF with real text on every page, so the text layer
  *  has something to select. The words are unique per page so a
  *  selection can be attributed to a specific page. */
 async function makeFixturePdf() {
 	const pdf = await PDFDocument.create();
 	for (let index = 1; index <= PAGE_COUNT; index++) {
-		const page = pdf.addPage([420, 900]);
+		const page = pdf.addPage([420, pageHeightFor(index)]);
 		page.drawText(`readmark page ${index} of ${PAGE_COUNT}`, {
 			x: 40,
 			y: 520,
@@ -91,6 +97,10 @@ async function makeFixturePdf() {
 	pdf.setTitle('readmark reader smoke');
 	pdf.setAuthor('readmark smoke');
 	return await pdf.save();
+}
+
+function pageHeightFor(index) {
+	return PAGE_HEIGHTS[(index - 1) % PAGE_HEIGHTS.length];
 }
 
 const pageHost = (page, index) => page.locator(`[data-page-index="${index}"]`);
@@ -347,30 +357,70 @@ async function main() {
 			state: 'attached',
 			timeout: 10_000,
 		});
+		// Wait for the layout to settle: the restore is two-phase, and
+		// the second phase can only run once the target page has been
+		// rendered and measured.
+		await page.waitForFunction(
+			() => {
+				const host = document.querySelector('[data-page-index="1"] .rm-page');
+				return host !== null;
+			},
+			undefined,
+			{ timeout: 10_000 },
+		);
 		const restored = await page.evaluate(() => {
 			const scroller = document.querySelector('[data-testid="rm-reader-scroll"]');
+			if (scroller === null) return null;
+			const box = scroller.getBoundingClientRect();
+			const middle = box.top + scroller.clientHeight / 2;
+			// The page the reader is actually looking at, from the real
+			// rendered layout: the invariant is "back to the page they
+			// left", not "at some offset in a column of estimates".
+			let looking = null;
+			for (const host of document.querySelectorAll('[data-page-index]')) {
+				const page = host.getBoundingClientRect();
+				if (page.bottom < middle) continue;
+				looking = {
+					page: Number(host.getAttribute('data-page-index')),
+					offsetRatio: Math.min(1, Math.max(0, (middle - page.top) / page.height)),
+					rendered: host.querySelector('.rm-page') !== null,
+					height: Math.round(page.height),
+				};
+				break;
+			}
 			return {
-				scrollTop: scroller?.scrollTop ?? 0,
+				scrollTop: scroller.scrollTop,
+				looking,
 				indicator:
 					document.querySelector('[data-testid="rm-reader-page-indicator"]')?.textContent ?? '',
 			};
 		});
-		if (restored.scrollTop <= 0) {
-			fail(`reopening the document did not restore the position (scrollTop=${restored.scrollTop})`);
+		if (restored === null || restored.scrollTop <= 0) {
+			fail(`reopening the document did not restore the position (${JSON.stringify(restored)})`);
 		}
-		// The label may differ by a page: the restore waits for the
-		// target page to be measured, and the reserved heights shift
-		// once the real ones land.
-		const restoredPage = Number(restored.indicator.split('/')[0]?.trim());
-		if (Math.abs(restoredPage - stored.currentPage) > 1) {
+		if (restored.looking === null) fail('could not read the restored position from the layout');
+		if (restored.looking.page !== stored.currentPage) {
 			fail(
-				`restored to page ${restoredPage} but page ${stored.currentPage} was stored ` +
-					`(${JSON.stringify(restored)})`,
+				`restored to page ${restored.looking.page} but page ${stored.currentPage} was stored ` +
+					`(scrollTop ${Math.round(restored.scrollTop)}, ${JSON.stringify(restored.looking)})`,
+			);
+		}
+		// The stored ratio is applied to the target page's own height.
+		// Against the provisional reservation the reader would land
+		// several percent off, which is invisible on a uniform document
+		// and grows down a long one.
+		const storedRatio = stored.position?.pageOffsetRatio ?? 0;
+		if (Math.abs(restored.looking.offsetRatio - storedRatio) > 0.05) {
+			fail(
+				`restored offset ${restored.looking.offsetRatio.toFixed(3)} does not match the stored ` +
+					`${storedRatio.toFixed(3)} (page ${restored.looking.page}, height ` +
+					`${restored.looking.height})`,
 			);
 		}
 		log(
-			`position restored on reopen: scrollTop ${Math.round(restored.scrollTop)}, ` +
-				`header shows page ${restoredPage}`,
+			`position restored on reopen: page ${restored.looking.page} at ` +
+				`${restored.looking.offsetRatio.toFixed(3)} (stored ${storedRatio.toFixed(3)}), ` +
+				`header "${restored.indicator.trim()}"`,
 		);
 
 		// --- Zoom keeps the two layers registered ---

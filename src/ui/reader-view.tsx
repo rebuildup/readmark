@@ -223,6 +223,9 @@ export function ReaderView({
 	// event (and does not in every test environment), and the header
 	// label has to agree with where the reader actually is.
 	const updatePositionRef = useRef<(() => void) | null>(null);
+	// Set when the reader drives the scroller themselves, so a restore
+	// still in progress steps aside instead of yanking them back.
+	const readerMovedRef = useRef(false);
 
 	/** Write the pending position now, if there is one. */
 	const flushSave = useCallback(() => {
@@ -353,11 +356,23 @@ export function ReaderView({
 			if (frame !== 0) return;
 			frame = requestAnimationFrame(update);
 		};
+		// Wheel, touch and keys are the reader's own hands. A
+		// programmatic scroll raises `scroll` but none of these, so the
+		// two are not confused.
+		const markReaderMoved = () => {
+			readerMovedRef.current = true;
+		};
+		for (const event of ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const) {
+			scroller.addEventListener(event, markReaderMoved, { passive: true });
+		}
 		scroller.addEventListener('scroll', onScroll, { passive: true });
 		updatePositionRef.current = update;
 		update();
 		return () => {
 			updatePositionRef.current = null;
+			for (const event of ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const) {
+				scroller.removeEventListener(event, markReaderMoved);
+			}
 			scroller.removeEventListener('scroll', onScroll);
 			if (frame !== 0) cancelAnimationFrame(frame);
 		};
@@ -366,11 +381,24 @@ export function ReaderView({
 		// view is mounted. `scheduleSave` is stable.
 	}, [scheduleSave]);
 
-	// Restore the stored position, once the target page has a measured
-	// box. Before that the page stack is a column of provisional
-	// heights, and a scroll offset computed against it would land
-	// somewhere arbitrary — so the effect re-runs as pages report
-	// their real sizes (`footprints`) and stops as soon as it applies.
+	// Restore the stored position in two phases, because a page's box
+	// and its *reserved* box are different numbers and only the first
+	// one is the page.
+	//
+	//   Phase 1 (coarse). Until the target page has been rendered, the
+	//   page stack is a column of provisional A4 heights. Restoring
+	//   against that column lands in roughly the right place and is
+	//   then never corrected, because the restore would already be
+	//   finished — which is how a stored `pageOffsetRatio` ends up
+	//   applied to a page of a completely different height. So: scroll
+	//   the target into the prefetch band, and do not commit.
+	//   Phase 2 (exact). Once the page has rendered and reported its
+	//   real size, apply the ratio to that and finish. Saving stays
+	//   suspended until then, so the coarse offset is never persisted.
+	//
+	// If the reader scrolls in the meantime the restore is abandoned:
+	// yanking someone back to where the app decided they were, after
+	// they have started moving, is worse than opening at the top.
 	useEffect(() => {
 		if (restoredRef.current) return;
 		if (initialPosition === null) {
@@ -379,9 +407,8 @@ export function ReaderView({
 		}
 		const scroller = scrollRef.current;
 		if (scroller === null) return;
-		const host = scroller.querySelector<HTMLElement>(
-			`[data-page-index="${initialPosition.currentPage}"]`,
-		);
+		const pageIndex = initialPosition.currentPage;
+		const host = scroller.querySelector<HTMLElement>(`[data-page-index="${pageIndex}"]`);
 		if (host === null) {
 			// The stored page is not in this document at all — a stale
 			// row, a hand-edited store, a document that was re-encoded.
@@ -392,25 +419,45 @@ export function ReaderView({
 			restoredRef.current = true;
 			return;
 		}
+		if (readerMovedRef.current) {
+			restoredRef.current = true;
+			return;
+		}
+
+		const scrollerBox = scroller.getBoundingClientRect();
 		const box = host.getBoundingClientRect();
-		if (box.height === 0) {
-			// Not measured yet. But do not wait forever: once every page
-			// has reported a size, a target that is still zero-height is
-			// not going to become measurable.
+		const extentOf = (height: number) => ({
+			pageIndex,
+			top: box.top - scrollerBox.top + scroller.scrollTop,
+			height,
+		});
+
+		const measured = footprints.get(pageIndex);
+		if (measured === undefined) {
+			// Phase 1: bring the page into range. Its reserved height is
+			// good enough for that — the band is two screens wide.
+			const coarse = scrollTopForPosition(
+				extentOf(box.height),
+				{ pageOffsetRatio: 0 },
+				scroller.clientHeight,
+			);
+			if (coarse > scroller.scrollTop) scroller.scrollTop = coarse;
+			// Every page has been measured and this one still has not
+			// been rendered: it is not going to happen, so stop waiting.
 			if (footprints.size >= pageCount) {
 				restoredRef.current = true;
 			}
 			return;
 		}
 
-		const scrollerBox = scroller.getBoundingClientRect();
+		// Phase 2: the real page size, so the stored ratio means what it
+		// said. Footprints are dropped whenever the render options
+		// change, so a measurement here is one taken at the current
+		// scale and rotation.
 		scroller.scrollTop = scrollTopForPosition(
-			{
-				pageIndex: initialPosition.currentPage,
-				top: box.top - scrollerBox.top + scroller.scrollTop,
-				height: box.height,
-			},
+			extentOf(measured.height),
 			initialPosition.position,
+			scroller.clientHeight,
 		);
 		restoredRef.current = true;
 		// Recompute rather than waiting for a scroll event: the header

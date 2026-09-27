@@ -36,16 +36,24 @@ export interface PageExtent {
 	readonly height: number;
 }
 
-/** Where the reader is, as stored. `pageOffsetRatio` is `0` when the
- *  page's top edge is at the top of the viewport and `1` when the
- *  page's bottom edge is.
+/** Where the reader is, as stored: `pageOffsetRatio` is how far the
+ *  viewport's midpoint sits into the page, from `0` at its top edge to
+ *  `1` at its bottom.
  *
- *  Anchored to the page's own top edge rather than to the viewport's
- *  middle: a midpoint-anchored ratio would encode the reader's window
- *  height into the stored value, so the same visual position would
- *  restore differently on a laptop and on a desktop. The cost is that
- *  the position is quantized to the start of the page it belongs to,
- *  which is the trade the page index is carrying anyway. */
+ *  Measured from the viewport's midpoint, because that is the same
+ *  point that decides which page the reader is on — so saving and
+ *  restoring are exact inverses of each other. A top-edge-anchored
+ *  ratio would be independent of the window size, which sounds better
+ *  and is not: it cannot be inverted without also reconstructing the
+ *  window, so a position stored near the end of a page would restore
+ *  to a place the reader is no longer on, and the next save would
+ *  record a different page. That drift is worse than a position that
+ *  is anchored to a window.
+ *
+ *  It also matches what a reader means by "I was on this page": the
+ *  page under the middle of the window is the one they are looking
+ *  at, not the one whose own middle has already gone past.
+ */
 export interface ScrollPosition {
 	readonly pageOffsetRatio: number;
 	/** A `DocumentPosition` is an opaque record; this makes the shape
@@ -91,10 +99,12 @@ export function currentPositionFrom(
 
 	const middle = viewportMiddle(scrollTop, clientHeight);
 	for (const page of measured) {
-		if (page.top + page.height / 2 < middle) continue;
+		// The page the midpoint falls inside: its bottom has not yet
+		// passed the reader's line of sight.
+		if (page.top + page.height < middle) continue;
 		return {
 			pageIndex: page.pageIndex,
-			pageOffsetRatio: clamp01((scrollTop - page.top) / page.height),
+			pageOffsetRatio: clamp01((middle - page.top) / page.height),
 		};
 	}
 
@@ -106,10 +116,17 @@ export function currentPositionFrom(
 /**
  * The scroll offset that puts the reader back where they were.
  *
- * Inverts `currentPositionFrom`: the page's top edge is placed at
- * `ratio × page.height` below the top of the viewport. A page shorter
- * than the viewport still lands correctly — the ratio simply saturates.
+ * The exact inverse of `currentPositionFrom`: the viewport midpoint is
+ * placed `ratio × page.height` into the page, which is where it was
+ * when the position was recorded. `clientHeight` is part of the
+ * signature for that reason — restoring is only defined relative to a
+ * viewport.
  */
-export function scrollTopForPosition(page: PageExtent, position: ScrollPosition): number {
-	return Math.max(0, page.top + clamp01(position.pageOffsetRatio) * page.height);
+export function scrollTopForPosition(
+	page: PageExtent,
+	position: ScrollPosition,
+	clientHeight: number,
+): number {
+	const middle = page.top + clamp01(position.pageOffsetRatio) * page.height;
+	return Math.max(0, middle - clientHeight / 2);
 }
