@@ -1,45 +1,61 @@
 /**
  * readmark — Reader screen.
  *
- * MVP shell: resolves the DocumentId route param to a Document +
- * primary DocumentSource + DocumentBlob, then shows the URL
- * parameter for the document id and a placeholder for the renderer.
- * The real pdfjs-dist wiring lands in the first reader ticket after
- * init.
+ * Resolves the `DocumentId` route param to bytes and hands them to the
+ * PDF reader; owns the "this document cannot be opened" states and the
+ * library hand-back. It does not own rendering — that is
+ * `<ReaderView>`, which only ever sees the format-agnostic
+ * `ReaderHandle<'pdf'>`.
  *
- * Resolution order:
- *   1. `getDocument(documentId)`            — metadata only.
- *   2. `getPrimarySource(documentId)`       — physical identity.
- *   3. `getDocumentBlob(sourceFingerprint)` — bytes.
- * If any step returns null, the reader surfaces a recovery flow
- * (re-import). The MVP shows the empty state for now.
+ * Resolution order (each step is a separate question, and the UI has
+ * to answer them differently):
+ *   1. `getDocument(documentId)`            — is the logical book known?
+ *   2. `getPrimarySource(documentId)`       — is there a file attached?
+ *   3. `getDocumentBlob(sourceFingerprint)` — are the bytes still here?
+ *      They can be gone: the bytes live in their own store precisely so
+ *      they can be evicted (ADR-0005), and a reader that hit the empty
+ *      state without saying "re-import" would look like data loss.
+ *   4. `createPdfReader().open(...)`       — pdf.js takes the bytes.
  *
- * On a successful open, the screen calls `touchLastReadAt(id)` so
- * the library re-sorts correctly on next visit.
+ * The reader module is imported dynamically: pdf.js is the largest
+ * thing in the bundle, and the Library route must not pay for it
+ * before a document is opened.
+ *
+ * Teardown: a source change or an unmount closes the handle, which
+ * cancels in-flight renders and destroys the document. Without it a
+ * render can land against a destroyed document, and the pdf.js worker
+ * survives the route.
  */
 
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
-import type { DocumentId } from '../domain/document.ts';
-import { asDocumentId } from '../domain/document.ts';
+import { useParams } from 'react-router-dom';
+
+import { asDocumentId, type DocumentId } from '../domain/document.ts';
+import type { ReaderHandle } from '../reader/types.ts';
 import {
 	getDocument,
 	getDocumentBlob,
 	getPrimarySource,
 	touchLastReadAt,
 } from '../storage/documents-repo.ts';
-import { Button } from './primitives/button.tsx';
+import { LibraryLink } from './primitives/library-link.tsx';
+import { ReaderView } from './reader-view.tsx';
 
-type ReaderLoadState =
+type ReaderState =
 	| { kind: 'loading' }
-	| { kind: 'ready'; documentId: DocumentId }
 	| { kind: 'not-found' }
-	| { kind: 'missing-blob' };
+	| { kind: 'missing-blob' }
+	| { kind: 'open-failed' }
+	| {
+			kind: 'ready';
+			handle: ReaderHandle<'pdf'>;
+			pageCount: number;
+			title: string;
+	  };
 
 export function ReaderScreen() {
 	const { documentId: rawId } = useParams<{ documentId: string }>();
-
-	const [state, setState] = useState<ReaderLoadState>({ kind: 'loading' });
+	const [state, setState] = useState<ReaderState>({ kind: 'loading' });
 
 	useEffect(() => {
 		if (!rawId) {
@@ -47,89 +63,103 @@ export function ReaderScreen() {
 			return;
 		}
 		let cancelled = false;
+		let opened: ReaderHandle<'pdf'> | null = null;
 
-		(async () => {
+		void (async () => {
 			try {
-				const id = asDocumentId(rawId);
-				const doc = await getDocument(id);
+				// A malformed id is a bad URL, not a broken document:
+				// saying "this PDF will not open" for a typo in the
+				// address bar sends the reader looking in the wrong
+				// place.
+				let id: DocumentId;
+				try {
+					id = asDocumentId(rawId);
+				} catch {
+					setState({ kind: 'not-found' });
+					return;
+				}
+				const document = await getDocument(id);
 				if (cancelled) return;
-				if (!doc) {
+				if (document === null) {
 					setState({ kind: 'not-found' });
 					return;
 				}
 				const source = await getPrimarySource(id);
 				if (cancelled) return;
-				if (!source) {
+				if (source === null) {
 					setState({ kind: 'not-found' });
 					return;
 				}
 				const blob = await getDocumentBlob(source.sourceFingerprint);
 				if (cancelled) return;
-				if (!blob) {
+				if (blob === null) {
 					setState({ kind: 'missing-blob' });
 					return;
 				}
 				await touchLastReadAt(id);
 				if (cancelled) return;
-				setState({ kind: 'ready', documentId: id });
-			} catch (err) {
-				console.error(err);
-				if (!cancelled) setState({ kind: 'not-found' });
+
+				const { createPdfReader } = await import('../reader/pdf/index.ts');
+				if (cancelled) return;
+				const handle = await createPdfReader().open({
+					source: source as typeof source & { readonly format: 'pdf' },
+					blob,
+				});
+				if (cancelled) {
+					// Navigated away while pdf.js was parsing. Closing
+					// here is the only thing that stops the worker.
+					await handle.close();
+					return;
+				}
+				opened = handle;
+				const pageCount = await handle.pageCount();
+				if (cancelled) return;
+				setState({
+					kind: 'ready',
+					handle,
+					pageCount,
+					title: document.metadata.title ?? '(タイトルなし)',
+				});
+			} catch (error: unknown) {
+				console.error('readmark: reader failed to open', error);
+				if (!cancelled) setState({ kind: 'open-failed' });
 			}
 		})();
 
 		return () => {
 			cancelled = true;
+			// `close()` is idempotent and owns the whole teardown.
+			void opened?.close();
 		};
 	}, [rawId]);
 
+	// Ready documents get their own shell (header with toolbar plus the
+	// scroll container), so the two never render two headers.
+	if (state.kind === 'ready') {
+		return <ReaderView handle={state.handle} pageCount={state.pageCount} title={state.title} />;
+	}
+
 	return (
 		<div className="rm-app">
-			<header
-				style={{
-					padding: '12px 24px',
-					borderBottom: '1px solid var(--rm-border)',
-					background: 'var(--rm-bg-surface)',
-					display: 'flex',
-					alignItems: 'center',
-					gap: 16,
-				}}
-			>
-				<Link to="/">
-					<Button variant="ghost">← Library</Button>
-				</Link>
-				<h1 style={{ margin: 0, fontSize: 18, fontFamily: 'var(--rm-font-mono)' }}>
-					{state.kind === 'ready' ? state.documentId.slice(0, 8) : '(no document)'}
-				</h1>
+			<header className="rm-reader-header">
+				<LibraryLink testId="rm-reader-back" />
+				<h1 className="rm-reader-header__title">Reader</h1>
 			</header>
 
-			<main className="rm-shell" style={{ display: 'grid', placeItems: 'center', minHeight: 0 }}>
-				<div
-					style={{
-						border: '1px dashed var(--rm-border-strong)',
-						borderRadius: 'var(--rm-radius-lg)',
-						padding: 48,
-						textAlign: 'center',
-						color: 'var(--rm-fg-muted)',
-						maxWidth: 480,
-					}}
-				>
-					<h2 style={{ marginTop: 0 }}>Reader</h2>
+			<main className="rm-reader-scroll">
+				<div className="rm-reader-empty" data-testid="rm-reader-state">
 					{state.kind === 'loading' && <p>文書を読み込み中…</p>}
 					{state.kind === 'not-found' && (
 						<p>指定された Document が見つかりません。Library から開き直してください。</p>
 					)}
 					{state.kind === 'missing-blob' && (
 						<p>
-							文書のメタデータはありますが bytes が利用できません（eviction された可能性）。 再
-							import が必要です。
+							文書のメタデータはありますが、ファイル本体が利用できません（ブラウザの容量整理で
+							削除された可能性があります）。同じファイルを再度 import してください。
 						</p>
 					)}
-					{state.kind === 'ready' && (
-						<p>
-							PDF レンダラーはこの shell のあとに最初の feature ticket
-							で実装されます。今は座組みだけがここにあります。
-						</p>
+					{state.kind === 'open-failed' && (
+						<p>この PDF を開けませんでした。破損ファイルまたはパスワード保護的文件です。</p>
 					)}
 				</div>
 			</main>
