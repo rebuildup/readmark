@@ -52,6 +52,10 @@ import { LibraryLink } from './primitives/library-link.tsx';
  *  drifting to 112% and staying there. */
 export const ZOOM_LEVELS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3] as const;
 
+/** Keys that scroll the document, and so count as the reader taking
+ *  over from a restore in progress. */
+const READER_SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End']);
+
 /** How far outside the viewport a page may be and still be
  *  materialized. Two screens of slack keeps a fast scroll from
  *  outrunning the render, without paying for the whole file. */
@@ -361,18 +365,45 @@ export function ReaderView({
 		// two are not confused.
 		const markReaderMoved = () => {
 			readerMovedRef.current = true;
+			// The restore is over — the reader has taken over. Leaving
+			// the gate closed here would be worse than losing one write:
+			// the effect that closes it only runs when the page
+			// measurements change, so a scroll that materializes nothing
+			// would suppress every save for the rest of the session and
+			// the position they just chose would never be recorded.
+			if (!restoredRef.current) restoredRef.current = true;
 		};
-		for (const event of ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const) {
+		for (const event of ['wheel', 'touchstart', 'pointerdown'] as const) {
 			scroller.addEventListener(event, markReaderMoved, { passive: true });
 		}
 		scroller.addEventListener('scroll', onScroll, { passive: true });
 		updatePositionRef.current = update;
 		update();
+		// Keys are watched on the document, not the scroller: the
+		// scroller is a plain div and is not focusable, so PageDown and
+		// the arrow keys are delivered to whatever else has focus — or
+		// to nothing at all. A listener on the scroller would have
+		// caught none of the scrolling a reader does with the keyboard.
+		// The filter matters for the same reason: Tab and a bare
+		// keystroke are not movement, and a keystroke aimed at a
+		// control belongs to that control.
+		const onKeyDown = (event: KeyboardEvent) => {
+			const target = event.target;
+			if (target instanceof HTMLElement) {
+				const control = target.closest('input, textarea, select, button, a, [contenteditable]');
+				if (control !== null) return;
+			}
+			if (!READER_SCROLL_KEYS.has(event.key) && event.key !== ' ') return;
+			markReaderMoved();
+		};
+		document.addEventListener('keydown', onKeyDown);
+
 		return () => {
 			updatePositionRef.current = null;
-			for (const event of ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const) {
+			for (const event of ['wheel', 'touchstart', 'pointerdown'] as const) {
 				scroller.removeEventListener(event, markReaderMoved);
 			}
+			document.removeEventListener('keydown', onKeyDown);
 			scroller.removeEventListener('scroll', onScroll);
 			if (frame !== 0) cancelAnimationFrame(frame);
 		};

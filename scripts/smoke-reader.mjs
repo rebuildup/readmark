@@ -170,6 +170,24 @@ async function inkBounds(page, index) {
 	});
 }
 
+/** The single `readingProgress` row, read straight out of IndexedDB. */
+async function readProgressRow(page) {
+	return await page.evaluate(async () => {
+		const db = await new Promise((resolve, reject) => {
+			const request = indexedDB.open('readmark');
+			request.onsuccess = () => resolve(request.result);
+			request.onerror = () => reject(request.error);
+		});
+		const row = await new Promise((resolve) => {
+			const store = db.transaction('readingProgress', 'readonly').objectStore('readingProgress');
+			const cursorRequest = store.openCursor();
+			cursorRequest.onsuccess = () => resolve(cursorRequest.result?.value ?? null);
+		});
+		db.close();
+		return row;
+	});
+}
+
 /**
  * Drag a selection across the text layer with the real mouse, so the
  * browser's own hit-testing decides what gets selected.
@@ -343,6 +361,9 @@ async function main() {
 		if (typeof stored.currentPage !== 'number' || stored.currentPage < 1) {
 			fail(`stored progress has no usable page: ${JSON.stringify(stored)}`);
 		}
+		if (typeof stored.updatedAt !== 'number') {
+			fail(`stored progress has no timestamp: ${JSON.stringify(stored)}`);
+		}
 		log(
 			`progress written: page ${stored.currentPage}, ` +
 				`position ${JSON.stringify(stored.position ?? null)}`,
@@ -421,6 +442,30 @@ async function main() {
 			`position restored on reopen: page ${restored.looking.page} at ` +
 				`${restored.looking.offsetRatio.toFixed(3)} (stored ${storedRatio.toFixed(3)}), ` +
 				`header "${restored.indicator.trim()}"`,
+		);
+
+		// Saving has to be live in a real browser after a restore: a
+		// reader who scrolls on from where they left gets a new row, and
+		// the row they had is not left stranded as the last word.
+		await page.evaluate(() => {
+			const scroller = document.querySelector('[data-testid="rm-reader-scroll"]');
+			if (scroller !== null) scroller.scrollTop += 600;
+		});
+		// The page may not change — a long page can absorb 600px on its
+		// own — so the assertion is that the row moved at all.
+		let updated = null;
+		for (let attempt = 0; attempt < 40; attempt++) {
+			updated = await readProgressRow(page);
+			if (updated !== null && updated.updatedAt !== stored.updatedAt) break;
+			await wait(250);
+		}
+		if (updated === null || updated.updatedAt === stored.updatedAt) {
+			fail(`scrolling after a restore did not update the stored row (${JSON.stringify(updated)})`);
+		}
+		log(
+			`progress after further scrolling: page ${updated.currentPage} at ` +
+				`${Number(updated.position?.pageOffsetRatio ?? 0).toFixed(3)} (was ` +
+				`${storedRatio.toFixed(3)})`,
 		);
 
 		// --- Zoom keeps the two layers registered ---

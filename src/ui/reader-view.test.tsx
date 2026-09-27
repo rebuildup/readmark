@@ -510,6 +510,59 @@ describe('restoring the position', () => {
 		});
 	});
 
+	it('saves the position the reader chose after taking over', async () => {
+		vi.useFakeTimers();
+		await renderView({ currentPage: asPageIndex(3), position: { pageOffsetRatio: 0.25 } });
+		// Phase 1 has brought the target into range; the exact phase has
+		// not run, so the stored position has not been applied.
+		const afterCoarse = scroller().scrollTop;
+
+		// The reader scrolls, then stops. The save gate has to be open
+		// by then, or the position they chose is never recorded.
+		fireEvent.wheel(scroller());
+		await scrollTo(afterCoarse + 40);
+		await act(async () => {
+			vi.advanceTimersByTime(900);
+		});
+
+		expect(saveReadingPosition).toHaveBeenCalled();
+		const saved = saveReadingPosition.mock.calls.at(-1)?.[0];
+		// Their position, not the one that was stored.
+		expect(saved?.position.pageOffsetRatio).not.toBeCloseTo(0.25, 2);
+		expect(renderedPosition()?.pageIndex).toBe(saved?.currentPage);
+	});
+
+	it('keeps saving after a keyboard scroll, whatever has focus', async () => {
+		vi.useFakeTimers();
+		await renderView({ currentPage: asPageIndex(3), position: { pageOffsetRatio: 0.25 } });
+
+		// The scroller is a plain div and is not focusable, so a
+		// listener on it would never see the keys a reader scrolls
+		// with. These land on the document.
+		fireEvent.keyDown(document, { key: 'PageDown' });
+		await scrollTo(120);
+		await act(async () => {
+			vi.advanceTimersByTime(900);
+		});
+
+		expect(saveReadingPosition).toHaveBeenCalled();
+		expect(saveReadingPosition.mock.calls.at(-1)?.[0].position.pageOffsetRatio).not.toBeCloseTo(
+			0.25,
+			2,
+		);
+	});
+
+	it('does not treat an ordinary keystroke as the reader moving', async () => {
+		await renderView({ currentPage: asPageIndex(3), position: { pageOffsetRatio: 0.25 } });
+
+		fireEvent.keyDown(document, { key: 'a' });
+		fireEvent.keyDown(document, { key: 'Tab' });
+		// The restore still completes: the reader did not take over.
+		await waitFor(() => {
+			expect(renderedPosition()?.pageIndex).toBe(3);
+		});
+	});
+
 	it('abandons the restore when the reader scrolls first', async () => {
 		await renderView({ currentPage: asPageIndex(3), position: { pageOffsetRatio: 0.25 } });
 		// Phase 1 has already brought the page into range; the exact
