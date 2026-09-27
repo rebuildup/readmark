@@ -12,10 +12,14 @@
  *   2. Changing the sort control reorders the rows.
  *   3. The search box filters by title and by author, and clearing it
  *      brings the rows back.
- *   4. Delete asks first; cancelling writes nothing.
- *   5. Confirming the delete removes the row AND the document,
+ *   4. No row nests a button inside a link.
+ *   5. Delete asks first: the app behind the dialog is inert, focus
+ *      is on the cancel button, and cancelling writes nothing.
+ *   6. Confirming the delete removes the row AND the document,
  *      source and blob rows in IndexedDB — the delete cascade is a
  *      storage claim, so a DOM-only assertion would not prove it.
+ *   7. The row states the last open ("最終閲覧" / "未閲覧") and never
+ *      claims the book was read through.
  *
  * Why the assertions are about IndexedDB as well as the DOM: a row
  * can leave the list while its bytes stay in the store, which is
@@ -135,11 +139,48 @@ async function main() {
 			fail('clearing the search did not restore 2 rows');
 		log('search filters by title and author, and clears');
 
-		// --- Delete: cancel writes nothing ---
+		// --- Row shape ---
+		// `<a><button>` is invalid HTML: the "読む" affordance has to
+		// be a link that looks like a button, not a button inside one.
+		const nestedInteractive = await page.evaluate(
+			() => document.querySelectorAll('.rm-library-row a button, .rm-library-row a a').length,
+		);
+		if (nestedInteractive !== 0) {
+			fail(`found ${nestedInteractive} interactive element(s) nested inside a row link`);
+		}
+		const finishedClaims = await page.evaluate(() =>
+			Array.from(document.querySelectorAll('.rm-library-row__status'))
+				.map((el) => el.textContent ?? '')
+				.filter((text) => text.includes('読了')),
+		);
+		if (finishedClaims.length > 0) {
+			fail(
+				`row claims a finished-reading state the data does not hold: ${finishedClaims.join(' | ')}`,
+			);
+		}
+		log('rows use one interactive element each, and claim no finished-reading state');
+
+		// --- Delete: the dialog is really modal ---
 		const beforeCancel = await readStoreCounts(page);
 		await rows(page).first().locator('[data-testid="rm-library-row-delete"]').click();
 		const dialog = page.locator('[role="alertdialog"]');
 		await dialog.waitFor({ state: 'visible' });
+		// `aria-modal="true"` is only honest if the background is out
+		// of reach. Read the flags a real browser sees, rather than
+		// the attribute we wrote.
+		const modalState = await page.evaluate(() => {
+			const active = document.activeElement;
+			return {
+				appInert: document.getElementById('app-root')?.inert === true,
+				focusTestId: active?.getAttribute('data-testid') ?? active?.tagName ?? null,
+			};
+		});
+		if (!modalState.appInert) fail('the app behind the dialog is not inert');
+		if (modalState.focusTestId !== 'rm-dialog-cancel') {
+			fail(`expected focus on the cancel button, got ${modalState.focusTestId}`);
+		}
+		log('dialog is modal: background inert, focus on cancel');
+
 		const dialogText = (await dialog.textContent()) ?? '';
 		if (!dialogText.includes('読書進捗')) {
 			fail(`confirmation does not state the reading-state loss: ${dialogText}`);
