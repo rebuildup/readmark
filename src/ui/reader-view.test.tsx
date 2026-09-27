@@ -29,16 +29,21 @@ import type { PageHandle, ReaderHandle } from '../reader/types.ts';
 import { ReaderView } from './reader-view.tsx';
 
 /** Typed so the arguments the view passes are inspectable. */
-const saveReadingPosition = vi.fn(
-	async (_params: {
-		readonly documentId: DocumentId;
-		readonly sourceFingerprint: SourceFingerprint;
-		readonly currentPage: PageIndex;
-		readonly position: { readonly pageOffsetRatio: number };
-	}): Promise<void> => {},
-);
+interface SaveParams {
+	readonly documentId: DocumentId;
+	readonly sourceFingerprint: SourceFingerprint;
+	readonly currentPage: PageIndex;
+	readonly position: { readonly pageOffsetRatio: number };
+}
+
+const saveReadingPosition = vi.fn(async (_params: SaveParams): Promise<void> => {});
+/**
+ * The factory is hoisted above the declarations below, so it may only
+ * reference them lazily: naming the spy directly would be a temporal
+ * dead zone error at import time.
+ */
 vi.mock('../storage/reading-state-repo.ts', () => ({
-	saveReadingPosition,
+	saveReadingPosition: (...args: [SaveParams]) => saveReadingPosition(...args),
 	getReadingProgress: vi.fn(async () => null),
 	deleteReadingProgress: vi.fn(async () => false),
 }));
