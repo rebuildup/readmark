@@ -349,6 +349,32 @@ describe('layoutRun', () => {
 		expect(layout.fontSize).toBeCloseTo(24, 6);
 	});
 
+	it('falls back through the font metrics the way pdf.js does', () => {
+		// A font with no embedded program reports `ascent: 0`. Taking
+		// it at face value puts every span a font-height too low, so
+		// the fallback has to be `1 + descent`, then the default.
+		const noAscent: GlyphRun = {
+			...run,
+			style: { fontFamily: 'serif', ascent: 0, descent: -0.25, vertical: false },
+		};
+		expect(layoutRun(noAscent, makeViewport(1, 0)).y).toBeCloseTo(100 - 0.75 * 12, 6);
+
+		const noMetrics: GlyphRun = {
+			...run,
+			style: { fontFamily: 'serif', ascent: undefined, descent: undefined, vertical: false },
+		};
+		expect(layoutRun(noMetrics, makeViewport(1, 0)).y).toBeCloseTo(100 - 0.8 * 12, 6);
+	});
+
+	it('turns a vertical (縦書き) run a quarter turn', () => {
+		const vertical: GlyphRun = { ...run, style: { ...run.style, vertical: true } };
+		const layout = layoutRun(vertical, makeViewport(1, 0));
+		// Without the quarter turn the glyph run would be transposed
+		// against the canvas: selectable, and in the wrong place.
+		expect(layout.transform).toBe('rotate(1.570796rad)');
+		expect(layout.x).not.toBeCloseTo(50, 3);
+	});
+
 	it('rotates a run that is not upright in the viewport', () => {
 		const rotated: GlyphRun = {
 			...run,

@@ -7,13 +7,13 @@
  *   bun scripts/smoke-reader.mjs
  *
  * Verifies (against `bun run preview`):
- *   1. Library → import a 3-page fixture → 「読む」 → the reader
+ *   1. Library → import a 12-page fixture → 「読む」 → the reader
  *      mounts and a real `<canvas>` appears, painted by pdf.js.
  *   2. The worker asset is fetched and instantiated as a Worker — no
  *      fake-worker fallback, which a "canvas appeared" assertion
  *      cannot tell apart from a main-thread render.
- *   3. Pages are lazy: only the pages near the viewport are
- *      materialized, and scrolling brings the next one in.
+ *   3. Pages are lazy: with a 12-page fixture only the first page is
+ *      materialized on open, and scrolling brings the last one in.
  *   4. The text layer is really selectable — a mouse drag across it
  *      produces a non-empty `window.getSelection()`, which is the
  *      property #7 depends on and which no unit test can assert.

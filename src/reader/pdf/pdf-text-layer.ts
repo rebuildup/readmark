@@ -72,8 +72,13 @@ export interface GlyphRun {
 	readonly height: number;
 	readonly style: {
 		readonly fontFamily: string;
-		readonly ascent: number;
-		readonly descent: number;
+		/** pdf.js leaves these undefined for fonts it could not
+		 *  measure — a base-14 font with no embedded program, for
+		 *  instance, reports `ascent: 0` rather than omitting it. The
+		 *  fallback is therefore the same truthiness test pdf.js
+		 *  uses, not `??`. */
+		readonly ascent: number | undefined;
+		readonly descent: number | undefined;
 		readonly vertical: boolean;
 	};
 }
@@ -93,8 +98,8 @@ function toGlyphRun(item: TextContentItem, styles: TextStyleMap): GlyphRun | nul
 			// default then matches whatever the CSS asks for, which is
 			// the honest answer: the canvas shows the real glyphs.
 			fontFamily: style?.fontFamily ?? 'sans-serif',
-			ascent: style?.ascent ?? 0.8,
-			descent: style?.descent ?? -0.2,
+			ascent: style?.ascent,
+			descent: style?.descent,
 			vertical: style?.vertical ?? false,
 		},
 	};
@@ -138,10 +143,30 @@ export function composeTransform(
 	];
 }
 
+/** pdf.js's fallback ascent for a font whose metrics it could not
+ *  measure. */
+const DEFAULT_FONT_ASCENT = 0.8;
+
+/**
+ * The run's ascent, in em.
+ *
+ * The fallback order is pdf.js's, and the differences matter: a font
+ * that reports `ascent: 0` (no embedded program, base-14 metrics
+ * left at zero) must fall through to `1 + descent`, and only a font
+ * with neither falls to the default. Reading `ascent` with `??` here
+ * would take `0` at face value and place every span of such a font one
+ * font-height too low — a text layer that is present, selectable, and
+ * quietly misaligned.
+ */
+function ascentOf(style: GlyphRun['style']): number {
+	if (style.ascent) return style.ascent;
+	if (style.descent) return 1 + style.descent;
+	return DEFAULT_FONT_ASCENT;
+}
+
 /** The em-box height of a run in CSS pixels: the vertical scale of
- *  the composed transform. `hypot(c, d)`, not `hypot(a, b, c, d)` —
- *  the pair describes one axis, and doubling the count squares the
- *  scale factor. */
+ *  the composed transform, i.e. one axis of it (`hypot(c, d)`).
+ *  Summing all four entries would count the same scale twice. */
 function emHeight(matrix: readonly number[]): number {
 	return Math.hypot(matrix[2] ?? 0, matrix[3] ?? 0);
 }
@@ -168,11 +193,17 @@ export function layoutRun(
 	readonly transform: string;
 } {
 	const tx = composeTransform(viewport.transform, run.transform);
-	const angle = Math.atan2(tx[1] ?? 0, tx[0] ?? 0);
+	let angle = Math.atan2(tx[1] ?? 0, tx[0] ?? 0);
+	// Vertical (縦書き) runs are laid out along the page's y axis, so
+	// the text's own axes are a quarter turn from the page's. Without
+	// this the glyph runs of a Japanese vertical PDF would be
+	// transposed against the canvas — selectable, and in the wrong
+	// place, which is the failure #7 would inherit.
+	if (run.style.vertical) angle += Math.PI / 2;
 	const fontSize = emHeight(tx);
 	// The font's ascent in the same units, so the box is anchored by
 	// its top edge rather than its baseline.
-	const fontAscent = run.style.ascent * fontSize;
+	const fontAscent = ascentOf(run.style) * fontSize;
 	const x0 = tx[4] ?? 0;
 	const y0 = tx[5] ?? 0;
 	// A rotated run's ascent points sideways, so the offset follows

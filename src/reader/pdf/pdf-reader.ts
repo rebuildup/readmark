@@ -13,8 +13,12 @@
  *     once and keeps it; a cache keyed by the 1-based `PageIndex`
  *     means scrolling back up re-attaches the same `PageHandle`
  *     (and its already-rendered DOM) instead of re-running the
- *     render. The cache is bounded by the document's own page count
- *     and released wholesale on `close()`.
+ *     render. The cache is released wholesale on `close()`. It does
+ *     NOT evict: a reader that has scrolled through a long document
+ *     holds one proxy per page until it navigates away, which is
+ *     acceptable for a local-first app whose reader is closed on
+ *     navigation, and is the thing to revisit if a future in-app
+ *     page-jump UI makes a long session the common case.
  *   - **`close()` is the whole teardown contract.** It cancels the
  *     in-flight render of every cached page, releases the page
  *     proxies, and destroys the document — which is what shuts the

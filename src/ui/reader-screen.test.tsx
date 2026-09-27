@@ -79,6 +79,7 @@ vi.mock('../reader/pdf/index.ts', () => ({
 	createPdfReader: () => createPdfReader(),
 	// The view reads this class name to measure a rendered page.
 	PDF_PAGE_CLASS: 'rm-page',
+
 	nextRotation: realNextRotation,
 	viewportSize: realViewportSize,
 }));
@@ -308,6 +309,21 @@ describe('ReaderScreen', () => {
 			'Document が見つかりません',
 		);
 		expect(createPdfReader).not.toHaveBeenCalled();
+	});
+});
+
+describe('render failure', () => {
+	it('keeps the page scroller the only scrollable surface', async () => {
+		vi.mocked(fakePage.render).mockRejectedValueOnce(new Error('out of memory'));
+		renderReader();
+		await screen.findByTestId('rm-reader-toolbar');
+
+		const error = await screen.findByTestId('rm-reader-error');
+		// The alert has to live inside the scroller: as a third child
+		// of the app grid it would push the scroller into an implicit
+		// auto row, and the reader would stop scrolling exactly when a
+		// page failed.
+		expect(error.closest('[data-testid="rm-reader-scroll"]')).not.toBeNull();
 	});
 });
 

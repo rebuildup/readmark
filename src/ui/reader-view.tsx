@@ -6,6 +6,13 @@
  * and rotation. Everything it needs arrives through
  * `ReaderHandle<'pdf'>` — it never sees a pdf.js type.
  *
+ * The rotation and viewport-size helpers come from the PDF reader
+ * rather than from `domain/`, because in the MVP rotation is a
+ * runtime PDF transform (ADR-0007: stored rects stay in raw user
+ * space and the reader applies the transform at paint time). The
+ * format-agnostic seam is `RenderOptions`: a second format gets its
+ * own view rather than a conditional in this one.
+ *
  * Why one `PdfPageView` per page instead of a single render loop:
  *   - Each page decides for itself when it is near the viewport, so
  *     `getPage` is called only for the pages a reader actually
@@ -27,7 +34,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { PageIndex } from '../domain/reading-state.ts';
-import { nextRotation, viewportSize } from '../reader/pdf/index.ts';
+import { nextRotation, PDF_PAGE_CLASS, viewportSize } from '../reader/pdf/index.ts';
 import type { ReaderHandle, RenderOptions } from '../reader/types.ts';
 import { Button } from './primitives/button.tsx';
 import { LibraryLink } from './primitives/library-link.tsx';
@@ -50,10 +57,6 @@ const PREFETCH_MARGIN = '200% 0px';
  *  inside the viewport, and the reader would render the whole file at
  *  once while believing it was lazy. */
 const PROVISIONAL_PAGE = { width: 595, height: 842 };
-
-/** Wrapper class of a rendered page. The screen measures it to reserve
- *  scroll space, so it is part of the contract, not styling. */
-const PAGE_CLASS = 'rm-page';
 
 interface PageFootprint {
 	readonly width: number;
@@ -113,7 +116,7 @@ function PdfPageView({ handle, index, options, reserved, onMeasured, onError }: 
 				const page = await handle.page(index);
 				await page.render(host, options);
 				if (cancelled) return;
-				const rendered = host.querySelector<HTMLElement>(`.${PAGE_CLASS}`);
+				const rendered = host.querySelector<HTMLElement>(`.${PDF_PAGE_CLASS}`);
 				if (rendered === null) return;
 				onMeasured(index, {
 					width: rendered.offsetWidth || Number.parseFloat(rendered.style.width) || 0,
@@ -174,7 +177,16 @@ export function ReaderView({ handle, pageCount, title }: ReaderViewProps) {
 	const handleMeasured = useCallback((index: PageIndex, footprint: PageFootprint) => {
 		setFootprints((previous) => {
 			const existing = previous.get(index);
-			if (existing !== undefined && existing.width === footprint.width) return previous;
+			// Both dimensions: a rotation turns the old width into the
+			// new height, and comparing width alone would keep a
+			// reservation that no longer matches the rendered page.
+			if (
+				existing !== undefined &&
+				existing.width === footprint.width &&
+				existing.height === footprint.height
+			) {
+				return previous;
+			}
 			const next = new Map(previous);
 			next.set(index, footprint);
 			return next;
@@ -195,11 +207,18 @@ export function ReaderView({ handle, pageCount, title }: ReaderViewProps) {
 		let frame = 0;
 		const update = () => {
 			frame = 0;
-			const middle = scroller.scrollTop + scroller.clientHeight / 2;
+			// Everything in one coordinate space: viewport rects.
+			// `offsetTop` is relative to the offset parent while
+			// `scrollTop` is relative to the scroller's content, and
+			// the two differ by the header height — enough to label the
+			// reader as being on the page above the one they are on.
+			const scrollerBox = scroller.getBoundingClientRect();
+			const middle = scrollerBox.top + scroller.clientHeight / 2;
 			const hosts = Array.from(scroller.querySelectorAll<HTMLElement>('[data-page-index]'));
 			let best: PageIndex | null = null;
 			for (const host of hosts) {
-				if (host.offsetTop + host.offsetHeight / 2 < middle) continue;
+				const box = host.getBoundingClientRect();
+				if (box.top + box.height / 2 < middle) continue;
 				best = Number(host.dataset.pageIndex) as PageIndex;
 				break;
 			}
@@ -263,13 +282,19 @@ export function ReaderView({ handle, pageCount, title }: ReaderViewProps) {
 				</div>
 			</header>
 
-			{renderError !== null && (
-				<p className="rm-alert" role="alert" data-testid="rm-reader-error" style={{ margin: 12 }}>
-					{renderError}
-				</p>
-			)}
-
 			<div className="rm-reader-scroll" ref={scrollRef} data-testid="rm-reader-scroll">
+				{/*
+				 * Inside the scroller on purpose. `.rm-app` is a two-row
+				 * grid, so a third child would land in an implicit
+				 * `auto` row, the scroller would size to its content
+				 * instead of scrolling, and the reader would stop
+				 * scrolling exactly when a page failed to render.
+				 */}
+				{renderError !== null && (
+					<p className="rm-alert" role="alert" data-testid="rm-reader-error" style={{ margin: 12 }}>
+						{renderError}
+					</p>
+				)}
 				<div className="rm-reader-pages">
 					{pages.map((index) => {
 						const footprint = footprints.get(index) ?? footprints.get(1 as PageIndex);
