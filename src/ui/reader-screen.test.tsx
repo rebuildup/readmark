@@ -14,7 +14,7 @@
  */
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
@@ -38,7 +38,9 @@ import { ReaderScreen } from './reader-screen.tsx';
 const originalIntersectionObserver = globalThis.IntersectionObserver;
 
 const DOC_ID = '00000000-0000-4000-8000-0000000000aa' as DocumentId;
+const OTHER_DOC_ID = '00000000-0000-4000-8000-0000000000bb' as DocumentId;
 const FINGERPRINT = 'b'.repeat(64) as SourceFingerprint;
+const OTHER_FINGERPRINT = 'c'.repeat(64) as SourceFingerprint;
 
 const fakePage = {
 	format: 'pdf',
@@ -73,6 +75,14 @@ vi.mock('../storage/documents-repo.ts', () => ({
 	getPrimarySource: vi.fn(),
 	getDocumentBlob: vi.fn(),
 	touchLastReadAt: vi.fn(async () => {}),
+}));
+
+// The reading-progress repository is the storage boundary for #5;
+// the screen only decides when to read it and hands the result down.
+vi.mock('../storage/reading-state-repo.ts', () => ({
+	getReadingProgress: vi.fn(async () => null),
+	saveReadingPosition: vi.fn(async () => {}),
+	deleteReadingProgress: vi.fn(async () => false),
 }));
 
 vi.mock('../reader/pdf/index.ts', () => ({
@@ -122,19 +132,25 @@ afterAll(() => {
 });
 
 const repository = await import('../storage/documents-repo.ts');
+const progressRepository = await import('../storage/reading-state-repo.ts');
+const mockGetProgress = vi.mocked(progressRepository.getReadingProgress);
+const saveReadingPosition = vi.mocked(progressRepository.saveReadingPosition);
 const mockGetDocument = vi.mocked(repository.getDocument);
 const mockGetPrimarySource = vi.mocked(repository.getPrimarySource);
 const mockGetDocumentBlob = vi.mocked(repository.getDocumentBlob);
 const mockTouch = vi.mocked(repository.touchLastReadAt);
 
-function makeDocument(): Document {
-	return { id: DOC_ID, metadata: { title: '吾輩は猫である' }, importedAt: 1, lastReadAt: null };
+function makeDocument(id: DocumentId = DOC_ID): Document {
+	return { id, metadata: { title: '吾輩は猫である' }, importedAt: 1, lastReadAt: null };
 }
 
-function makeSource(): DocumentSource {
+function makeSource(
+	documentId: DocumentId = DOC_ID,
+	sourceFingerprint: SourceFingerprint = FINGERPRINT,
+): DocumentSource {
 	return {
-		sourceFingerprint: FINGERPRINT,
-		documentId: DOC_ID,
+		sourceFingerprint,
+		documentId,
 		format: 'pdf',
 		byteSize: 1024,
 		importedAt: 1,
@@ -155,6 +171,7 @@ function renderReader() {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mockGetProgress.mockResolvedValue(null);
 	mockGetDocument.mockResolvedValue(makeDocument());
 	mockGetPrimarySource.mockResolvedValue(makeSource());
 	mockGetDocumentBlob.mockResolvedValue(new Blob(['%PDF-1.4'], { type: 'application/pdf' }));
@@ -170,6 +187,123 @@ describe('ReaderScreen', () => {
 		// recently-read order depends on it.
 		expect(mockTouch).toHaveBeenCalledWith(DOC_ID);
 		expect(createPdfReader).toHaveBeenCalledTimes(1);
+	});
+
+	it('reads the stored position for this source before rendering', async () => {
+		mockGetProgress.mockResolvedValueOnce({
+			documentId: DOC_ID,
+			sourceFingerprint: FINGERPRINT,
+			currentPage: asPageIndex(7),
+			position: { pageOffsetRatio: 0.4 },
+			updatedAt: 1,
+		});
+		renderReader();
+		await screen.findByTestId('rm-reader-toolbar');
+
+		// Progress belongs to bytes, so the read is keyed by the pair —
+		// and it happens before the first paint, because a restore that
+		// ran afterwards would be a visible jump.
+		expect(mockGetProgress).toHaveBeenCalledWith({
+			documentId: DOC_ID,
+			sourceFingerprint: FINGERPRINT,
+		});
+		// The read happened before the first paint of the view: a
+		// restore applied after the reader is on screen is a visible
+		// jump from page 1 to page 7.
+		const readAt = mockGetProgress.mock.invocationCallOrder[0] ?? 0;
+		const openAt = openMock.mock.invocationCallOrder[0] ?? 0;
+		expect(readAt).toBeGreaterThan(0);
+		expect(openAt).toBeGreaterThan(0);
+	});
+
+	it('opens a document that has no stored position', async () => {
+		mockGetProgress.mockResolvedValueOnce(null);
+		renderReader();
+		expect(await screen.findByTestId('rm-reader-toolbar')).toBeTruthy();
+	});
+
+	it('opens the other document when the route changes', async () => {
+		// React reuses the component for a new `/read/:documentId`, so
+		// the view keeps its instance unless it is keyed. Its refs hold
+		// per-document state — which pages were rendered, which sizes
+		// were measured, and whether the stored position was restored —
+		// so without a key the second document inherits the first one's
+		// "already restored" flag and never restores its own.
+		mockGetDocument.mockImplementation(async (id) => makeDocument(id as DocumentId));
+		mockGetPrimarySource.mockImplementation(async (id) =>
+			makeSource(id as DocumentId, id === DOC_ID ? FINGERPRINT : OTHER_FINGERPRINT),
+		);
+		mockGetProgress.mockImplementation(async ({ sourceFingerprint }) =>
+			sourceFingerprint === FINGERPRINT
+				? {
+						documentId: DOC_ID,
+						sourceFingerprint: FINGERPRINT,
+						currentPage: asPageIndex(1),
+						position: { pageOffsetRatio: 0 },
+						updatedAt: 1,
+					}
+				: {
+						documentId: OTHER_DOC_ID,
+						sourceFingerprint: OTHER_FINGERPRINT,
+						currentPage: asPageIndex(2),
+						position: { pageOffsetRatio: 0.25 },
+						updatedAt: 2,
+					},
+		);
+		openMock.mockImplementation(async () => handle);
+
+		render(
+			<MemoryRouter initialEntries={[`/read/${DOC_ID}`]}>
+				<Routes>
+					{/* A link inside the same route: following it reuses the
+					    component instance, which is the case under test. */}
+					<Route
+						path="/read/:documentId"
+						element={
+							<>
+								<ReaderScreen />
+								<Link data-testid="rm-switch-document" to={`/read/${OTHER_DOC_ID}`}>
+									switch
+								</Link>
+							</>
+						}
+					/>
+				</Routes>
+			</MemoryRouter>,
+		);
+		await screen.findByTestId('rm-reader-toolbar');
+		expect(mockGetProgress).toHaveBeenLastCalledWith({
+			documentId: DOC_ID,
+			sourceFingerprint: FINGERPRINT,
+		});
+
+		fireEvent.click(screen.getByTestId('rm-switch-document'));
+		await waitFor(() => {
+			expect(mockGetProgress).toHaveBeenLastCalledWith({
+				documentId: OTHER_DOC_ID,
+				sourceFingerprint: OTHER_FINGERPRINT,
+			});
+		});
+		// The previous document's handle is closed as part of the swap.
+		await waitFor(() => expect(vi.mocked(handle.close)).toHaveBeenCalled());
+	});
+
+	it('ignores a stored page that is outside this document', async () => {
+		// Handing the view a page it will never find would leave it
+		// waiting, and every save in that session suppressed.
+		mockGetProgress.mockResolvedValueOnce({
+			documentId: DOC_ID,
+			sourceFingerprint: FINGERPRINT,
+			currentPage: asPageIndex(99),
+			position: { pageOffsetRatio: 0.5 },
+			updatedAt: 1,
+		});
+		renderReader();
+		await screen.findByTestId('rm-reader-toolbar');
+
+		expect(vi.mocked(saveReadingPosition).mock.calls.length).toBe(0);
+		// The view is alive and scrollable at the top.
+		expect(screen.getByTestId('rm-reader-scroll').scrollTop).toBe(0);
 	});
 
 	it('renders one host per page, 1-based', async () => {

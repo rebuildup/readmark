@@ -23,10 +23,14 @@
  *      follows it.
  *   7. The header has no interactive nesting, and Library is one
  *      click away.
- *   8. The same reader on a 2× display: the backing store is scaled,
+ *   8. Reading progress: scrolling writes a `readingProgress` row, and
+ *      reopening the document restores the scroll position — asserted
+ *      against IndexedDB, because a row can be missing while the list
+ *      still looks right.
+ *   9. The same reader on a 2× display: the backing store is scaled,
  *      and the painted ink covers the whole canvas rather than its
  *      top-left quarter.
- *   9. No console errors and no fake-worker / legacy-build warnings.
+ *  10. No console errors and no fake-worker / legacy-build warnings.
  *
  * Why this exists rather than a unit test: happy-dom has no canvas,
  * no layout, no real Selection, and no IntersectionObserver. Every
@@ -36,9 +40,17 @@
  * `scripts/smoke-harness.mjs`.
  */
 
+import { setTimeout as wait } from 'node:timers/promises';
 import { PDFDocument } from 'pdf-lib';
 
-import { fail, launchBrowser, PREVIEW_URL, withPreview } from './smoke-harness.mjs';
+import {
+	fail,
+	findStoreCount,
+	launchBrowser,
+	PREVIEW_URL,
+	readStoreCounts,
+	withPreview,
+} from './smoke-harness.mjs';
 
 const log = (msg) => console.log(`[smoke] ${msg}`);
 
@@ -48,13 +60,19 @@ const log = (msg) => console.log(`[smoke] ${msg}`);
 // smoke would pass without ever testing laziness.
 const PAGE_COUNT = 12;
 
+/** Page heights, cycled. They differ on purpose: a restore that reads
+ *  a page's *reserved* height instead of its measured one looks
+ *  correct on a document whose pages are all the same size, and drifts
+ *  on one whose pages are not. */
+const PAGE_HEIGHTS = [900, 560, 1180, 720];
+
 /** A multi-page PDF with real text on every page, so the text layer
  *  has something to select. The words are unique per page so a
  *  selection can be attributed to a specific page. */
 async function makeFixturePdf() {
 	const pdf = await PDFDocument.create();
 	for (let index = 1; index <= PAGE_COUNT; index++) {
-		const page = pdf.addPage([420, 900]);
+		const page = pdf.addPage([420, pageHeightFor(index)]);
 		page.drawText(`readmark page ${index} of ${PAGE_COUNT}`, {
 			x: 40,
 			y: 520,
@@ -79,6 +97,10 @@ async function makeFixturePdf() {
 	pdf.setTitle('readmark reader smoke');
 	pdf.setAuthor('readmark smoke');
 	return await pdf.save();
+}
+
+function pageHeightFor(index) {
+	return PAGE_HEIGHTS[(index - 1) % PAGE_HEIGHTS.length];
 }
 
 const pageHost = (page, index) => page.locator(`[data-page-index="${index}"]`);
@@ -145,6 +167,24 @@ async function inkBounds(page, index) {
 			minY,
 			maxY,
 		};
+	});
+}
+
+/** The single `readingProgress` row, read straight out of IndexedDB. */
+async function readProgressRow(page) {
+	return await page.evaluate(async () => {
+		const db = await new Promise((resolve, reject) => {
+			const request = indexedDB.open('readmark');
+			request.onsuccess = () => resolve(request.result);
+			request.onerror = () => reject(request.error);
+		});
+		const row = await new Promise((resolve) => {
+			const store = db.transaction('readingProgress', 'readonly').objectStore('readingProgress');
+			const cursorRequest = store.openCursor();
+			cursorRequest.onsuccess = () => resolve(cursorRequest.result?.value ?? null);
+		});
+		db.close();
+		return row;
 	});
 }
 
@@ -280,6 +320,153 @@ async function main() {
 		if (last.textLayer === null) fail(`page ${lastIndex} rendered without a text layer`);
 		if (last.spanText === '') fail(`page ${lastIndex} text layer is empty`);
 		log(`scrolled: page ${lastIndex} rendered (${last.spanText.slice(0, 24)}…)`);
+
+		// --- Reading progress: written, then restored ---
+		// Scroll to the middle of the document, let the debounce fire,
+		// and read the row back out of IndexedDB.
+		await page.evaluate(() => {
+			const scroller = document.querySelector('[data-testid="rm-reader-scroll"]');
+			if (scroller !== null) scroller.scrollTop = scroller.scrollHeight / 2;
+		});
+		await page.waitForFunction(
+			() => (document.querySelector('[data-testid="rm-reader-scroll"]')?.scrollTop ?? 0) > 0,
+		);
+		// The write is debounced; wait for the row rather than for a
+		// timer this script does not own.
+		let stored = null;
+		for (let attempt = 0; attempt < 40; attempt++) {
+			const counts = await readStoreCounts(page);
+			if (findStoreCount(counts, 'readingProgress') === 1) {
+				stored = await page.evaluate(async () => {
+					const db = await new Promise((resolve, reject) => {
+						const request = indexedDB.open('readmark');
+						request.onsuccess = () => resolve(request.result);
+						request.onerror = () => reject(request.error);
+					});
+					const row = await new Promise((resolve) => {
+						const store = db
+							.transaction('readingProgress', 'readonly')
+							.objectStore('readingProgress');
+						const cursorRequest = store.openCursor();
+						cursorRequest.onsuccess = () => resolve(cursorRequest.result?.value ?? null);
+					});
+					db.close();
+					return row;
+				});
+				break;
+			}
+			await wait(250);
+		}
+		if (stored === null) fail('scrolling did not write a readingProgress row');
+		if (typeof stored.currentPage !== 'number' || stored.currentPage < 1) {
+			fail(`stored progress has no usable page: ${JSON.stringify(stored)}`);
+		}
+		if (typeof stored.updatedAt !== 'number') {
+			fail(`stored progress has no timestamp: ${JSON.stringify(stored)}`);
+		}
+		log(
+			`progress written: page ${stored.currentPage}, ` +
+				`position ${JSON.stringify(stored.position ?? null)}`,
+		);
+
+		// Reopen the document and check the scroller lands back there.
+		await page.click('[data-testid="rm-reader-back"]');
+		await page.locator('[data-testid="rm-library-search"]').waitFor({ state: 'visible' });
+		await page.click('[data-testid="rm-library-row-read"]');
+		await page.locator('[data-testid="rm-reader-toolbar"]').waitFor({ state: 'visible' });
+		await page.locator('[data-page-index="1"] .rm-text-layer span').first().waitFor({
+			state: 'attached',
+			timeout: 10_000,
+		});
+		// Wait for the layout to settle: the restore is two-phase, and
+		// the second phase can only run once the target page has been
+		// rendered and measured.
+		await page.waitForFunction(
+			() => {
+				const host = document.querySelector('[data-page-index="1"] .rm-page');
+				return host !== null;
+			},
+			undefined,
+			{ timeout: 10_000 },
+		);
+		const restored = await page.evaluate(() => {
+			const scroller = document.querySelector('[data-testid="rm-reader-scroll"]');
+			if (scroller === null) return null;
+			const box = scroller.getBoundingClientRect();
+			const middle = box.top + scroller.clientHeight / 2;
+			// The page the reader is actually looking at, from the real
+			// rendered layout: the invariant is "back to the page they
+			// left", not "at some offset in a column of estimates".
+			let looking = null;
+			for (const host of document.querySelectorAll('[data-page-index]')) {
+				const page = host.getBoundingClientRect();
+				if (page.bottom < middle) continue;
+				looking = {
+					page: Number(host.getAttribute('data-page-index')),
+					offsetRatio: Math.min(1, Math.max(0, (middle - page.top) / page.height)),
+					rendered: host.querySelector('.rm-page') !== null,
+					height: Math.round(page.height),
+				};
+				break;
+			}
+			return {
+				scrollTop: scroller.scrollTop,
+				looking,
+				indicator:
+					document.querySelector('[data-testid="rm-reader-page-indicator"]')?.textContent ?? '',
+			};
+		});
+		if (restored === null || restored.scrollTop <= 0) {
+			fail(`reopening the document did not restore the position (${JSON.stringify(restored)})`);
+		}
+		if (restored.looking === null) fail('could not read the restored position from the layout');
+		if (restored.looking.page !== stored.currentPage) {
+			fail(
+				`restored to page ${restored.looking.page} but page ${stored.currentPage} was stored ` +
+					`(scrollTop ${Math.round(restored.scrollTop)}, ${JSON.stringify(restored.looking)})`,
+			);
+		}
+		// The stored ratio is applied to the target page's own height.
+		// Against the provisional reservation the reader would land
+		// several percent off, which is invisible on a uniform document
+		// and grows down a long one.
+		const storedRatio = stored.position?.pageOffsetRatio ?? 0;
+		if (Math.abs(restored.looking.offsetRatio - storedRatio) > 0.05) {
+			fail(
+				`restored offset ${restored.looking.offsetRatio.toFixed(3)} does not match the stored ` +
+					`${storedRatio.toFixed(3)} (page ${restored.looking.page}, height ` +
+					`${restored.looking.height})`,
+			);
+		}
+		log(
+			`position restored on reopen: page ${restored.looking.page} at ` +
+				`${restored.looking.offsetRatio.toFixed(3)} (stored ${storedRatio.toFixed(3)}), ` +
+				`header "${restored.indicator.trim()}"`,
+		);
+
+		// Saving has to be live in a real browser after a restore: a
+		// reader who scrolls on from where they left gets a new row, and
+		// the row they had is not left stranded as the last word.
+		await page.evaluate(() => {
+			const scroller = document.querySelector('[data-testid="rm-reader-scroll"]');
+			if (scroller !== null) scroller.scrollTop += 600;
+		});
+		// The page may not change — a long page can absorb 600px on its
+		// own — so the assertion is that the row moved at all.
+		let updated = null;
+		for (let attempt = 0; attempt < 40; attempt++) {
+			updated = await readProgressRow(page);
+			if (updated !== null && updated.updatedAt !== stored.updatedAt) break;
+			await wait(250);
+		}
+		if (updated === null || updated.updatedAt === stored.updatedAt) {
+			fail(`scrolling after a restore did not update the stored row (${JSON.stringify(updated)})`);
+		}
+		log(
+			`progress after further scrolling: page ${updated.currentPage} at ` +
+				`${Number(updated.position?.pageOffsetRatio ?? 0).toFixed(3)} (was ` +
+				`${storedRatio.toFixed(3)})`,
+		);
 
 		// --- Zoom keeps the two layers registered ---
 		await page.click('[data-testid="rm-zoom-in"]');
