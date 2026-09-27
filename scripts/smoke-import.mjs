@@ -19,30 +19,26 @@
  *
  * Exits non-zero on the first failed assertion. Output is a
  * line-by-line trace of what was checked. Designed to be run
- * manually before marking PR #24 Ready for review.
+ * manually before marking the ticket's PR Ready for review.
+ *
+ * The preview server, browser launch, stable-count reads and
+ * failure signalling live in `scripts/smoke-harness.mjs`, shared
+ * with the other smokes.
  */
 
-import { spawn } from 'node:child_process';
-import { setTimeout as wait } from 'node:timers/promises';
 import { PDFDocument } from 'pdf-lib';
-import { chromium } from 'playwright';
 
-// Some sandboxed environments ship NSS / NSPR outside the
-// default loader path. If `chrome-libs` is present in $HOME,
-// prepend it so the headless shell can resolve its libs.
-const CHROME_LIBS = `${process.env.HOME}/chrome-libs/usr/lib/x86_64-linux-gnu`;
-const extraLd =
-	(await Bun.file(CHROME_LIBS)
-		.exists()
-		.catch(() => false)) ||
-	(await Bun.file(`${CHROME_LIBS}/libnspr4.so`)
-		.exists()
-		.catch(() => false))
-		? CHROME_LIBS
-		: '';
+import {
+	fail,
+	findStoreCount,
+	launchBrowser,
+	PREVIEW_URL,
+	readStableCount,
+	readStoreCounts,
+	withPreview,
+} from './smoke-harness.mjs';
 
-const PREVIEW_PORT = 4173;
-const PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}`;
+const log = (msg) => console.log(`[smoke] ${msg}`);
 
 /** Generate a 2-page PDF in memory for the import test. */
 async function makeTestPdfBytes() {
@@ -53,136 +49,6 @@ async function makeTestPdfBytes() {
 	pdf.setAuthor('readmark smoke');
 	return await pdf.save();
 }
-
-/**
- * Kill a child preview server reliably.
- *
- * Why we track `exited` via the 'exit' event instead of using
- * `proc.killed` / `proc.exitCode`:
- *   - `ChildProcess.killed` is set the moment `proc.kill()` *sends*
- *     a signal — not when the process actually terminates. After
- *     SIGTERM it's already `true`, so a `!proc.killed && exitCode
- *     === null` check would never enter the SIGKILL escalation
- *     branch. The Node docs are explicit on this.
- *   - We bind an 'exit' handler at spawn time and consult that flag
- *     here. That gives a true "is the child gone?" signal.
- *
- * Why both SIGTERM and SIGKILL:
- *   - SIGTERM lets Vite flush its build-cache writes and exit cleanly.
- *   - Some Vite processes hang on SIGTERM under load. After 1s we
- *     escalate to SIGKILL so the next smoke run can't connect to a
- *     half-dead server left listening on 4173 (which would make a
- *     following run hit a stale build and false-green).
- *
- * Why this is a separate function instead of inline `proc.kill`:
- *   - `withPreview`'s finally, `SmokeFailure` throws, and any
- *     uncaught rejection above all share the same cleanup path.
- */
-function killPreview(proc) {
-	if (proc.__rmExited) return;
-	try {
-		proc.kill('SIGTERM');
-	} catch {
-		/* already gone */
-	}
-	setTimeout(() => {
-		if (!proc.__rmExited) {
-			try {
-				proc.kill('SIGKILL');
-			} catch {
-				/* race: reaped between the check and the kill */
-			}
-		}
-	}, 1000).unref();
-}
-
-async function withPreview(fn) {
-	const proc = spawn('bun', ['run', 'preview'], {
-		stdio: ['ignore', 'pipe', 'pipe'],
-		env: { ...process.env, NODE_ENV: 'production' },
-	});
-	// Track actual child termination via the 'exit' event. We CANNOT
-	// use `proc.killed` for this — see the killPreview comment for
-	// why — so we set markers on the object itself. `__rmStderr`
-	// captures Vite's stderr so we can surface it in fail() messages.
-	proc.__rmExited = false;
-	proc.__rmExitedCode = null;
-	proc.__rmStderr = '';
-	let sawListenUrl = false;
-	proc.stderr.on('data', (chunk) => {
-		proc.__rmStderr += chunk.toString();
-	});
-	proc.stdout.on('data', (chunk) => {
-		// Vite prints its bound URL exactly once, on successful bind:
-		//   "  ➜  Local:   http://127.0.0.1:4173/"
-		// Only our spawned child prints this line — a stale server
-		// on 4173 cannot. Decoupling readiness from `fetch(...)`'s
-		// 200 response closes the last false-green path: with
-		// `--strictPort`, our child exits non-zero on port collision
-		// before any listen URL is printed, so the ready predicate
-		// never fires.
-		const text = chunk.toString();
-		if (/Local:\s*http:\/\/127\.0\.0\.1:4173/.test(text)) {
-			sawListenUrl = true;
-		}
-	});
-	proc.on('exit', (code) => {
-		proc.__rmExited = true;
-		proc.__rmExitedCode = code;
-	});
-	try {
-		// Ready loop: declare "ready" only when our child has printed
-		// its bound URL AND is still alive at the moment we declare.
-		// Polling every 100ms catches either side: the URL line shows
-		// up within ~1s on a healthy start, the exit event fires
-		// within ~1s when `--strictPort` rejects a busy 4173.
-		let ready = false;
-		for (let i = 0; i < 100; i++) {
-			if (proc.__rmExited) {
-				fail(
-					`preview server exited before ready ` +
-						`(code=${proc.__rmExitedCode}); ` +
-						`stderr:\n${proc.__rmStderr || '<empty>'}`,
-				);
-			}
-			if (sawListenUrl) {
-				ready = true;
-				break;
-			}
-			await wait(100);
-		}
-		if (!ready) {
-			if (proc.__rmExited) {
-				fail(
-					`preview server exited during ready loop ` +
-						`(code=${proc.__rmExitedCode}); ` +
-						`stderr:\n${proc.__rmStderr || '<empty>'}`,
-				);
-			}
-			fail(
-				`preview server did not print listen URL within 10s; ` +
-					`stderr tail:\n${proc.__rmStderr.slice(-400) || '<empty>'}`,
-			);
-		}
-		// Final guard for the brief race: URL printed, then the child
-		// dies before we hand off to `fn()`. Cheap to check.
-		if (proc.__rmExited) {
-			fail(
-				`preview server died immediately after printing listen URL ` +
-					`(code=${proc.__rmExitedCode}); ` +
-					`stderr:\n${proc.__rmStderr || '<empty>'}`,
-			);
-		}
-		return await fn();
-	} finally {
-		// `finally` is the only reliable cleanup path. `fail()` throws
-		// `SmokeFailure` instead of calling `process.exit`, so this
-		// finally runs even on the early-exit branches above.
-		killPreview(proc);
-	}
-}
-
-const log = (msg) => console.log(`[smoke] ${msg}`);
 
 /**
  * Wait for the import button to round-trip through a busy=true →
@@ -253,65 +119,11 @@ async function waitForBusyRoundTrip(page, label) {
 	log(`${label} round-tripped (import button busy=true → busy=false)`);
 }
 
-/**
- * Read a Playwright locator's count until it stabilizes across
- * three consecutive reads (200 ms apart).
- *
- * Why a settle loop instead of a one-shot count read:
- *   - React + Dexie + IndexedDB form an async chain. A single
- *     read after `waitFor` can land mid-render or mid-write
- *     and report a stale count.
- *   - Three consecutive identical reads at 200 ms intervals is
- *     a cheap "no more writes pending" signal. If the value
- *     is still changing, we fail loudly (caught by `fail()`)
- *     rather than reporting a false-green.
- */
-async function readStableCount(locator) {
-	let last = -1;
-	let stable = 0;
-	for (let i = 0; i < 25; i++) {
-		const current = await locator.count();
-		if (current === last) {
-			stable++;
-			if (stable >= 3) return current;
-		} else {
-			stable = 0;
-			last = current;
-		}
-		await wait(200);
-	}
-	fail(`count did not stabilize (last=${last}); possible UI churn`);
-}
-
-/**
- * Signal a failure WITHOUT calling `process.exit`. Exiting here
- * would skip `withPreview`'s `finally`, leaving the preview server
- * bound to 4173 — the next smoke run would then attach to the
- * stale build and report false-green. Throw instead; the top-level
- * `main().catch()` translates the throw into exit code 1, AFTER
- * the server is killed.
- */
-class SmokeFailure extends Error {
-	constructor(msg) {
-		super(msg);
-		this.name = 'SmokeFailure';
-	}
-}
-const fail = (msg) => {
-	console.error(`[smoke] FAIL: ${msg}`);
-	throw new SmokeFailure(msg);
-};
-
 async function main() {
 	await withPreview(async () => {
 		log('preview server is up');
 
-		const browser = await chromium.launch({
-			args: ['--no-sandbox', '--disable-dev-shm-usage'],
-			env: extraLd
-				? { ...process.env, LD_LIBRARY_PATH: `${extraLd}:${process.env.LD_LIBRARY_PATH ?? ''}` }
-				: undefined,
-		});
+		const browser = await launchBrowser();
 		const context = await browser.newContext();
 		const page = await context.newPage();
 
@@ -341,7 +153,10 @@ async function main() {
 
 		// --- Trigger the import flow ---
 		// The hidden <input type="file"> has data-testid="rm-document-import-input".
-		const fileInput = page.locator('[data-testid="rm-document-import-input"]');
+		// `.first()` because the library's empty state renders a second
+		// import control with the same testid; the header control is
+		// the first one and exists in every state.
+		const fileInput = page.locator('[data-testid="rm-document-import-input"]').first();
 		await fileInput.setInputFiles({
 			name: 'smoke.pdf',
 			mimeType: 'application/pdf',
@@ -371,68 +186,12 @@ async function main() {
 		}
 
 		// --- Verify IndexedDB rows ---
-		const dbStats = await page.evaluate(async () => {
-			// Open the Dexie-managed database by name. The Dexie
-			// default name is "readmark" (or whatever db.ts set).
-			// We don't know the exact name from here, so list
-			// databases via indexedDB.databases().
-			const dbs = await indexedDB.databases();
-			const result = {};
-			for (const { name } of dbs) {
-				if (!name) continue;
-				result[name] = await new Promise((resolve, reject) => {
-					const req = indexedDB.open(name);
-					req.onsuccess = () => {
-						const db = req.result;
-						const stores = Array.from(db.objectStoreNames);
-						const counts = {};
-						let pending = stores.length;
-						if (!pending) {
-							db.close();
-							resolve({ stores: [], counts });
-							return;
-						}
-						for (const store of stores) {
-							try {
-								const tx = db.transaction(store, 'readonly');
-								const cr = tx.objectStore(store).count();
-								cr.onsuccess = () => {
-									counts[store] = cr.result;
-									if (--pending === 0) {
-										db.close();
-										resolve({ stores, counts });
-									}
-								};
-								cr.onerror = () => {
-									if (--pending === 0) {
-										db.close();
-										resolve({ stores, counts });
-									}
-								};
-							} catch (err) {
-								if (--pending === 0) {
-									db.close();
-									resolve({ stores, counts, err: String(err) });
-								}
-							}
-						}
-					};
-					req.onerror = () => reject(req.error);
-				});
-			}
-			return result;
-		});
+		const dbStats = await readStoreCounts(page);
 		log(`IndexedDB databases: ${JSON.stringify(dbStats)}`);
 
-		const findStore = (obj, name) => {
-			for (const k of Object.keys(obj)) {
-				if (obj[k]?.stores?.includes(name)) return obj[k].counts[name];
-			}
-			return undefined;
-		};
-		const docs = findStore(dbStats, 'documents');
-		const sources = findStore(dbStats, 'documentSources');
-		const blobs = findStore(dbStats, 'documentBlobs');
+		const docs = findStoreCount(dbStats, 'documents');
+		const sources = findStoreCount(dbStats, 'documentSources');
+		const blobs = findStoreCount(dbStats, 'documentBlobs');
 		if (docs !== 1) fail(`expected 1 row in documents, got ${docs}`);
 		if (sources !== 1) fail(`expected 1 row in documentSources, got ${sources}`);
 		if (blobs !== 1) fail(`expected 1 row in documentBlobs, got ${blobs}`);
@@ -454,41 +213,10 @@ async function main() {
 		if (stableCount !== 1) fail(`expected 1 library entry after re-import, got ${stableCount}`);
 		log(`library still has ${stableCount} entry after re-import (fingerprint dedup works)`);
 
-		const dbStats2 = await page.evaluate(async () => {
-			const dbs = await indexedDB.databases();
-			const result = {};
-			for (const { name } of dbs) {
-				if (!name) continue;
-				result[name] = await new Promise((resolve) => {
-					const req = indexedDB.open(name);
-					req.onsuccess = () => {
-						const db = req.result;
-						const stores = Array.from(db.objectStoreNames);
-						const counts = {};
-						let pending = stores.length;
-						if (!pending) {
-							db.close();
-							resolve({ stores, counts });
-							return;
-						}
-						for (const store of stores) {
-							const cr = db.transaction(store, 'readonly').objectStore(store).count();
-							cr.onsuccess = () => {
-								counts[store] = cr.result;
-								if (--pending === 0) {
-									db.close();
-									resolve({ stores, counts });
-								}
-							};
-						}
-					};
-				});
-			}
-			return result;
-		});
-		const docs2 = findStore(dbStats2, 'documents');
-		const sources2 = findStore(dbStats2, 'documentSources');
-		const blobs2 = findStore(dbStats2, 'documentBlobs');
+		const dbStats2 = await readStoreCounts(page);
+		const docs2 = findStoreCount(dbStats2, 'documents');
+		const sources2 = findStoreCount(dbStats2, 'documentSources');
+		const blobs2 = findStoreCount(dbStats2, 'documentBlobs');
 		if (docs2 !== 1) fail(`expected documents count to stay 1 after re-import, got ${docs2}`);
 		if (sources2 !== 1) fail(`expected documentSources count to stay 1, got ${sources2}`);
 		if (blobs2 !== 1) fail(`expected documentBlobs count to stay 1, got ${blobs2}`);
