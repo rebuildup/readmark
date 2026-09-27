@@ -28,10 +28,16 @@
  *      reopening the document restores the scroll position — asserted
  *      against IndexedDB, because a row can be missing while the list
  *      still looks right.
- *   9. The same reader on a 2× display: the backing store is scaled,
+ *   9. Bookmarks: the toolbar writes a `bookmarks` row pinned to the
+ *      page being read, the panel lists it, clicking it brings the
+ *      reader back to that page from somewhere else in the document,
+ *      and the confirmed delete removes the row. A row can be missing
+ *      while the list still looks right, so each step is read back out
+ *      of IndexedDB.
+ *  10. The same reader on a 2× display: the backing store is scaled,
  *      and the painted ink covers the whole canvas rather than its
  *      top-left quarter.
- *  10. No console errors and no fake-worker / legacy-build warnings.
+ *  11. No console errors and no fake-worker / legacy-build warnings.
  *
  * Why this exists rather than a unit test: happy-dom has no canvas,
  * no layout, no real Selection, and no IntersectionObserver. Every
@@ -66,6 +72,11 @@ const PAGE_COUNT = 12;
  *  correct on a document whose pages are all the same size, and drifts
  *  on one whose pages are not. */
 const PAGE_HEIGHTS = [900, 560, 1180, 720];
+
+/** The fixture's first text run. A drag that selects this selected the
+ *  page's text layer; one that selects `125%` or `栞` selected the
+ *  toolbar, which is a non-empty selection and a broken claim. */
+const PAGE_TEXT = 'readmark page';
 
 /** A multi-page PDF with real text on every page, so the text layer
  *  has something to select. The words are unique per page so a
@@ -189,6 +200,67 @@ async function readProgressRow(page) {
 	});
 }
 
+async function readBookmarkRows(page) {
+	return await page.evaluate(async () => {
+		const db = await new Promise((resolve, reject) => {
+			const request = indexedDB.open('readmark');
+			request.onsuccess = () => resolve(request.result);
+			request.onerror = () => reject(request.error);
+		});
+		const rows = await new Promise((resolve) => {
+			const store = db.transaction('bookmarks', 'readonly').objectStore('bookmarks');
+			const request = store.getAll();
+			request.onsuccess = () => resolve(request.result);
+			request.onerror = () => resolve([]);
+		});
+		db.close();
+		return rows;
+	});
+}
+
+/** Wait until the page has both its canvas and its text layer in the
+ *  DOM. The text layer is built after the canvas paint resolves, so
+ *  measuring a page the moment its canvas appears races the layer: a
+ *  zoom or a rotation tears both down and puts them back a frame
+ *  later, and measuring in between reports a missing text layer that
+ *  looks exactly like a broken one. */
+async function waitForPageLayers(page, index) {
+	await page.waitForFunction(
+		(target) => {
+			const host = document.querySelector(`[data-page-index="${target}"]`);
+			if (host === null) return false;
+			return (
+				host.querySelector('canvas') !== null &&
+				host.querySelector('.rm-text-layer') !== null &&
+				host.querySelector('.rm-text-layer span') !== null
+			);
+		},
+		index,
+		{ timeout: 10_000 },
+	);
+}
+
+/** The page the reader is actually looking at, read off the real
+ *  rendered layout: the invariant is "on this page", not "at some
+ *  offset in a column of estimates". */
+async function lookingAt(page) {
+	return await page.evaluate(() => {
+		const scroller = document.querySelector('[data-testid="rm-reader-scroll"]');
+		if (scroller === null) return null;
+		const box = scroller.getBoundingClientRect();
+		const middle = box.top + scroller.clientHeight / 2;
+		for (const host of document.querySelectorAll('[data-page-index]')) {
+			const rect = host.getBoundingClientRect();
+			if (rect.bottom < middle) continue;
+			return {
+				page: Number(host.getAttribute('data-page-index')),
+				offsetRatio: Math.min(1, Math.max(0, (middle - rect.top) / rect.height)),
+			};
+		}
+		return null;
+	});
+}
+
 /**
  * Drag a selection across the text layer with the real mouse, so the
  * browser's own hit-testing decides what gets selected.
@@ -197,15 +269,59 @@ async function readProgressRow(page) {
  * baseline: after a 90° rotation the text runs top-to-bottom, and a
  * horizontal drag would travel through the gap between two lines and
  * select nothing — which would look like a broken text layer.
+ *
+ * The span has to be clear of the toolbar. A span under it still
+ * measures, but the pointer lands on the header instead, and the drag
+ * then selects the toolbar's own labels — a non-empty selection that
+ * says nothing about the text layer.
  */
 async function selectAcrossTextLayer(page, index, { diagonal = false } = {}) {
-	const box = await pageHost(page, index).evaluate((host) => {
-		const span = host.querySelector('.rm-text-layer span');
-		if (span === null) return null;
-		const rect = span.getBoundingClientRect();
-		return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-	});
-	if (box === null || box.width < 4 || box.height < 4) {
+	const measureSpan = async () =>
+		await pageHost(page, index).evaluate((host) => {
+			const header = document.querySelector('.rm-reader-header')?.getBoundingClientRect() ?? null;
+			const spans = [...host.querySelectorAll('.rm-text-layer span')];
+			const span = spans.find((candidate) => {
+				const rect = candidate.getBoundingClientRect();
+				return rect.width >= 4 && rect.height >= 4 && (header === null || rect.top > header.bottom);
+			});
+			const rects = spans.map((candidate) => {
+				const rect = candidate.getBoundingClientRect();
+				return {
+					x: Math.round(rect.x),
+					y: Math.round(rect.y),
+					w: Math.round(rect.width),
+					h: Math.round(rect.height),
+				};
+			});
+			return {
+				// `find` answers undefined, not null.
+				span: span === undefined ? null : span.getBoundingClientRect().toJSON(),
+				spanCount: spans.length,
+				rects: rects.slice(0, 6),
+				headerBottom: header === null ? null : Math.round(header.bottom),
+			};
+		});
+	let measured = await measureSpan();
+	if (measured.span === null) {
+		// The page is scrolled past: at 125% and 90° the document is
+		// barely taller than the scroller, so the text can sit above
+		// the viewport — and a drag from a negative y lands on nothing
+		// at all. Bring the page back before deciding that the text
+		// layer is unusable.
+		await pageHost(page, index).scrollIntoViewIfNeeded();
+		await wait(150);
+		measured = await measureSpan();
+	}
+	if (measured.span === null) {
+		fail(
+			`page ${index}: no text-layer span is both measurable and clear of the toolbar — ` +
+				`the drag would test the header, not the page (toolbar ends at ` +
+				`${measured.headerBottom}, ${measured.spanCount} spans, first rects ` +
+				`${JSON.stringify(measured.rects)})`,
+		);
+	}
+	const box = measured.span;
+	if (box.width < 4 || box.height < 4) {
 		fail(`page ${index}: text layer has no measurable span (${JSON.stringify(box)})`);
 	}
 	await page.evaluate(() => window.getSelection()?.removeAllRanges());
@@ -297,6 +413,15 @@ async function main() {
 		const selected = await selectAcrossTextLayer(page, 1);
 		if (selected.length === 0) {
 			fail('a mouse drag across the text layer produced an empty selection');
+		}
+		// Attributable: the selection has to be the page's own words.
+		// An empty one reads as a broken text layer, and one full of
+		// toolbar labels reads as a working header.
+		if (!selected.includes(PAGE_TEXT)) {
+			fail(
+				`a mouse drag across the text layer selected the toolbar, not the page: ` +
+					`${JSON.stringify(selected)}`,
+			);
 		}
 		log(`mouse drag selected ${JSON.stringify(selected)}`);
 
@@ -434,12 +559,14 @@ async function main() {
 					`(scrollTop ${Math.round(restored.scrollTop)}, ${JSON.stringify(restored.looking)})`,
 			);
 		}
-		// The stored ratio is applied to the target page's own height.
-		// Against the provisional reservation the reader would land
-		// several percent off, which is invisible on a uniform document
-		// and grows down a long one.
+		// The stored ratio is applied to the target page's own measured
+		// height. The tolerance covers the accumulated reservation
+		// error of the pages above it, which lazy rendering cannot know
+		// without materializing them; the page itself is asserted
+		// exactly, and a restore that used the reserved heights lands
+		// several percent off — or on a different page entirely.
 		const storedRatio = stored.position?.pageOffsetRatio ?? 0;
-		if (Math.abs(restored.looking.offsetRatio - storedRatio) > 0.05) {
+		if (Math.abs(restored.looking.offsetRatio - storedRatio) > 0.06) {
 			fail(
 				`restored offset ${restored.looking.offsetRatio.toFixed(3)} does not match the stored ` +
 					`${storedRatio.toFixed(3)} (page ${restored.looking.page}, height ` +
@@ -476,11 +603,234 @@ async function main() {
 				`${storedRatio.toFixed(3)})`,
 		);
 
+		// --- Bookmarks: add, list, jump back, delete ---
+		// The bookmark is pinned to the page the reader is looking at
+		// when they ask for it, so that page is read off the layout
+		// first — the toolbar button has no page argument of its own.
+		const atMark = await lookingAt(page);
+		if (atMark === null) fail('could not read the current position before bookmarking');
+		await page.click('[data-testid="rm-add-bookmark"]');
+		let marked = [];
+		for (let attempt = 0; attempt < 40; attempt++) {
+			marked = await readBookmarkRows(page);
+			if (marked.length === 1) break;
+			await wait(250);
+		}
+		if (marked.length !== 1) {
+			fail(`the bookmark button did not write exactly one row: ${JSON.stringify(marked)}`);
+		}
+		const row = marked[0];
+		// A page pin has no anchor: selection-anchored bookmarks are #7,
+		// and a row that pretends to have an anchor would be a lie the
+		// re-anchoring code would later have to honour.
+		if (row.anchor !== null) fail(`a page bookmark carries an anchor: ${JSON.stringify(row)}`);
+		if (typeof row.id !== 'string' || row.id === '') fail('the bookmark row has no id');
+		if (typeof row.sourceFingerprint !== 'string' || row.sourceFingerprint === '') {
+			fail('the bookmark row is not scoped to a fingerprint');
+		}
+		if (row.pageIndex !== atMark.page) {
+			fail(
+				`bookmark pinned to page ${row.pageIndex} while the reader was on ` +
+					`${atMark.page}: ${JSON.stringify(row)}`,
+			);
+		}
+		if (typeof row.createdAt !== 'number') fail('the bookmark row has no timestamp');
+		if (typeof row.position?.pageOffsetRatio !== 'number') {
+			fail(`the bookmark row has no usable position: ${JSON.stringify(row.position)}`);
+		}
+		log(
+			`bookmark written: page ${row.pageIndex} at ` +
+				`${Number(row.position.pageOffsetRatio).toFixed(3)} (anchor ${row.anchor}), ` +
+				`fingerprint ${row.sourceFingerprint.slice(0, 8)}…`,
+		);
+
+		// Adding a bookmark reveals it where it was made: the point of
+		// marking a page is seeing that the mark took, and having to
+		// find the list to find out is a step the reader did not ask
+		// for. The toggle then has to close and reopen it.
+		const panel = page.locator('[data-testid="rm-bookmarks-panel"]');
+		await panel.waitFor({ state: 'visible' });
+		const panelShape = await page.evaluate(() => {
+			const aside = document.querySelector('[data-testid="rm-bookmarks-panel"]');
+			const scroller = document.querySelector('[data-testid="rm-reader-scroll"]');
+			if (aside === null || scroller === null) return null;
+			const asideBox = aside.getBoundingClientRect();
+			const scrollerBox = scroller.getBoundingClientRect();
+			return {
+				aside: { x: asideBox.x, y: asideBox.y, height: asideBox.height },
+				scroller: { x: scrollerBox.x, y: scrollerBox.y, height: scrollerBox.height },
+				viewportHeight: window.innerHeight,
+			};
+		});
+		if (panelShape === null) fail('the panel or the scroller is missing from the layout');
+		// Auto-placement would have put the panel in the header's grid
+		// row: beside the toolbar, as tall as the toolbar, with the
+		// document area below it full width. The panel belongs beside
+		// the whole reading column.
+		if (Math.abs(panelShape.aside.y) > 1) {
+			fail(
+				`the panel starts ${Math.round(panelShape.aside.y)}px down, in the toolbar's ` +
+					'grid row instead of running the full height of the document area',
+			);
+		}
+		if (panelShape.aside.x <= panelShape.scroller.x) {
+			fail(
+				`the panel (x ${Math.round(panelShape.aside.x)}) is not beside the scroller ` +
+					`(x ${Math.round(panelShape.scroller.x)})`,
+			);
+		}
+		if (panelShape.aside.height < panelShape.scroller.height - 1) {
+			fail(
+				`the panel is ${Math.round(panelShape.aside.height)}px tall while the scroller is ` +
+					`${Math.round(panelShape.scroller.height)}px: it does not reach the bottom`,
+			);
+		}
+		log(
+			`panel beside the document area: ${Math.round(panelShape.aside.height)}px tall, ` +
+				`scroller ${Math.round(panelShape.scroller.height)}px`,
+		);
+
+		await page.click('[data-testid="rm-toggle-bookmarks"]');
+		await panel.waitFor({ state: 'detached' });
+		await page.click('[data-testid="rm-toggle-bookmarks"]');
+		await panel.waitFor({ state: 'visible' });
+		log('the panel toggle closes and reopens the panel');
+
+		// The panel lists it, with the page a human would say.
+		const listLabel = await panel.locator('[data-testid="rm-bookmark-jump"]').first().textContent();
+		if (listLabel === null || !listLabel.includes(String(row.pageIndex))) {
+			fail(
+				`the panel does not name the bookmarked page ${row.pageIndex}: ` +
+					`${JSON.stringify(listLabel)}`,
+			);
+		}
+		const count = await page.locator('[data-testid="rm-bookmarks-count"]').textContent();
+		if (count === null || !count.includes('1')) {
+			fail(`the panel count does not read 1: ${JSON.stringify(count)}`);
+		}
+		const empty = await page.locator('[data-testid="rm-bookmarks-empty-panel"]').count();
+		if (empty !== 0) fail('the panel shows its empty state while a bookmark exists');
+		log(`panel lists the bookmark as "${listLabel.trim()}"`);
+
+		// Jump back: leave the page entirely, then click the row. A jump
+		// that only works from where the bookmark was taken would prove
+		// nothing, so the reader is moved to the other end first.
+		await page.evaluate(() => {
+			const scroller = document.querySelector('[data-testid="rm-reader-scroll"]');
+			if (scroller !== null) scroller.scrollTop = 0;
+		});
+		await page.waitForFunction(
+			() => (document.querySelector('[data-testid="rm-reader-scroll"]')?.scrollTop ?? 1) < 40,
+		);
+		const away = await lookingAt(page);
+		if (away === null || away.page === row.pageIndex) {
+			fail(`the reader did not leave the bookmarked page: ${JSON.stringify(away)}`);
+		}
+		await page.click('[data-testid="rm-bookmark-jump"]');
+		let jumped = null;
+		for (let attempt = 0; attempt < 40; attempt++) {
+			jumped = await lookingAt(page);
+			// The jump is two-phase: the second phase can only run once
+			// the target page has been measured, so a page match alone
+			// is not the end of it.
+			if (jumped !== null && jumped.page === row.pageIndex) {
+				const drift = Math.abs(jumped.offsetRatio - row.position.pageOffsetRatio);
+				if (drift <= 0.06) break;
+			}
+			await wait(250);
+		}
+		if (jumped === null || jumped.page !== row.pageIndex) {
+			fail(
+				`the bookmark jump did not land on page ${row.pageIndex}: ` + `${JSON.stringify(jumped)}`,
+			);
+		}
+		const jumpDrift = Math.abs(jumped.offsetRatio - row.position.pageOffsetRatio);
+		if (jumpDrift > 0.06) {
+			fail(
+				`the bookmark jump landed at ${jumped.offsetRatio.toFixed(3)}, ` +
+					`${jumpDrift.toFixed(3)} from the stored ` +
+					`${Number(row.position.pageOffsetRatio).toFixed(3)}`,
+			);
+		}
+		log(
+			`bookmark jump from page ${away.page} to page ${jumped.page} at ` +
+				`${jumped.offsetRatio.toFixed(3)} (stored ` +
+				`${Number(row.position.pageOffsetRatio).toFixed(3)})`,
+		);
+
+		// A second bookmark on the same page must not overwrite the
+		// first: two marks on one page are two marks, and the panel
+		// has to be able to tell them apart.
+		await page.click('[data-testid="rm-add-bookmark"]');
+		for (let attempt = 0; attempt < 40; attempt++) {
+			marked = await readBookmarkRows(page);
+			if (marked.length === 2) break;
+			await wait(250);
+		}
+		if (marked.length !== 2) {
+			fail(`a second bookmark on the same page replaced the first: ${JSON.stringify(marked)}`);
+		}
+		if (marked[0].id === marked[1].id) fail('two bookmarks on one page share an id');
+		const jumps = await page.locator('[data-testid="rm-bookmark-jump"]').allTextContents();
+		if (jumps.length !== 2 || jumps[0] === jumps[1]) {
+			fail(
+				`two bookmarks on page ${row.pageIndex} are not distinguishable: ${JSON.stringify(jumps)}`,
+			);
+		}
+		log(
+			`two bookmarks on page ${row.pageIndex}: ${jumps.map((label) => label.trim()).join(' / ')}`,
+		);
+
+		// Delete: the row goes only after the confirmation, and the
+		// panel and the store have to agree afterwards.
+		await page.locator('[data-testid="rm-bookmark-delete"]').first().click();
+		await page.locator('[data-testid="rm-dialog-confirm"]').waitFor({ state: 'visible' });
+		await page.click('[data-testid="rm-dialog-confirm"]');
+		let afterDelete = [];
+		for (let attempt = 0; attempt < 40; attempt++) {
+			afterDelete = await readBookmarkRows(page);
+			if (afterDelete.length === 1) break;
+			await wait(250);
+		}
+		if (afterDelete.length !== 1) {
+			fail(`the confirmed delete left ${afterDelete.length} rows: ${JSON.stringify(afterDelete)}`);
+		}
+		if (afterDelete[0].id === row.id) fail('the confirmed delete removed a different bookmark');
+		if ((await page.locator('[data-testid="rm-bookmark-jump"]').count()) !== 1) {
+			fail('the panel did not drop the deleted bookmark');
+		}
+		log(`confirmed delete removed one row; the other survives: ${JSON.stringify(afterDelete)}`);
+
+		// The last one: the panel has to reach its empty state, and
+		// the reader has to be left where they were.
+		await page.locator('[data-testid="rm-bookmark-delete"]').first().click();
+		await page.click('[data-testid="rm-dialog-confirm"]');
+		for (let attempt = 0; attempt < 40; attempt++) {
+			afterDelete = await readBookmarkRows(page);
+			if (afterDelete.length === 0) break;
+			await wait(250);
+		}
+		if (afterDelete.length !== 0) {
+			fail(`bookmarks survived their deletion: ${JSON.stringify(afterDelete)}`);
+		}
+		await page.locator('[data-testid="rm-bookmarks-empty-panel"]').waitFor({ state: 'visible' });
+		await page.click('[data-testid="rm-toggle-bookmarks"]');
+		if ((await panel.count()) !== 0) fail('the panel toggle did not close the panel');
+		log('bookmarks deleted, panel empty, panel closed');
+
 		// --- Zoom keeps the two layers registered ---
+		// Zoom and rotation are claims about the page on screen, and the
+		// flow above left the reader in the middle of the document.
+		// Page 1 has to be back and rendered before it can be measured:
+		// measuring a placeholder reports no text layer, which then
+		// reads as a broken one rather than an absent one.
+		await pageHost(page, 1).scrollIntoViewIfNeeded();
+		await waitForPageLayers(page, 1);
 		await page.click('[data-testid="rm-zoom-in"]');
 		await page.waitForFunction(
 			() => document.querySelector('[data-testid="rm-reader-zoom"]')?.textContent === '125%',
 		);
+		await waitForPageLayers(page, 1);
 		const zoomed = await measure(page, 1);
 		if (zoomed.canvas.width <= first.canvas.width) {
 			fail(`zoom in did not grow the page (${first.canvas.width} -> ${zoomed.canvas.width})`);
@@ -504,6 +854,7 @@ async function main() {
 			const box = canvas.getBoundingClientRect();
 			return box.width > box.height; // portrait became landscape
 		});
+		await waitForPageLayers(page, 1);
 		const rotated = await measure(page, 1);
 		if (rotated.canvas.width <= rotated.canvas.height) {
 			fail(`rotation did not swap the viewport: ${JSON.stringify(rotated.canvas)}`);
@@ -520,9 +871,8 @@ async function main() {
 		);
 
 		// --- The selection still works on a rotated, zoomed page ---
-		// Page 1 has to be back on screen: the drag is a real pointer
-		// gesture and cannot happen in a scrolled-away region.
-		await pageHost(page, 1).scrollIntoViewIfNeeded();
+		// The drag is a real pointer gesture, so it can only happen
+		// where the page is; page 1 is still the one on screen.
 		await pageHost(page, 1)
 			.locator('.rm-text-layer span')
 			.first()
@@ -530,6 +880,9 @@ async function main() {
 		const rotatedSelection = await selectAcrossTextLayer(page, 1, { diagonal: true });
 		if (rotatedSelection.length === 0) {
 			fail('selection stopped working after zoom + rotation');
+		}
+		if (!rotatedSelection.includes(PAGE_TEXT)) {
+			fail(`selection after rotate is not the page's text: ${JSON.stringify(rotatedSelection)}`);
 		}
 		log(`selection after rotate: ${JSON.stringify(rotatedSelection)}`);
 
