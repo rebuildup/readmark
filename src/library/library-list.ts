@@ -168,10 +168,14 @@ export function formatImportedAt(importedAt: number, now: number): string {
 }
 
 /** "When did I last read this", relative to `now`. `null` means the
- *  document has never been opened — shown as `未読` so the
- *  `recently-read` order is legible instead of looking arbitrary. */
+ *  document has never been opened — shown as `未閲覧` so the
+ *  `recently-read` order is legible instead of looking arbitrary.
+ *
+ *  The wording stops at "last opened": readmark stores no
+ *  finished-reading state, so no surface may render this as "read
+ *  through". */
 export function formatLastReadAt(lastReadAt: number | null, now: number): string {
-	if (lastReadAt === null) return '未読';
+	if (lastReadAt === null) return '未閲覧';
 	const days = wholeDaysBetween(lastReadAt, now);
 	if (days === 0) return '今日';
 	if (days === 1) return '昨日';

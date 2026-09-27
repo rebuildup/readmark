@@ -283,7 +283,7 @@ describe('formatImportedAt / formatLastReadAt', () => {
 		expect(formatLastReadAt(at(2026, 8, 27, 23), now)).toBe('今日');
 	});
 
-	it('reports 未読 for a document that was never opened', () => {
-		expect(formatLastReadAt(null, now)).toBe('未読');
+	it('reports 未閲覧 for a document that was never opened', () => {
+		expect(formatLastReadAt(null, now)).toBe('未閲覧');
 	});
 });

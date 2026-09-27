@@ -5,6 +5,14 @@
  * system here is ~30 lines of CSS custom properties (see styles.css).
  * Adding a component library would more than double the bundle for
  * negligible benefit at MVP scale.
+ *
+ * Why the variants are CSS classes instead of inline styles: a
+ * navigation that looks like a button must be a `<Link>`, not a
+ * `<Link>` wrapping a `<button>`. Nesting interactive elements is
+ * invalid HTML and makes keyboard and AT behaviour depend on the
+ * browser's willingness to guess. The classes let `Button` and
+ * `Link` share one visual definition — see `.rm-button` in
+ * `styles.css`.
  */
 
 import type { ButtonHTMLAttributes, ReactNode, Ref } from 'react';
@@ -27,42 +35,13 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 	readonly ref?: Ref<HTMLButtonElement>;
 }
 
-const variants = {
-	primary: {
-		background: 'var(--rm-accent)',
-		color: 'var(--rm-accent-fg)',
-		border: '1px solid var(--rm-accent)',
-	},
-	secondary: {
-		background: 'var(--rm-bg-surface)',
-		color: 'var(--rm-fg)',
-		border: '1px solid var(--rm-border)',
-	},
-	ghost: {
-		background: 'transparent',
-		color: 'var(--rm-fg)',
-		border: '1px solid transparent',
-	},
-	danger: {
-		background: 'var(--rm-danger)',
-		color: 'var(--rm-danger-fg)',
-		border: '1px solid var(--rm-danger)',
-	},
-} as const;
-
-export function Button({ variant = 'secondary', style, children, ...rest }: ButtonProps) {
+export function Button({ variant = 'secondary', className, children, ...rest }: ButtonProps) {
+	const classes =
+		className === undefined
+			? `rm-button rm-button--${variant}`
+			: `rm-button rm-button--${variant} ${className}`;
 	return (
-		<button
-			type="button"
-			{...rest}
-			style={{
-				...variants[variant],
-				padding: '8px 14px',
-				borderRadius: 'var(--rm-radius-md)',
-				fontWeight: 500,
-				...style,
-			}}
-		>
+		<button type="button" className={classes} {...rest}>
 			{children}
 		</button>
 	);

@@ -47,8 +47,17 @@ vi.mock('../storage/documents-repo.ts', () => ({
 	deleteDocument: vi.fn(),
 }));
 
+/**
+ * The stub's button also acts as a "refresh" trigger: clicking it
+ * calls `onImported`, which is how the screen re-fetches. The real
+ * component is #3's tested flow and would drag pdf.js into this file.
+ */
 vi.mock('./document-import.tsx', () => ({
-	DocumentImport: () => <button type="button">PDF を import</button>,
+	DocumentImport: ({ onImported }: { onImported?: (result: unknown) => void }) => (
+		<button type="button" onClick={() => onImported?.({ documentId: 'stub' })}>
+			PDF を import
+		</button>
+	),
 }));
 
 const mockListLibrary = vi.mocked(listLibrary);
@@ -218,9 +227,77 @@ describe('LibraryScreen', () => {
 		renderScreen();
 		await waitForRows(1);
 
-		// Title link and the "読む" button both target the reader.
+		// Title link and "読む" both target the reader.
 		for (const link of within(rowByDocumentId(entry.document.id)).getAllByRole('link')) {
 			expect(link.getAttribute('href')).toBe(`/read/${entry.document.id}`);
+		}
+	});
+
+	it('keeps every row free of interactive nesting', async () => {
+		mockListLibrary.mockResolvedValue([
+			makeEntry({ title: 'a', importedAt: 1000 }),
+			makeEntry({ title: 'b', importedAt: 2000 }),
+		]);
+		renderScreen();
+		await waitForRows(2);
+
+		// `<a><button>` is invalid HTML and leaves keyboard / AT
+		// behaviour to the browser's guesswork. "読む" is a link
+		// styled as a button; only 削除 is a real button.
+		for (const row of screen.getAllByTestId('rm-library-row')) {
+			for (const link of within(row).getAllByRole('link')) {
+				expect(link.querySelector('button')).toBeNull();
+				expect(link.querySelector('a')).toBeNull();
+			}
+			expect(within(row).getAllByRole('button')).toHaveLength(1);
+		}
+	});
+
+	it('describes lastReadAt as the last open, never as finished reading', async () => {
+		const opened = makeEntry({ title: 'opened once', importedAt: 1000, lastReadAt: 1000 });
+		const never = makeEntry({ title: 'never opened', importedAt: 2000 });
+		mockListLibrary.mockResolvedValue([opened, never]);
+		renderScreen();
+		await waitForRows(2);
+
+		// `lastReadAt` records when a source was opened. readmark
+		// keeps no finished-reading state, so claiming 読了 here would
+		// assert something the stored data does not hold.
+		const openedRow = rowByDocumentId(opened.document.id);
+		expect(openedRow.textContent).toContain('最終閲覧');
+		expect(openedRow.textContent).not.toContain('読了');
+		const neverRow = rowByDocumentId(never.document.id);
+		expect(neverRow.textContent).toContain('未閲覧');
+		expect(neverRow.textContent).not.toContain('読了');
+	});
+
+	it('re-bases relative dates on refresh instead of freezing them at mount', async () => {
+		// Only `Date` is faked, so RTL's timers keep working.
+		vi.useFakeTimers({ toFake: ['Date'] });
+		try {
+			vi.setSystemTime(new Date(2026, 8, 27, 12, 0, 0));
+			// Evaluated per call, so the second answer is stamped on
+			// whatever day the clock reads at refresh time.
+			mockListLibrary
+				.mockImplementationOnce(async () => [
+					makeEntry({ title: 'day one', importedAt: Date.now() }),
+				])
+				.mockImplementation(async () => [makeEntry({ title: 'day two', importedAt: Date.now() })]);
+			renderScreen();
+			await waitForRows(1);
+			expect(screen.getByTestId('rm-library-row').textContent).toContain('今日に追加');
+
+			// The session crossed midnight and a document is imported.
+			// Measured against a `now` frozen at mount it would render
+			// a future timestamp as a negative number of days.
+			vi.setSystemTime(new Date(2026, 8, 28, 12, 0, 0));
+			fireEvent.click(screen.getByText('PDF を import'));
+			await waitFor(() => expect(rowTitles()).toEqual(['day two']));
+			const text = screen.getByTestId('rm-library-row').textContent ?? '';
+			expect(text).toContain('今日に追加');
+			expect(text).not.toContain('日前');
+		} finally {
+			vi.useRealTimers();
 		}
 	});
 

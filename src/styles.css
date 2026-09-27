@@ -151,6 +151,56 @@ pre {
 	border: 0;
 }
 
+/*
+ * Buttons are classes, not inline styles, so a `<Link>` can be a
+ * button without rendering a `<button>` inside an `<a>`: nesting
+ * interactive elements is invalid HTML, and the row's "読む"
+ * affordance is a navigation, not an action. Both paths therefore
+ * read the same tokens from one place.
+ */
+.rm-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 8px 14px;
+	border-radius: var(--rm-radius-md);
+	font-weight: 500;
+	line-height: 1.4;
+	text-decoration: none;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.rm-button:disabled {
+	opacity: 0.6;
+	cursor: not-allowed;
+}
+
+.rm-button--primary {
+	background: var(--rm-accent);
+	color: var(--rm-accent-fg);
+	border: 1px solid var(--rm-accent);
+}
+
+.rm-button--secondary {
+	background: var(--rm-bg-surface);
+	color: var(--rm-fg);
+	border: 1px solid var(--rm-border);
+}
+
+.rm-button--ghost {
+	background: transparent;
+	color: var(--rm-fg);
+	border: 1px solid transparent;
+}
+
+/* Irreversible actions only. */
+.rm-button--danger {
+	background: var(--rm-danger);
+	color: var(--rm-danger-fg);
+	border: 1px solid var(--rm-danger);
+}
+
 /* --- library ----------------------------------------------------------- */
 
 .rm-library-header {
