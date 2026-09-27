@@ -389,6 +389,32 @@ export function ReaderView({
 		[flushSave],
 	);
 
+	/**
+	 * Change the render options and drop the measured page sizes.
+	 *
+	 * A footprint records a page's size *at the options it was
+	 * measured with*. Keeping them across a zoom or a rotation would
+	 * leave the scroller with a column of mixed geometry — some pages
+	 * at the new size, the rest at the old one — and both the page
+	 * indicator and a restored position would be computed against a
+	 * layout that is not the one on screen. Every page falls back to
+	 * the rotation-aware provisional size and re-measures as it
+	 * materializes; the visible ones do so immediately.
+	 */
+	function changeOptions(next: { zoom?: number; rotation?: 0 | 90 | 180 | 270 }): void {
+		if (next.zoom !== undefined) setZoom(next.zoom);
+		if (next.rotation !== undefined) setRotation(next.rotation);
+		setFootprints(new Map());
+	}
+
+	function zoomIn(): void {
+		changeOptions({ zoom: nextZoom(zoom, 1) });
+	}
+
+	function zoomOut(): void {
+		changeOptions({ zoom: nextZoom(zoom, -1) });
+	}
+
 	return (
 		<div className="rm-app rm-app--reader">
 			<header className="rm-reader-header">
@@ -396,28 +422,18 @@ export function ReaderView({
 				<h1 className="rm-reader-header__title">{title}</h1>
 				<span className="rm-reader-header__spacer" />
 				<div className="rm-reader-toolbar" data-testid="rm-reader-toolbar">
-					<Button
-						variant="ghost"
-						onClick={() => setZoom((current) => nextZoom(current, -1))}
-						data-testid="rm-zoom-out"
-						aria-label="縮小"
-					>
+					<Button variant="ghost" onClick={zoomOut} data-testid="rm-zoom-out" aria-label="縮小">
 						−
 					</Button>
 					<span className="rm-reader-zoom" data-testid="rm-reader-zoom">
 						{Math.round(zoom * 100)}%
 					</span>
-					<Button
-						variant="ghost"
-						onClick={() => setZoom((current) => nextZoom(current, 1))}
-						data-testid="rm-zoom-in"
-						aria-label="拡大"
-					>
+					<Button variant="ghost" onClick={zoomIn} data-testid="rm-zoom-in" aria-label="拡大">
 						＋
 					</Button>
 					<Button
 						variant="ghost"
-						onClick={() => setRotation((current) => nextRotation(current, 90))}
+						onClick={() => changeOptions({ rotation: nextRotation(rotation, 90) })}
 						data-testid="rm-rotate"
 					>
 						回転
