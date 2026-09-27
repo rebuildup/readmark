@@ -21,8 +21,8 @@ import {
 	pdfRectToScreen,
 	rotationSwapsDimensions,
 	screenPointToPdf,
-	viewportSize,
 	type ViewportLike,
+	viewportSize,
 } from './pdf-coords.ts';
 
 /**
@@ -63,7 +63,7 @@ function makeViewport(
 			}
 		},
 		convertToViewportRectangle(rect) {
-			const [x0, y0, x1, y1] = rect;
+			const [x0 = 0, y0 = 0, x1 = 0, y1 = 0] = rect;
 			// Flat `[x0, y0, x1, y1]`, corners in whatever order the
 			// rotation produces — the real PageViewport does not
 			// normalize, and neither do we.
