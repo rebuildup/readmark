@@ -75,6 +75,10 @@ export function ReaderScreen() {
 		}
 		let cancelled = false;
 		let opened: ReaderHandle<'pdf'> | null = null;
+		// The previous document is on screen while this one opens. Show
+		// the loading state instead: a reader who follows a link to
+		// another document should not be looking at the old one.
+		setState({ kind: 'loading' });
 
 		void (async () => {
 			try {
@@ -144,7 +148,7 @@ export function ReaderScreen() {
 					title: document.metadata.title ?? '(タイトルなし)',
 					documentId: id,
 					sourceFingerprint: source.sourceFingerprint,
-					storedPosition: readStoredPosition(progress),
+					storedPosition: readStoredPosition(progress, pageCount),
 				});
 			} catch (error: unknown) {
 				console.error('readmark: reader failed to open', error);
@@ -163,7 +167,16 @@ export function ReaderScreen() {
 	// scroll container), so the two never render two headers.
 	if (state.kind === 'ready') {
 		return (
+			// Keyed by the source identity. React reuses the component
+			// for a new `/read/:documentId`, and this view's refs carry
+			// per-document state: which pages have been rendered, which
+			// sizes were measured, and whether the stored position has
+			// been restored. Without the key, the second document would
+			// inherit the first one's "already restored" flag and never
+			// restore its own — and would keep the first one's page
+			// measurements, which are that document's pages.
 			<ReaderView
+				key={`${state.documentId}:${state.sourceFingerprint}`}
 				handle={state.handle}
 				pageCount={state.pageCount}
 				title={state.title}
@@ -205,19 +218,24 @@ export function ReaderScreen() {
 /**
  * Read a stored position into the shape the view restores from.
  *
- * A stored page that no longer exists in this source (a document
- * edited under a reused fingerprint is impossible, but a schema
- * migration or a hand-edited store is not) and a stored `position`
- * that is not one of ours are both treated as "no position": the
- * reader opens at the top, which is a smaller failure than scrolling
- * to a page that is not there.
+ * A stored `position` that is not one of ours, and a stored page
+ * outside this document's range, are both treated as "no position":
+ * the reader opens at the top, which is a smaller failure than
+ * scrolling to a page that is not there — and than leaving the view
+ * waiting for one that never arrives.
  */
 function readStoredPosition(
 	progress: ReadingProgress | null,
+	pageCount: number,
 ): { readonly currentPage: PageIndex; readonly position: ScrollPosition } | null {
 	if (progress === null) return null;
 	const ratio = progress.position?.pageOffsetRatio;
 	if (typeof ratio !== 'number' || !Number.isFinite(ratio)) return null;
+	// A page outside this document cannot be restored, and handing it
+	// to the view would leave it waiting for a target that never
+	// appears — which suppresses every save for the rest of the
+	// session. The reader opens at the top instead.
+	if (progress.currentPage < 1 || progress.currentPage > pageCount) return null;
 	return {
 		currentPage: progress.currentPage,
 		position: { pageOffsetRatio: Math.min(1, Math.max(0, ratio)) },

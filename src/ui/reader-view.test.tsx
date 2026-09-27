@@ -221,6 +221,50 @@ describe('saving the position', () => {
 		});
 	});
 
+	it('writes once for a continuous scroll, after it stops', async () => {
+		vi.useFakeTimers();
+		renderView(null);
+
+		// Nine frames of scrolling, 200ms apart: two seconds of
+		// continuous movement. A throttle would write at 800ms and
+		// again at 1600ms; a debounce writes once, when the reader
+		// stops. That is the acceptance criterion for #5.
+		for (let step = 0; step < 9; step++) {
+			await scrollTo(10 * (step + 1));
+			await act(async () => {
+				vi.advanceTimersByTime(200);
+			});
+		}
+		expect(saveReadingPosition).not.toHaveBeenCalled();
+
+		await act(async () => {
+			vi.advanceTimersByTime(900);
+		});
+		expect(saveReadingPosition).toHaveBeenCalledTimes(1);
+		// The write carries where the reader ended up, not where they
+		// were when the first frame was handled.
+		expect(saveReadingPosition.mock.calls[0]?.[0]).toMatchObject({
+			currentPage: 1,
+			position: { pageOffsetRatio: 90 / PAGE_HEIGHT },
+		});
+	});
+
+	it('still writes during a scroll that never pauses', async () => {
+		vi.useFakeTimers();
+		renderView(null);
+
+		// A reader who holds Page Down for a minute must not lose the
+		// whole session to a crash, so a continuous scroll still writes
+		// at a bounded interval.
+		for (let step = 0; step < 20; step++) {
+			await scrollTo(40 * (step + 1));
+			await act(async () => {
+				vi.advanceTimersByTime(300);
+			});
+		}
+		expect(saveReadingPosition.mock.calls.length).toBeGreaterThan(0);
+	});
+
 	it('records the page and the offset the reader is on', async () => {
 		vi.useFakeTimers();
 		renderView(null);
@@ -288,6 +332,25 @@ describe('saving the position', () => {
 			vi.advanceTimersByTime(900);
 		});
 		expect(saveReadingPosition).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe('a stored position that cannot be used', () => {
+	it('resumes saving when the stored page is not in the document', async () => {
+		vi.useFakeTimers();
+		// A stale row: the reader is on a 3-page document and the store
+		// says page 99. The view must not wait for a target that will
+		// never appear, because that would suppress every save for the
+		// rest of the session.
+		renderView({ currentPage: asPageIndex(99), position: { pageOffsetRatio: 0.5 } });
+		await scrollTo(50);
+		await act(async () => {
+			vi.advanceTimersByTime(900);
+		});
+
+		expect(scroller().scrollTop).toBe(50);
+		expect(saveReadingPosition).toHaveBeenCalledTimes(1);
+		expect(saveReadingPosition.mock.calls[0]?.[0]).toMatchObject({ currentPage: 1 });
 	});
 });
 

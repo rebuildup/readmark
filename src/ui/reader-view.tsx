@@ -57,17 +57,25 @@ export const ZOOM_LEVELS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3] as const;
  *  outrunning the render, without paying for the whole file. */
 const PREFETCH_MARGIN = '200% 0px';
 
-/** How long a settled position waits before it is written.
+/** How long the position has to be still before it is written.
  *
  *  A scroll produces one event per frame; writing a row per frame
  *  would put a hundred IndexedDB transactions per second of reading
  *  into a local-first app for no benefit — the position only has to
- *  survive a crash, not every intermediate scroll offset. Just under a
- *  second is long enough to coalesce a flick and short enough that a
- *  reader who closes the tab right after stopping still keeps their
- *  place (the unmount flush covers the rest).
+ *  survive a crash, not every intermediate scroll offset. This is a
+ *  *debounce*, not a throttle: the timer is restarted by every new
+ *  position, so a continuous scroll writes once when it stops rather
+ *  than writing repeatedly while it is still going.
+ *
+ *  Longest a continuous scroll can go without writing anything, in the
+ *  case where the tab is killed outright (no unmount, so no flush).
+ *  Without it, a reader who scrolls a long document in one gesture
+ *  would lose all of it to a crash. One row every few seconds is
+ *  cheap insurance for a local-first app that has no server to
+ *  re-derive the position from.
  */
 const SAVE_DEBOUNCE_MS = 800;
+const SAVE_MAX_WAIT_MS = 5_000;
 
 /** A4 portrait in points, used to reserve space for a page nobody has
  *  measured yet. Only a placeholder: the first page that renders
@@ -206,6 +214,10 @@ export function ReaderView({
 	const restoredRef = useRef(initialPosition === null);
 	const pendingRef = useRef<{ pageIndex: PageIndex; position: ScrollPosition } | null>(null);
 	const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	// When the last write happened, for the max-wait escape hatch.
+	// Seeded with the mount time, not zero: a reader's first position
+	// is a normal debounced write, not an overdue one.
+	const lastWriteAtRef = useRef<number>(Date.now());
 	// The position recomputation, so the restore can ask for it
 	// directly: setting `scrollTop` is not guaranteed to raise a scroll
 	// event (and does not in every test environment), and the header
@@ -221,6 +233,7 @@ export function ReaderView({
 		const pending = pendingRef.current;
 		if (pending === null) return;
 		pendingRef.current = null;
+		lastWriteAtRef.current = Date.now();
 		void saveReadingPosition({
 			documentId,
 			sourceFingerprint,
@@ -237,7 +250,20 @@ export function ReaderView({
 	const scheduleSave = useCallback(
 		(pageIndex: PageIndex, position: ScrollPosition) => {
 			pendingRef.current = { pageIndex, position };
-			if (saveTimerRef.current !== null) return;
+			// A debounce restarts on every new position. Returning early
+			// when a timer is already running would be a throttle: the
+			// write would land mid-scroll, at 800ms, with the reader
+			// still moving — which is exactly what the acceptance
+			// criterion for #5 says must not happen.
+			if (saveTimerRef.current !== null) {
+				clearTimeout(saveTimerRef.current);
+				saveTimerRef.current = null;
+			}
+			const waiting = Date.now() - lastWriteAtRef.current;
+			if (waiting >= SAVE_MAX_WAIT_MS) {
+				flushSave();
+				return;
+			}
 			saveTimerRef.current = setTimeout(() => {
 				saveTimerRef.current = null;
 				flushSave();
@@ -356,8 +382,26 @@ export function ReaderView({
 		const host = scroller.querySelector<HTMLElement>(
 			`[data-page-index="${initialPosition.currentPage}"]`,
 		);
-		const box = host?.getBoundingClientRect();
-		if (host === null || box === undefined || box.height === 0) return;
+		if (host === null) {
+			// The stored page is not in this document at all — a stale
+			// row, a hand-edited store, a document that was re-encoded.
+			// Waiting for a target that does not exist would leave
+			// `restoredRef` false for the whole session, and every save
+			// in it would be suppressed: the reader would silently stop
+			// recording where they are. Give up and resume saving.
+			restoredRef.current = true;
+			return;
+		}
+		const box = host.getBoundingClientRect();
+		if (box.height === 0) {
+			// Not measured yet. But do not wait forever: once every page
+			// has reported a size, a target that is still zero-height is
+			// not going to become measurable.
+			if (footprints.size >= pageCount) {
+				restoredRef.current = true;
+			}
+			return;
+		}
 
 		const scrollerBox = scroller.getBoundingClientRect();
 		scroller.scrollTop = scrollTopForPosition(
@@ -377,7 +421,7 @@ export function ReaderView({
 		// upsert rather than a change of place.
 		updatePositionRef.current?.();
 		// biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the measured sizes, which is the condition the restore waits for
-	}, [footprints, initialPosition]);
+	}, [footprints, initialPosition, pageCount]);
 
 	// Leaving the screen (or closing the document) flushes whatever is
 	// still debounced. Without this, closing the tab during a read
