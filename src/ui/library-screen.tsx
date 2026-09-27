@@ -59,15 +59,18 @@ export function LibraryScreen() {
 	const [deleting, setDeleting] = useState(false);
 	const [deleteError, setDeleteError] = useState<string | null>(null);
 
-	// Frozen per mount so the "3 日前" labels on one row do not flip
-	// to "2 日前" while the reader is looking at another row. A
-	// re-fetch of the data is the only thing that re-freezes it.
-	const [now] = useState(() => Date.now());
+	// The instant the relative dates ("3 日前") are measured against.
+	// Re-based on every successful fetch, never on a timer: it must
+	// not drift while the reader reads, and a document imported after
+	// a long-lived session would otherwise render a future date as a
+	// negative count of days.
+	const [now, setNow] = useState(() => Date.now());
 
 	const refresh = useCallback(() => {
 		listLibrary()
 			.then((rows) => {
 				setEntries(rows);
+				setNow(Date.now());
 				setLoadError(null);
 			})
 			.catch((err: unknown) => {
