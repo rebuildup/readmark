@@ -100,15 +100,3 @@ export async function deleteBookmark(id: string): Promise<boolean> {
 	await getDb().bookmarks.delete(id);
 	return true;
 }
-
-/** Rename a bookmark. The panel uses it when the reader retitles a
- *  mark; an empty name is ignored rather than stored, so the list
- *  never shows a blank row. */
-export async function renameBookmark(id: string, title: string): Promise<boolean> {
-	const trimmed = title.trim();
-	if (trimmed === '') return false;
-	const existing = await getDb().bookmarks.get(id);
-	if (existing === undefined) return false;
-	await getDb().bookmarks.update(id, { title: trimmed });
-	return true;
-}

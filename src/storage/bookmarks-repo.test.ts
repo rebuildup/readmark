@@ -63,8 +63,9 @@ vi.mock('./db.ts', () => ({
 	}),
 }));
 
-const { addBookmark, deleteBookmark, listBookmarks, listBookmarksOnPage, renameBookmark } =
-	await import('./bookmarks-repo.ts');
+const { addBookmark, deleteBookmark, listBookmarks, listBookmarksOnPage } = await import(
+	'./bookmarks-repo.ts'
+);
 
 const DOC_A = asDocumentId('00000000-0000-4000-8000-00000000000a');
 const DOC_B = asDocumentId('00000000-0000-4000-8000-00000000000b');
@@ -194,23 +195,5 @@ describe('deleteBookmark', () => {
 
 		const listed = await listBookmarks({ documentId: DOC_A, sourceFingerprint: FINGERPRINT_A });
 		expect(listed.map((row) => row.id)).toEqual([keep.id]);
-	});
-});
-
-describe('renameBookmark', () => {
-	it('stores a trimmed title', async () => {
-		const bookmark = await add({ pageIndex: 1 });
-		expect(await renameBookmark(bookmark.id, '  第三章  ')).toBe(true);
-		const listed = await listBookmarks({ documentId: DOC_A, sourceFingerprint: FINGERPRINT_A });
-		expect(listed[0]?.title).toBe('第三章');
-	});
-
-	it('refuses an empty title and an unknown id', async () => {
-		const bookmark = await add({ pageIndex: 1 });
-		// An empty name would show as a blank row in the panel.
-		expect(await renameBookmark(bookmark.id, '   ')).toBe(false);
-		expect(await renameBookmark('no-such-bookmark', 'name')).toBe(false);
-		const listed = await listBookmarks({ documentId: DOC_A, sourceFingerprint: FINGERPRINT_A });
-		expect(listed[0]?.title).toBe('');
 	});
 });
