@@ -391,3 +391,118 @@ pre {
 	justify-content: flex-end;
 	gap: 8px;
 }
+
+/* --- reader ------------------------------------------------------------ */
+
+.rm-app--reader {
+	/* The reader owns its own scroll container: an inner scroller is
+	 * what makes "render the pages near the viewport" expressible at
+	 * all, and it keeps the toolbar fixed while the document scrolls. */
+	height: 100%;
+	overflow: hidden;
+}
+
+.rm-reader-header {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 10px 16px;
+	border-bottom: 1px solid var(--rm-border);
+	background: var(--rm-bg-surface);
+}
+
+.rm-reader-header__title {
+	margin: 0;
+	font-size: 15px;
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.rm-reader-header__spacer {
+	flex: 1;
+}
+
+.rm-reader-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.rm-reader-zoom {
+	min-width: 52px;
+	text-align: center;
+	font-family: var(--rm-font-mono);
+	font-size: 13px;
+	color: var(--rm-fg-muted);
+}
+
+.rm-reader-scroll {
+	overflow: auto;
+	padding: 20px 0 60vh;
+	/* A scroll container with `position: sticky` children needs the
+	 * padding on the scroller, not on the page, or the last page can
+	 * never reach the top of the viewport. */
+	background: var(--rm-bg);
+}
+
+.rm-reader-pages {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 16px;
+}
+
+.rm-page {
+	position: relative;
+	background: #ffffff;
+	box-shadow: var(--rm-shadow-sm);
+}
+
+.rm-page__canvas {
+	display: block;
+}
+
+/*
+ * The text layer sits on top of the canvas and is what the reader
+ * selects across: transparent text, real glyph positions, real
+ * selection. `letter-spacing` / `word-spacing` are pinned because
+ * their defaults accumulate across a span, and a one-pixel drift per
+ * glyph run is enough to make a selection cover the wrong pixels
+ * without looking wrong.
+ */
+.rm-text-layer {
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+	line-height: 1;
+	text-align: initial;
+	text-size-adjust: none;
+	-webkit-text-size-adjust: none;
+	caret-color: CanvasText;
+	letter-spacing: 0;
+	word-spacing: 0;
+}
+
+.rm-text-layer span {
+	position: absolute;
+	transform-origin: 0% 0%;
+	white-space: pre;
+	cursor: text;
+	color: transparent;
+}
+
+.rm-text-layer span::selection {
+	background: rgba(58, 108, 255, 0.35);
+}
+
+.rm-reader-empty {
+	border: 1px dashed var(--rm-border-strong);
+	border-radius: var(--rm-radius-lg);
+	padding: 40px;
+	text-align: center;
+	color: var(--rm-fg-muted);
+	max-width: 520px;
+	margin: 40px auto;
+}
