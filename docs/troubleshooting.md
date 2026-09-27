@@ -63,13 +63,36 @@ test: {
 },
 ```
 
-## 6. Biome が依存解決で循環参照を報告する
+## 6. React コンポーネントのテストが "Cannot use import statement outside a module" で落ちる
+
+`react-router-dom` を import したテストが、アサーション 1 本も走ら
+ないうちに SyntaxError で終わる場合、Vitest の `pool` が
+`vmThreads` になっていないか確認する。
+
+react-router 7 は CJS エントリを持ち、その CJS が自分の ESM ビルド
+（`react-router/dom` → `dom-export.mjs`）を `require` する。
+`vmThreads` ワーカー内では Node の CJS 条件が優先されてその `.mjs`
+を CommonJS として parse するため、落ちる。`server.deps.inline` に
+足しても解決しない（require は Node 側のローダー内で起きるため）。
+
+```ts
+// vitest.config.ts — pool を指定しない（既定の forks を使う）
+test: {
+  environment: "happy-dom",
+  // pool / poolOptions は書かない
+}
+```
+
+既定の `forks` は test file ごとに process を分けるので、隔離は保たれる。
+pdf.js の global worker 状態も test 間で漏れない。
+
+## 7. Biome が依存解決で循環参照を報告する
 
 `useImportType` / `useExportType` ルールが効いている。type-only
 import / export は `import type { … }` / `export type { … }` で
 明示する（`verbatimModuleSyntax: true` も影響する）。
 
-## 7. COOP / COEP の警告が出る（開発時）
+## 8. COOP / COEP の警告が出る（開発時）
 
 `vite.config.ts` の `server.headers` で両方のヘッダーを出しているか
 確認。本番（`vite preview`、nginx）も同様。
@@ -79,21 +102,21 @@ Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
 
-## 8. PR を merge しようとすると "branch is out of date"
+## 9. PR を merge しようとすると "branch is out of date"
 
 GitHub で "Update branch" ボタンを押す **or** `git pull --no-rebase` で
 `main` を merge する（**rebase は使わない** — `allow_rebase_merge` が
 無効だからといって `git rebase` 自体が禁止されているわけではないが、
 PR には影響しない）。
 
-## 9. my-web-2026 から iframe で開けない
+## 10. my-web-2026 から iframe で開けない
 
 - readmark の URL が `<iframe src>` と一致しているか確認。
 - Containerfile の nginx が `try_files $uri $uri/ /index.html;` を
   持っているか（client-side routing 用）。
 - 親ページが `X-Frame-Options: DENY` を付けていないか。
 
-## 10. Skill のインストールが対話プロンプトで止まる
+## 11. Skill のインストールが対話プロンプトで止まる
 
 `bunx skills add …` は通常 agent が non-interactive 扱いで進む。手で
 走らせている場合は `-y` を付ける：

@@ -46,6 +46,24 @@ bun install --frozen-lockfile  # CI 用
 | `bun run validate` | typecheck + lint + test + build |
 | `bun run validate:fast` | typecheck + lint + test（PR 前） |
 | `bun run skills` | `bunx skills` のショートカット |
+| `bun scripts/smoke-import.mjs` | import フロー（#3）のブラウザ smoke |
+| `bun scripts/smoke-library.mjs` | ライブラリ一覧（#4）のブラウザ smoke |
+
+### ブラウザ smoke
+
+`scripts/smoke-*.mjs` は `bun run preview`（= `bun run build` 済み）を
+headless Chromium で操作する one-shot のスクリプトで、CI では動かない。
+共通の土台（preview 起動、Chromium 起動、count の settle、IndexedDB の
+store 件数読み出し）は `scripts/smoke-harness.mjs` にある。
+
+```bash
+bun run build
+bun scripts/smoke-library.mjs
+```
+
+Storage を触る変更（import / delete / schema）は、unit test だけでは
+「DOM から消えたが store には残っている」ような取りこぼしを検出できな
+い。該当する場合は smoke を走らせてから PR を Ready にする。
 
 ## 4. 環境変数
 
