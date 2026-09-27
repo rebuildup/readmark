@@ -190,9 +190,26 @@ describe('LibraryScreen', () => {
 		expect(screen.queryAllByTestId('rm-library-row')).toHaveLength(0);
 		const empty = await screen.findByTestId('rm-library-empty-filtered');
 		expect(empty.textContent).toContain('存在しない');
+		// The input that produced this state must stay reachable —
+		// otherwise the only way back is a different control.
+		expect(screen.getByTestId('rm-library-search')).toBeTruthy();
 
 		fireEvent.click(within(empty).getByText('検索をクリア'));
 		expect(screen.getAllByTestId('rm-library-row')).toHaveLength(2);
+	});
+
+	it('lets the reader type a new query straight out of the no-match state', async () => {
+		const cat = makeEntry({ title: '吾輩は猫である', importedAt: 1000 });
+		const snow = makeEntry({ title: '雪国', importedAt: 2000 });
+		mockListLibrary.mockResolvedValue([cat, snow]);
+		renderScreen();
+		await waitForRows(2);
+
+		setSearch('該当なし');
+		await screen.findByTestId('rm-library-empty-filtered');
+
+		setSearch('雪国');
+		expect(rowTitles()).toEqual(['雪国']);
 	});
 
 	it('links each row to the reader route by documentId', async () => {

@@ -173,67 +173,82 @@ export function LibraryScreen() {
 					<p className="rm-muted" data-testid="rm-library-loading">
 						読み込み中…
 					</p>
-				) : loadError !== null ? null : visible.length === 0 ? (
-					filtering ? (
-						<section className="rm-library-empty" data-testid="rm-library-empty-filtered">
-							<h3>一致する文書がありません</h3>
-							<p className="rm-muted">「{search.trim()}」にタイトルも著者も一致しませんでした。</p>
-							<Button variant="secondary" onClick={() => setSearch('')}>
-								検索をクリア
-							</Button>
-						</section>
-					) : (
-						<section className="rm-library-empty" data-testid="rm-library-empty">
-							<h3>まだ文書がありません</h3>
-							<p className="rm-muted">
-								import ボタンから PDF を追加してください。ファイルはこのブラウザの IndexedDB
-								にのみ保存され、外部へ送信されません。
-							</p>
-							<DocumentImport onImported={handleImported} />
-						</section>
-					)
-				) : (
-					<section>
-						<div className="rm-library-toolbar">
-							<label className="rm-library-search">
-								<span className="rm-visually-hidden">タイトル・著者を検索</span>
-								<input
-									type="search"
-									value={search}
-									placeholder="タイトル・著者を検索"
-									onChange={(event) => setSearch(event.target.value)}
-									data-testid="rm-library-search"
-								/>
-							</label>
-							<label className="rm-library-sort">
-								<span className="rm-visually-hidden">並び順</span>
-								<select
-									value={sort}
-									onChange={(event) => setSort(event.target.value as LibrarySort)}
-									data-testid="rm-library-sort"
-								>
-									{LIBRARY_SORTS.map((option) => (
-										<option key={option} value={option}>
-											{LIBRARY_SORT_LABELS[option]}
-										</option>
-									))}
-								</select>
-							</label>
-							<span className="rm-muted rm-library-count" data-testid="rm-library-count">
-								{filtering ? `${matchedCount} / ${totalCount} 件` : `${totalCount} 件`}
-							</span>
-						</div>
-						<ul className="rm-library-list">
-							{visible.map((entry) => (
-								<LibraryRow
-									key={entry.document.id}
-									entry={entry}
-									now={now}
-									onRequestDelete={handleRequestDelete}
-								/>
-							))}
-						</ul>
-					</section>
+				) : loadError !== null ? null : (
+					<>
+						{/*
+						 * The toolbar survives an empty result on
+						 * purpose. Hiding the input that produced the
+						 * no-match state would make the only way out a
+						 * button that is not the thing the reader
+						 * reached for, and would make the sort control
+						 * disappear with it.
+						 */}
+						{totalCount > 0 && (
+							<div className="rm-library-toolbar">
+								<label className="rm-library-search">
+									<span className="rm-visually-hidden">タイトル・著者を検索</span>
+									<input
+										type="search"
+										value={search}
+										placeholder="タイトル・著者を検索"
+										onChange={(event) => setSearch(event.target.value)}
+										data-testid="rm-library-search"
+									/>
+								</label>
+								<label className="rm-library-sort">
+									<span className="rm-visually-hidden">並び順</span>
+									<select
+										value={sort}
+										onChange={(event) => setSort(event.target.value as LibrarySort)}
+										data-testid="rm-library-sort"
+									>
+										{LIBRARY_SORTS.map((option) => (
+											<option key={option} value={option}>
+												{LIBRARY_SORT_LABELS[option]}
+											</option>
+										))}
+									</select>
+								</label>
+								<span className="rm-muted rm-library-count" data-testid="rm-library-count">
+									{filtering ? `${matchedCount} / ${totalCount} 件` : `${totalCount} 件`}
+								</span>
+							</div>
+						)}
+
+						{visible.length === 0 ? (
+							filtering ? (
+								<section className="rm-library-empty" data-testid="rm-library-empty-filtered">
+									<h3>一致する文書がありません</h3>
+									<p className="rm-muted">
+										「{search.trim()}」にタイトルも著者も一致しませんでした。
+									</p>
+									<Button variant="secondary" onClick={() => setSearch('')}>
+										検索をクリア
+									</Button>
+								</section>
+							) : (
+								<section className="rm-library-empty" data-testid="rm-library-empty">
+									<h3>まだ文書がありません</h3>
+									<p className="rm-muted">
+										import ボタンから PDF を追加してください。ファイルはこのブラウザの IndexedDB
+										にのみ保存され、外部へ送信されません。
+									</p>
+									<DocumentImport onImported={handleImported} />
+								</section>
+							)
+						) : (
+							<ul className="rm-library-list">
+								{visible.map((entry) => (
+									<LibraryRow
+										key={entry.document.id}
+										entry={entry}
+										now={now}
+										onRequestDelete={handleRequestDelete}
+									/>
+								))}
+							</ul>
+						)}
+					</>
 				)}
 			</main>
 
