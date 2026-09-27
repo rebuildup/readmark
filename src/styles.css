@@ -18,6 +18,11 @@
 	--rm-fg-inverse: #f7f8fa;
 	--rm-accent: #3a6cff;
 	--rm-accent-fg: #ffffff;
+	--rm-danger: #c0392b;
+	--rm-danger-fg: #ffffff;
+	--rm-error: #d64545;
+	--rm-error-bg: #fdf1f0;
+	--rm-error-fg: #8c2f2f;
 	--rm-border: #e0e3ea;
 	--rm-border-strong: #b9bfcc;
 
@@ -43,6 +48,10 @@
 		--rm-bg-subtle: #1c2440;
 		--rm-border: #2a3454;
 		--rm-border-strong: #3f4a6e;
+		--rm-danger: #e0645a;
+		--rm-error: #e0645a;
+		--rm-error-bg: #34191b;
+		--rm-error-fg: #f7cfcb;
 	}
 }
 
@@ -110,4 +119,225 @@ pre {
 	max-width: 1200px;
 	margin: 0 auto;
 	width: 100%;
+}
+
+/* --- shared bits ------------------------------------------------------- */
+
+.rm-muted {
+	color: var(--rm-fg-muted);
+}
+
+.rm-alert {
+	padding: 8px 12px;
+	border: 1px solid var(--rm-error);
+	border-radius: var(--rm-radius-md);
+	background: var(--rm-error-bg);
+	color: var(--rm-error-fg);
+	font-size: 14px;
+}
+
+/* Visually hidden, still announced. Used to label the search /
+ * sort controls without repeating visible text. */
+.rm-visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	padding: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	clip-path: inset(50%);
+	white-space: nowrap;
+	border: 0;
+}
+
+/* --- library ----------------------------------------------------------- */
+
+.rm-library-header {
+	padding: 16px 24px;
+	border-bottom: 1px solid var(--rm-border);
+	background: var(--rm-bg-surface);
+}
+
+.rm-library-header h1 {
+	margin: 0;
+	font-size: 20px;
+}
+
+.rm-library-intro {
+	margin-bottom: 24px;
+}
+
+.rm-library-intro h2 {
+	font-size: 24px;
+}
+
+.rm-library-intro p {
+	margin-top: 0;
+}
+
+.rm-library-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding-bottom: 12px;
+	flex-wrap: wrap;
+}
+
+.rm-library-search input,
+.rm-library-sort select {
+	padding: 6px 10px;
+	border: 1px solid var(--rm-border);
+	border-radius: var(--rm-radius-md);
+	background: var(--rm-bg-surface);
+	color: var(--rm-fg);
+	font-family: inherit;
+	font-size: 14px;
+}
+
+.rm-library-search input {
+	min-width: 240px;
+}
+
+.rm-library-count {
+	font-size: 14px;
+	margin-left: auto;
+}
+
+.rm-library-list {
+	list-style: none;
+	padding: 0;
+	margin: 0;
+	border-top: 1px solid var(--rm-border);
+}
+
+.rm-library-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	padding: 12px 8px;
+	border-bottom: 1px solid var(--rm-border);
+}
+
+.rm-library-row:hover {
+	background: var(--rm-bg-subtle);
+}
+
+.rm-library-row__body {
+	min-width: 0;
+}
+
+.rm-library-row__title {
+	display: block;
+	font-weight: 500;
+	color: var(--rm-fg);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.rm-library-row__title:hover {
+	text-decoration: underline;
+}
+
+.rm-library-row__meta,
+.rm-library-row__status {
+	color: var(--rm-fg-muted);
+	font-size: 14px;
+	display: flex;
+	gap: 4px;
+	flex-wrap: wrap;
+}
+
+/*
+ * Row actions are revealed on hover / focus, but they stay in the
+ * DOM and in the tab order: `visibility` / `display` would break
+ * keyboard access, and touch devices have no hover at all.
+ * `prefers-reduced-motion` readers get no transition.
+ */
+.rm-library-row__actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex: none;
+	opacity: 0;
+	transition: opacity 120ms ease-in-out;
+}
+
+.rm-library-row:hover .rm-library-row__actions,
+.rm-library-row:focus-within .rm-library-row__actions {
+	opacity: 1;
+}
+
+@media (hover: none) {
+	.rm-library-row__actions {
+		opacity: 1;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.rm-library-row__actions {
+		transition: none;
+	}
+}
+
+.rm-library-empty {
+	border: 1px dashed var(--rm-border-strong);
+	border-radius: var(--rm-radius-lg);
+	padding: 32px;
+	text-align: center;
+}
+
+.rm-library-empty h3 {
+	margin-top: 0;
+}
+
+/* --- confirm dialog ---------------------------------------------------- */
+
+.rm-dialog-backdrop {
+	position: fixed;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	padding: 24px;
+	background: rgba(11, 16, 32, 0.45);
+	z-index: 10;
+}
+
+.rm-dialog {
+	width: min(480px, 100%);
+	background: var(--rm-bg-surface);
+	color: var(--rm-fg);
+	border: 1px solid var(--rm-border);
+	border-radius: var(--rm-radius-lg);
+	box-shadow: var(--rm-shadow-md);
+	padding: 20px;
+}
+
+.rm-dialog__title {
+	margin-top: 0;
+	font-size: 18px;
+}
+
+.rm-dialog__description p {
+	margin: 0 0 12px;
+	font-size: 14px;
+	color: var(--rm-fg-muted);
+}
+
+.rm-dialog__error {
+	margin: 0 0 12px;
+	padding: 8px 12px;
+	border: 1px solid var(--rm-error);
+	border-radius: var(--rm-radius-md);
+	background: var(--rm-error-bg);
+	color: var(--rm-error-fg);
+	font-size: 14px;
+}
+
+.rm-dialog__actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
 }
