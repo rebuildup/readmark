@@ -47,6 +47,7 @@ import type { DocumentId, SourceFingerprint, SourceMetadata } from '../domain/do
 import { PdfInvalidError } from '../reader/pdf/pdf-errors.ts';
 import { extractPdfMetadata, pdfMetadataToSourceMetadata } from '../reader/pdf/pdf-metadata.ts';
 import { importDocument } from '../storage/documents-repo.ts';
+import type { Result } from './result.ts';
 
 /** Tagged union of typed errors the import flow can surface.
  *  Add a new `kind` when a new failure mode appears — never
@@ -56,13 +57,6 @@ export type ImportError =
 	| { readonly kind: 'quota-exceeded'; readonly cause: unknown }
 	| { readonly kind: 'unsupported-format'; readonly cause: unknown }
 	| { readonly kind: 'unknown'; readonly cause: unknown };
-
-/** Minimal `Result<T, E>` for the import flow. Defined here
- *  rather than in `lib/` because it has no callers outside this
- *  module yet — promote when the second use site appears. */
-export type Result<T, E> =
-	| { readonly ok: true; readonly value: T }
-	| { readonly ok: false; readonly error: E };
 
 /** What we return to the UI on success. The UI uses
  *  `documentId` for navigation and `sourceFingerprint` /

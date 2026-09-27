@@ -201,3 +201,104 @@ export async function importDocument(
 export async function touchLastReadAt(id: DocumentId): Promise<void> {
 	await getDb().documents.update(id, { lastReadAt: Date.now() });
 }
+
+/** How many rows a `deleteDocument` call removed, per table. Kept as
+ *  a summary rather than a boolean so the UI can tell the user what
+ *  is gone (e.g. "3 highlights and 1 bookmark will be deleted too")
+ *  and so tests can assert the cascade without reading IndexedDB. */
+export interface DeleteDocumentSummary {
+	readonly documentId: DocumentId;
+	readonly sources: number;
+	readonly blobs: number;
+	readonly bookmarks: number;
+	readonly highlights: number;
+	readonly notes: number;
+	readonly readingProgress: number;
+}
+
+/**
+ * Delete a Document and everything that belongs to it, in ONE
+ * transaction.
+ *
+ * Why the cascade is mandatory (ADR-0002):
+ *   - Reading state is keyed by `DocumentId` + `SourceFingerprint`.
+ *     Leaving `bookmarks` / `highlights` / `notes` /
+ *     `readingProgress` rows behind would orphan them: the
+ *     `documentId` they point at no longer exists, so nothing could
+ *     ever list or resolve them, and the rows would accumulate
+ *     forever in IndexedDB. The MVP writes none of these rows yet
+ *     (the tables exist so future tickets need no schema bump), but
+ *     the repository already has to be correct once they do.
+ *   - `documentBlobs` is keyed by `SourceFingerprint`, not by
+ *     `DocumentId`, so we must read the Document's sources first and
+ *     then delete the matching blobs. The bytes are the whole point
+ *     of the delete (quota), so a metadata-only delete would be a
+ *     silent no-op for the user's disk usage.
+ *
+ * Returns `null` when the Document does not exist. The caller
+ * distinguishes "already gone" from "deleted" without a second
+ * read, and maps `null` to a typed `not-found` error.
+ *
+ * Deletion is intentionally NOT undoable in the MVP. ADR-0002
+ * treats reading state as cheap and re-derivable-by-reimport only
+ * for bytes; restoring highlights from a deleted document would
+ * require an undo buffer we do not have. The UI must confirm first.
+ */
+export async function deleteDocument(id: DocumentId): Promise<DeleteDocumentSummary | null> {
+	const db = getDb();
+
+	return await db.transaction(
+		'rw',
+		// Array form: Dexie's positional overload tops out at five
+		// tables, and the cascade needs eight.
+		[
+			db.documents,
+			db.documentSources,
+			db.documentBlobs,
+			db.bookmarks,
+			db.highlights,
+			db.notes,
+			db.readingProgress,
+		],
+		async () => {
+			const document = await db.documents.get(id);
+			if (!document) return null;
+
+			// Blobs are keyed by fingerprint, so read the sources
+			// before deleting anything.
+			const sources = await db.documentSources.where('documentId').equals(id).toArray();
+
+			const [sourcesRemoved, bookmarks, highlights, notes, readingProgress] = await Promise.all([
+				db.documentSources.where('documentId').equals(id).delete(),
+				db.bookmarks.where('documentId').equals(id).delete(),
+				db.highlights.where('documentId').equals(id).delete(),
+				db.notes.where('documentId').equals(id).delete(),
+				db.readingProgress.where('documentId').equals(id).delete(),
+			]);
+
+			// One indexed delete over the primary keys, not
+			// `Table.delete()` per source: `Table.delete` resolves to
+			// `void` in Dexie 4 while `Collection.delete` returns the
+			// row count, and the summary needs that count. MVP is 1:1
+			// (one source per document), so the array holds a single
+			// key in practice; it only grows with multi-source.
+			const fingerprints = sources.map((source) => source.sourceFingerprint);
+			const blobsRemoved =
+				fingerprints.length > 0
+					? await db.documentBlobs.where(':id').anyOf(fingerprints).delete()
+					: 0;
+
+			await db.documents.delete(id);
+
+			return {
+				documentId: id,
+				sources: sourcesRemoved,
+				blobs: blobsRemoved,
+				bookmarks,
+				highlights,
+				notes,
+				readingProgress,
+			};
+		},
+	);
+}
