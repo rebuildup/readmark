@@ -234,10 +234,14 @@ beforeAll(() => {
 		} as DOMRect;
 	};
 
-	// Immediate frames: the view throttles scroll handling through rAF,
-	// and a real frame wait would make every assertion a sleep.
+	// Frames on a macrotask: the view throttles scroll handling through
+	// rAF, and a real frame wait would make every assertion a sleep.
+	// A macrotask rather than a direct call, because the page-jump poll
+	// has to yield to the event loop between frames for React to commit
+	// a render — a synchronous (or microtask-only) rAF starves it and
+	// the exact phase never runs.
 	globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
-		callback(0);
+		setTimeout(() => callback(0), 0);
 		return 1;
 	}) as typeof globalThis.requestAnimationFrame;
 

@@ -8,7 +8,8 @@
  *
  * Verifies (against `bun run preview`):
  *   1. Library → import a 12-page fixture → 「読む」 → the reader
- *      mounts and a real `<canvas>` appears, painted by pdf.js.
+ *      mounts and a real `<canvas>` appears, painted by pdf.js, with
+ *      its text layer built.
  *   2. The worker asset is fetched and instantiated as a Worker — no
  *      fake-worker fallback, which a "canvas appeared" assertion
  *      cannot tell apart from a main-thread render.
@@ -259,7 +260,14 @@ async function main() {
 		await page.click('[data-testid="rm-library-row-read"]');
 		await page.locator('[data-testid="rm-reader-toolbar"]').waitFor({ state: 'visible' });
 		await page.locator('.rm-page canvas').first().waitFor({ state: 'visible' });
-		log('reader opened and a canvas is present');
+		// The text layer is built after the canvas paint resolves, so
+		// waiting for the canvas alone is a race: the assertions below
+		// measure both layers together.
+		await page
+			.locator('[data-page-index="1"] .rm-text-layer span')
+			.first()
+			.waitFor({ state: 'attached', timeout: 10_000 });
+		log('reader opened, with a canvas and a text layer');
 
 		// --- Worker, not fake ---
 		if (workerRequests.length === 0) fail('worker asset was never requested');

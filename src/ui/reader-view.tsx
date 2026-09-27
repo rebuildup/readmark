@@ -36,16 +36,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DocumentId, SourceFingerprint } from '../domain/document.ts';
 import type { PageIndex } from '../domain/reading-state.ts';
 import { nextRotation, PDF_PAGE_CLASS, viewportSize } from '../reader/pdf/index.ts';
-import {
-	currentPositionFrom,
-	type PageExtent,
-	type ScrollPosition,
-	scrollTopForPosition,
-} from '../reader/position.ts';
+import { currentPositionFrom, type PageExtent, type ScrollPosition } from '../reader/position.ts';
 import type { ReaderHandle, RenderOptions } from '../reader/types.ts';
 import { saveReadingPosition } from '../storage/reading-state-repo.ts';
 import { Button } from './primitives/button.tsx';
 import { LibraryLink } from './primitives/library-link.tsx';
+import { jumpToPage } from './scroll-to-page.ts';
 
 /** Zoom stops the toolbar steps through. Discrete rather than
  *  multiplicative so "zoom in" can land back on 100% instead of
@@ -230,6 +226,10 @@ export function ReaderView({
 	// Set when the reader drives the scroller themselves, so a restore
 	// still in progress steps aside instead of yanking them back.
 	const readerMovedRef = useRef(false);
+	// Read by the jump through a callback, so the effect that starts it
+	// does not have to be re-created on every measurement.
+	const footprintsRef = useRef(footprints);
+	footprintsRef.current = footprints;
 
 	/** Write the pending position now, if there is one. */
 	const flushSave = useCallback(() => {
@@ -412,24 +412,17 @@ export function ReaderView({
 		// view is mounted. `scheduleSave` is stable.
 	}, [scheduleSave]);
 
-	// Restore the stored position in two phases, because a page's box
-	// and its *reserved* box are different numbers and only the first
-	// one is the page.
+	// Restore the reader's last position. The two-phase scroll lives in
+	// `scroll-to-page.ts` because a bookmark jump needs exactly the
+	// same thing, and two copies of this geometry is how one of them
+	// rots.
 	//
-	//   Phase 1 (coarse). Until the target page has been rendered, the
-	//   page stack is a column of provisional A4 heights. Restoring
-	//   against that column lands in roughly the right place and is
-	//   then never corrected, because the restore would already be
-	//   finished — which is how a stored `pageOffsetRatio` ends up
-	//   applied to a page of a completely different height. So: scroll
-	//   the target into the prefetch band, and do not commit.
-	//   Phase 2 (exact). Once the page has rendered and reported its
-	//   real size, apply the ratio to that and finish. Saving stays
-	//   suspended until then, so the coarse offset is never persisted.
-	//
-	// If the reader scrolls in the meantime the restore is abandoned:
-	// yanking someone back to where the app decided they were, after
-	// they have started moving, is worse than opening at the top.
+	// Saving stays suspended until the restore resolves, because an
+	// unmeasured layout reports "page 1, offset 0" — the value that
+	// would destroy the position being restored. It is released by the
+	// reader's own input too (see `markReaderMoved`), so a reader who
+	// starts scrolling is never fighting the app and never goes
+	// unsaved.
 	useEffect(() => {
 		if (restoredRef.current) return;
 		if (initialPosition === null) {
@@ -438,66 +431,37 @@ export function ReaderView({
 		}
 		const scroller = scrollRef.current;
 		if (scroller === null) return;
-		const pageIndex = initialPosition.currentPage;
-		const host = scroller.querySelector<HTMLElement>(`[data-page-index="${pageIndex}"]`);
-		if (host === null) {
-			// The stored page is not in this document at all — a stale
-			// row, a hand-edited store, a document that was re-encoded.
-			// Waiting for a target that does not exist would leave
-			// `restoredRef` false for the whole session, and every save
-			// in it would be suppressed: the reader would silently stop
-			// recording where they are. Give up and resume saving.
-			restoredRef.current = true;
-			return;
-		}
-		if (readerMovedRef.current) {
-			restoredRef.current = true;
-			return;
-		}
 
-		const scrollerBox = scroller.getBoundingClientRect();
-		const box = host.getBoundingClientRect();
-		const extentOf = (height: number) => ({
-			pageIndex,
-			top: box.top - scrollerBox.top + scroller.scrollTop,
-			height,
+		let cancelled = false;
+		void jumpToPage({
+			scroller,
+			pageIndex: initialPosition.currentPage,
+			position: initialPosition.position,
+			pageCount,
+			measuredHeight: (pageIndex) => footprintsRef.current.get(pageIndex)?.height,
+			shouldAbort: () => cancelled || readerMovedRef.current,
+		}).then((outcome) => {
+			if (cancelled) return;
+			// Whatever the outcome — applied, coarse, out of range, or
+			// abandoned — the reader is at the top of a real page, so
+			// recording from here on is correct. Leaving the gate closed
+			// on the paths that do not resolve would mean the whole
+			// session goes unrecorded.
+			restoredRef.current = true;
+			if (outcome === 'out-of-range') return;
+			// Recompute rather than waiting for a scroll event: the
+			// header label has to show the page the reader was restored
+			// to, and a programmatic `scrollTop` assignment does not
+			// reliably raise one.
+			updatePositionRef.current?.();
 		});
 
-		const measured = footprints.get(pageIndex);
-		if (measured === undefined) {
-			// Phase 1: bring the page into range. Its reserved height is
-			// good enough for that — the band is two screens wide.
-			const coarse = scrollTopForPosition(
-				extentOf(box.height),
-				{ pageOffsetRatio: 0 },
-				scroller.clientHeight,
-			);
-			if (coarse > scroller.scrollTop) scroller.scrollTop = coarse;
-			// Every page has been measured and this one still has not
-			// been rendered: it is not going to happen, so stop waiting.
-			if (footprints.size >= pageCount) {
-				restoredRef.current = true;
-			}
-			return;
-		}
-
-		// Phase 2: the real page size, so the stored ratio means what it
-		// said. Footprints are dropped whenever the render options
-		// change, so a measurement here is one taken at the current
-		// scale and rotation.
-		scroller.scrollTop = scrollTopForPosition(
-			extentOf(measured.height),
-			initialPosition.position,
-			scroller.clientHeight,
-		);
-		restoredRef.current = true;
-		// Recompute rather than waiting for a scroll event: the header
-		// label has to show the page the reader was restored to, and a
-		// programmatic `scrollTop` assignment does not reliably raise
-		// one. Any save this schedules writes the restored position —
-		// the same value that is already stored, so it is a no-op
-		// upsert rather than a change of place.
-		updatePositionRef.current?.();
+		return () => {
+			cancelled = true;
+		};
+		// Re-runs as pages report their sizes, which is what the
+		// restore waits for; biome cannot see the dependency through
+		// the callback.
 		// biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the measured sizes, which is the condition the restore waits for
 	}, [footprints, initialPosition, pageCount]);
 
