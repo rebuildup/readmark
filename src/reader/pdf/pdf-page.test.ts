@@ -19,7 +19,7 @@
  * is the smoke's job.
  */
 
-import type { PDFPageProxy, RenderTask, TextContent } from 'pdfjs-dist';
+import type { PDFPageProxy, RenderTask } from 'pdfjs-dist';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { asPageIndex, type PageIndex } from '../../domain/reading-state.ts';
 import type { ViewportLike } from './pdf-coords.ts';
@@ -78,7 +78,11 @@ function makeViewport(scale: number, rotation: number): ViewportLike {
 	};
 }
 
-function makeTextContent(): TextContent {
+/** pdf.js does not re-export `TextContent` from its root; deriving
+ *  it from the call keeps the test honest about what it fakes. */
+type PageTextContent = Awaited<ReturnType<PDFPageProxy['getTextContent']>>;
+
+function makeTextContent(): PageTextContent {
 	return {
 		items: [
 			{
@@ -94,7 +98,7 @@ function makeTextContent(): TextContent {
 			F1: { ascent: 0.8, descent: -0.2, vertical: false, fontFamily: 'serif' },
 		},
 		lang: 'ja',
-	} as unknown as TextContent;
+	} as unknown as PageTextContent;
 }
 
 interface FakeProxy {
