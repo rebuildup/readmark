@@ -244,6 +244,24 @@ describe('ReaderScreen', () => {
 		expect((await screen.findByTestId('rm-reader-state')).textContent).toContain(
 			'この PDF を開けませんでした',
 		);
+		// `lastReadAt` is "opened", not "looked at": a file that never
+		// opened must not float to the top of the recently-read order.
+		expect(mockTouch).not.toHaveBeenCalled();
+	});
+
+	it('records the open once the reader is actually usable', async () => {
+		const order: string[] = [];
+		openMock.mockImplementationOnce(async () => {
+			order.push('open');
+			return handle;
+		});
+		mockTouch.mockImplementationOnce(async () => {
+			order.push('touch');
+		});
+		renderReader();
+		await screen.findByTestId('rm-reader-toolbar');
+
+		expect(order).toEqual(['open', 'touch']);
 	});
 
 	it('closes the handle when the screen goes away', async () => {

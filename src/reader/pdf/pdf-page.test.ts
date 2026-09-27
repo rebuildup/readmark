@@ -24,7 +24,6 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { asPageIndex, type PageIndex } from '../../domain/reading-state.ts';
 import type { ViewportLike } from './pdf-coords.ts';
 import { PDF_PAGE_CLASS, PdfPageHandle } from './pdf-page.ts';
-import { type GlyphRun, layoutRun } from './pdf-text-layer.ts';
 
 const PAGE_WIDTH = 600;
 const PAGE_HEIGHT = 800;
@@ -104,6 +103,7 @@ function makeTextContent(): PageTextContent {
 interface FakeProxy {
 	readonly proxy: PDFPageProxy;
 	readonly renders: FakeRenderTask[];
+	readonly renderCalls: Record<string, unknown>[];
 	readonly cleanups: { count: number };
 }
 
@@ -117,11 +117,13 @@ interface FakeRenderTask {
 
 function makeProxy(options: { autoResolve?: boolean } = {}): FakeProxy {
 	const renders: FakeRenderTask[] = [];
+	const renderCalls: Record<string, unknown>[] = [];
 	const cleanups = { count: 0 };
 	const proxy = {
 		getViewport: ({ scale, rotation }: { scale?: number; rotation?: number }) =>
 			makeViewport(scale ?? 1, rotation ?? 0),
-		render: () => {
+		render: (params: Record<string, unknown>) => {
+			renderCalls.push(params);
 			let resolve!: () => void;
 			let reject!: (cause: unknown) => void;
 			const promise = new Promise<void>((res, rej) => {
@@ -157,7 +159,7 @@ function makeProxy(options: { autoResolve?: boolean } = {}): FakeProxy {
 			cleanups.count++;
 		},
 	} as unknown as PDFPageProxy;
-	return { proxy, renders, cleanups };
+	return { proxy, renders, renderCalls, cleanups };
 }
 
 function canvasOf(target: HTMLElement): HTMLCanvasElement {
@@ -258,6 +260,57 @@ describe('PdfPageHandle.render', () => {
 	});
 });
 
+describe('HiDPI backing store', () => {
+	it('tells pdf.js to draw at the device pixel ratio', async () => {
+		const { proxy, renderCalls } = makeProxy();
+		const target = document.createElement('div');
+		const spy = vi.spyOn(window, 'devicePixelRatio', 'get').mockReturnValue(2);
+
+		try {
+			await new PdfPageHandle(PAGE_ONE, proxy).render(target, { scale: 1 });
+		} finally {
+			spy.mockRestore();
+		}
+
+		const params = renderCalls[0];
+		// Without this transform pdf.js draws in CSS pixels and the
+		// page lands in the top-left quarter of a 2× canvas: half size,
+		// and blurry once the browser scales it up.
+		expect(params?.transform).toEqual([2, 0, 0, 2, 0, 0]);
+		const canvas = canvasOf(target);
+		expect(canvas.width).toBe(Math.floor(600 * 2));
+		expect(canvas.height).toBe(Math.floor(800 * 2));
+		// CSS size is unaffected: the text layer is positioned in CSS
+		// pixels and has to stay registered with the glyphs.
+		expect(canvas.style.width).toBe('600px');
+	});
+
+	it('omits the transform at a ratio of 1', async () => {
+		const { proxy, renderCalls } = makeProxy();
+		const target = document.createElement('div');
+		await new PdfPageHandle(PAGE_ONE, proxy).render(target, { scale: 1 });
+
+		expect(renderCalls[0]?.transform).toBeUndefined();
+		expect(canvasOf(target).width).toBe(600);
+	});
+
+	it('clamps an absurd device pixel ratio', async () => {
+		const { proxy, renderCalls } = makeProxy();
+		const target = document.createElement('div');
+		const spy = vi.spyOn(window, 'devicePixelRatio', 'get').mockReturnValue(12);
+
+		try {
+			await new PdfPageHandle(PAGE_ONE, proxy).render(target, { scale: 1 });
+		} finally {
+			spy.mockRestore();
+		}
+
+		// A 12× backing store for an A4 page exceeds what a browser will
+		// allocate; the canvas would come back blank instead of sharp.
+		expect(renderCalls[0]?.transform).toEqual([3, 0, 0, 3, 0, 0]);
+	});
+});
+
 describe('PdfPageHandle lifecycle', () => {
 	it('projects the text layer into raw user-space', async () => {
 		const { proxy } = makeProxy();
@@ -317,77 +370,6 @@ describe('PdfPageHandle lifecycle', () => {
 		page.close();
 		page.close();
 		expect(cleanups.count).toBe(1);
-	});
-});
-
-describe('layoutRun', () => {
-	const run: GlyphRun = {
-		text: '猫',
-		transform: [12, 0, 0, 12, 50, 700],
-		width: 12,
-		height: 12,
-		style: { fontFamily: 'serif', ascent: 0.8, descent: -0.2, vertical: false },
-	};
-
-	it('places the run in viewport space, not user space', () => {
-		const layout = layoutRun(run, makeViewport(1, 0));
-		// The run's origin is at (50, 700) in user space, where y
-		// grows upward from the page bottom. The viewport flips that:
-		// y = 800 - 700 = 100, minus the ascent for the box's top edge.
-		expect(layout.x).toBeCloseTo(50, 6);
-		expect(layout.y).toBeCloseTo(100 - 0.8 * 12, 6);
-		expect(layout.fontSize).toBeCloseTo(12, 6);
-		// A run already upright needs no rotation; the font size alone
-		// carries the scale, so a matrix here would scale twice.
-		expect(layout.transform).toBe('');
-	});
-
-	it('scales with the zoom', () => {
-		const layout = layoutRun(run, makeViewport(2, 0));
-		expect(layout.x).toBeCloseTo(100, 6);
-		expect(layout.y).toBeCloseTo(200 - 0.8 * 24, 6);
-		expect(layout.fontSize).toBeCloseTo(24, 6);
-	});
-
-	it('falls back through the font metrics the way pdf.js does', () => {
-		// A font with no embedded program reports `ascent: 0`. Taking
-		// it at face value puts every span a font-height too low, so
-		// the fallback has to be `1 + descent`, then the default.
-		const noAscent: GlyphRun = {
-			...run,
-			style: { fontFamily: 'serif', ascent: 0, descent: -0.25, vertical: false },
-		};
-		expect(layoutRun(noAscent, makeViewport(1, 0)).y).toBeCloseTo(100 - 0.75 * 12, 6);
-
-		const noMetrics: GlyphRun = {
-			...run,
-			style: { fontFamily: 'serif', ascent: undefined, descent: undefined, vertical: false },
-		};
-		expect(layoutRun(noMetrics, makeViewport(1, 0)).y).toBeCloseTo(100 - 0.8 * 12, 6);
-	});
-
-	it('turns a vertical (縦書き) run a quarter turn', () => {
-		const vertical: GlyphRun = { ...run, style: { ...run.style, vertical: true } };
-		const layout = layoutRun(vertical, makeViewport(1, 0));
-		// Without the quarter turn the glyph run would be transposed
-		// against the canvas: selectable, and in the wrong place.
-		expect(layout.transform).toBe('rotate(1.570796rad)');
-		expect(layout.x).not.toBeCloseTo(50, 3);
-	});
-
-	it('rotates a run that is not upright in the viewport', () => {
-		const rotated: GlyphRun = {
-			...run,
-			// Text rotated 90° inside the page: its x axis now runs
-			// along the page's y, so the run needs an explicit rotation
-			// and its ascent offset follows the rotation too.
-			transform: [0, 12, -12, 0, 50, 700],
-		};
-		const layout = layoutRun(rotated, makeViewport(1, 0));
-		expect(layout.transform).toBe('rotate(1.570796rad)');
-		expect(layout.fontSize).toBeCloseTo(12, 6);
-		expect(Number.isFinite(layout.x)).toBe(true);
-		expect(Number.isFinite(layout.y)).toBe(true);
 	});
 });
 

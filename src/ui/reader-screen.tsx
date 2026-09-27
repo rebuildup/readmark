@@ -96,9 +96,6 @@ export function ReaderScreen() {
 					setState({ kind: 'missing-blob' });
 					return;
 				}
-				await touchLastReadAt(id);
-				if (cancelled) return;
-
 				const { createPdfReader } = await import('../reader/pdf/index.ts');
 				if (cancelled) return;
 				const handle = await createPdfReader().open({
@@ -113,6 +110,14 @@ export function ReaderScreen() {
 				}
 				opened = handle;
 				const pageCount = await handle.pageCount();
+				if (cancelled) return;
+				// `lastReadAt` means "this source was opened", not
+				// "this file was looked at": a corrupt or
+				// password-protected PDF that never opened must not
+				// float to the top of the library's recently-read
+				// order. After the page count, so a document that
+				// cannot be opened stays out of that list.
+				await touchLastReadAt(id);
 				if (cancelled) return;
 				setState({
 					kind: 'ready',

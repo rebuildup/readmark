@@ -23,7 +23,10 @@
  *      follows it.
  *   7. The header has no interactive nesting, and Library is one
  *      click away.
- *   8. No console errors and no fake-worker / legacy-build warnings.
+ *   8. The same reader on a 2× display: the backing store is scaled,
+ *      and the painted ink covers the whole canvas rather than its
+ *      top-left quarter.
+ *   9. No console errors and no fake-worker / legacy-build warnings.
  *
  * Why this exists rather than a unit test: happy-dom has no canvas,
  * no layout, no real Selection, and no IntersectionObserver. Every
@@ -62,6 +65,16 @@ async function makeFixturePdf() {
 			y: 480,
 			size: 12,
 		});
+		// A run that is not axis-aligned inside the page. Axis-aligned
+		// fixtures agree with any matrix convention, which is how a
+		// transposed text layer ships: this one puts non-zero values in
+		// every off-diagonal term of the composed transform.
+		page.drawText('tilted run for the smoke', {
+			x: 60,
+			y: 380,
+			size: 14,
+			rotate: { type: 'degrees', angle: 30 },
+		});
 	}
 	pdf.setTitle('readmark reader smoke');
 	pdf.setAuthor('readmark smoke');
@@ -88,6 +101,49 @@ async function measure(page, index) {
 			textLayer: box(layer),
 			spanCount: layer === null ? 0 : layer.querySelectorAll('span').length,
 			spanText: layer === null ? '' : (layer.textContent ?? '').trim(),
+		};
+	});
+}
+
+/**
+ * Bounding box of everything painted on a page's canvas, in DEVICE
+ * pixels, plus the canvas size.
+ *
+ * A size assertion cannot tell a correctly painted page from one drawn
+ * into a canvas twice as large: both report the right CSS size. What
+ * distinguishes them is where the ink actually is.
+ */
+async function inkBounds(page, index) {
+	return await pageHost(page, index).evaluate((host) => {
+		const canvas = host.querySelector('canvas');
+		if (canvas === null) return null;
+		const context = canvas.getContext('2d');
+		const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+		let minX = canvas.width;
+		let maxX = -1;
+		let minY = canvas.height;
+		let maxY = -1;
+		for (let y = 0; y < canvas.height; y++) {
+			for (let x = 0; x < canvas.width; x++) {
+				const offset = (y * canvas.width + x) * 4;
+				// The page background is white; anything else is ink.
+				if (pixels[offset] > 245 && pixels[offset + 1] > 245 && pixels[offset + 2] > 245) {
+					continue;
+				}
+				if (x < minX) minX = x;
+				if (x > maxX) maxX = x;
+				if (y < minY) minY = y;
+				if (y > maxY) maxY = y;
+			}
+		}
+		return {
+			canvasWidth: canvas.width,
+			canvasHeight: canvas.height,
+			empty: maxX < 0,
+			minX,
+			maxX,
+			minY,
+			maxY,
 		};
 	});
 }
@@ -176,6 +232,8 @@ async function main() {
 		// --- Page 1 is painted and layered ---
 		const first = await measure(page, 1);
 		if (first.canvas === null) fail('page 1 has no canvas');
+		const inkAtOneX = await inkBounds(page, 1);
+		if (inkAtOneX === null || inkAtOneX.empty) fail('page 1 painted no ink at all');
 		if (first.canvas.width < 100) fail(`page 1 canvas looks unpainted: ${JSON.stringify(first)}`);
 		if (first.textLayer === null) fail('page 1 has no text layer');
 		if (first.spanCount === 0) fail('page 1 text layer has no glyph spans');
@@ -290,6 +348,88 @@ async function main() {
 		await page.click('[data-testid="rm-reader-back"]');
 		await page.locator('[data-testid="rm-library-search"]').waitFor({ state: 'visible' });
 		log('returned to the library');
+
+		// --- The same reader on a 2× display ---
+		// A separate context: `deviceScaleFactor` is fixed per context.
+		// The assertion is about painted pixels, not attributes: a
+		// missing output transform leaves the page in the top-left
+		// quarter of a canvas twice as wide as it should be, which no
+		// size assertion can see.
+		const hidpiContext = await browser.newContext({ deviceScaleFactor: 2 });
+		const hidpi = await hidpiContext.newPage();
+		const hidpiErrors = [];
+		hidpi.on('console', (msg) => {
+			if (msg.type() === 'error') hidpiErrors.push(msg.text());
+		});
+		await hidpi.goto(PREVIEW_URL, { waitUntil: 'networkidle' });
+		await hidpi
+			.locator('[data-testid="rm-document-import-input"]')
+			.first()
+			.setInputFiles({
+				name: 'reader-smoke.pdf',
+				mimeType: 'application/pdf',
+				buffer: Buffer.from(bytes),
+			});
+		await hidpi.locator('[data-testid="rm-import-status"]').waitFor({ state: 'visible' });
+		await hidpi.click('[data-testid="rm-library-row-read"]');
+		await hidpi.locator('[data-testid="rm-reader-toolbar"]').waitFor({ state: 'visible' });
+		await hidpi
+			.locator('[data-page-index="1"] .rm-text-layer span')
+			.first()
+			.waitFor({ state: 'attached', timeout: 10_000 });
+
+		const hidpiState = await pageHost(hidpi, 1).evaluate((host) => {
+			const canvas = host.querySelector('canvas');
+			const layer = host.querySelector('.rm-text-layer');
+			if (canvas === null || layer === null) return null;
+			return {
+				dpr: window.devicePixelRatio,
+				backingWidth: canvas.width,
+				backingHeight: canvas.height,
+				cssWidth: Math.round(canvas.getBoundingClientRect().width * 100) / 100,
+				layerWidth: Math.round(layer.getBoundingClientRect().width * 100) / 100,
+			};
+		});
+		if (hidpiState === null) fail('no canvas or text layer on the 2x display');
+		if (hidpiState.dpr !== 2) fail(`expected devicePixelRatio 2, got ${hidpiState.dpr}`);
+		if (hidpiState.backingWidth !== Math.floor(hidpiState.cssWidth * 2)) {
+			fail(
+				`backing store (${hidpiState.backingWidth}) is not 2x the CSS width ` +
+					`(${hidpiState.cssWidth})`,
+			);
+		}
+		if (hidpiState.layerWidth !== hidpiState.cssWidth) {
+			fail(
+				`text layer (${hidpiState.layerWidth}) is not registered with the canvas ` +
+					`(${hidpiState.cssWidth}) on a 2x display`,
+			);
+		}
+
+		const inkAtTwoX = await inkBounds(hidpi, 1);
+		if (inkAtTwoX === null || inkAtTwoX.empty) fail('nothing was painted on the 2x display');
+		// The decisive check: the same page, painted at the same place.
+		// Without pdf.js's output transform the ink lands in CSS pixel
+		// coordinates inside a 2x canvas, so converting back to CSS
+		// units would halve every coordinate.
+		const tolerance = 2;
+		for (const edge of ['minX', 'maxX', 'minY', 'maxY']) {
+			const atOneX = (inkAtOneX[edge] ?? 0) / 1;
+			const atTwoX = (inkAtTwoX[edge] ?? 0) / 2;
+			if (Math.abs(atOneX - atTwoX) > tolerance) {
+				fail(
+					`ink ${edge} differs between 1x (${atOneX}) and 2x (${atTwoX}) in CSS pixels; ` +
+						'the page is not being painted at the device pixel ratio',
+				);
+			}
+		}
+		if (hidpiErrors.length > 0) {
+			fail(`console errors on the 2x display:\n${hidpiErrors.join('\n')}`);
+		}
+		log(
+			`2x display: backing ${hidpiState.backingWidth}x${hidpiState.backingHeight} for ` +
+				`${hidpiState.cssWidth} CSS px; ink box matches the 1x reading, text layer registered`,
+		);
+		await hidpiContext.close();
 
 		// --- Diagnostics ---
 		const noisy = [...consoleErrors, ...consoleWarns].filter((message) =>

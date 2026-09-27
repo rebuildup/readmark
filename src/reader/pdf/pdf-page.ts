@@ -99,7 +99,16 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 
 		// pdf.js 5 takes the canvas itself and derives the context;
 		// passing both is not allowed.
-		const task = this.pdfPage.render({ canvas, viewport });
+		//
+		// The `transform` is the HiDPI half of the same decision as the
+		// backing store above: pdf.js draws in CSS pixels, so on a 2×
+		// display it has to be told to draw at 2 device pixels per CSS
+		// pixel or the page lands in the top-left quarter of the canvas,
+		// at half size and blurry when scaled up. `null` at 1× is what
+		// pdf.js's own reference does, and means "no transform".
+		const outputScale: number[] | undefined =
+			pixelRatio === 1 ? undefined : [pixelRatio, 0, 0, pixelRatio, 0, 0];
+		const task = this.pdfPage.render({ canvas, viewport, transform: outputScale });
 		this.pending = task;
 		try {
 			await task.promise;
