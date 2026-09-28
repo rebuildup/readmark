@@ -128,6 +128,23 @@ export function isPdfAnchor(anchor: Anchor): anchor is Anchor<PdfAnchor> {
 		) &&
 		typeof p.quote === 'object' &&
 		p.quote !== null &&
-		typeof (p.quote as Partial<TextQuote>).exact === 'string'
+		typeof (p.quote as Partial<TextQuote>).exact === 'string' &&
+		// `prefix` / `suffix` are optional, so "absent" and "present but
+		// not a string" are different things and the guard has to tell
+		// them apart. Recovery reads both of them and compares them
+		// against page text, so a payload carrying `prefix: 123` would
+		// narrow to `Anchor<PdfAnchor>` here and then be compared as a
+		// number at the one place that is allowed to trust this guard.
+		// The 32-character bound the type documents is *not* checked
+		// here: rejecting a row for carrying a long prefix would make it
+		// unreadable, and a prefix that does not match leaves the anchor
+		// stale, which is the outcome that is actually safe.
+		optionalText((p.quote as Partial<TextQuote>).prefix) &&
+		optionalText((p.quote as Partial<TextQuote>).suffix)
 	);
+}
+
+/** `undefined` or a string, and nothing else. */
+function optionalText(value: unknown): boolean {
+	return value === undefined || typeof value === 'string';
 }

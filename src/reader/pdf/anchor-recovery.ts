@@ -49,23 +49,60 @@
  * A selection that spans two lines is the case that gets that wrong
  * first, and it is why the join rule is documented here rather than
  * left to whoever writes the selection side.
+ *
+ * ## Where the rects are not made
+ *
+ * This returns *offsets*, not rectangles, on purpose. A run's rect is
+ * the bounding box of the whole run, so a quote that covers two words
+ * of a fifty-character run would be painted as fifty characters: the
+ * highlight would read as a bug, and it would be one. `PdfAnchor.rects`
+ * asks for "one entry per visual line of the selection", which a
+ * per-run rect is not even when the run happens to be a whole line.
+ *
+ * Turning offsets into rects is the next stage, and it has two
+ * decisions in it that this file deliberately does not make:
+ *
+ *   - **Cutting a partially-covered run.** `PageTextItem` carries a
+ *     bounding box and the run's text, with no per-character geometry,
+ *     so the only thing available is a proportional split along the
+ *     run's width. That is an approximation, and it is visibly wrong
+ *     for a justified line or a run of mixed-width glyphs. It has to
+ *     be decided against something better (pdf.js's per-item transform,
+ *     or a text-layer measurement) rather than quietly assumed here.
+ *   - **Merging runs on one visual line.** A line is often several
+ *     runs; the payload wants one rect per line, so runs sharing a
+ *     baseline have to be unioned — which needs the same geometry the
+ *     cut above needs.
+ *
+ * Both are display-only concerns (ADR-0007: rects are the display half,
+ * the quote is canonical), which is why they do not sit on the path
+ * that decides whether an anchor is trusted.
  */
 
 import type { PageTextItem, PageTextLayer } from '../types.ts';
-import type { PdfRect, TextQuote } from './anchor.ts';
+import type { TextQuote } from './anchor.ts';
+
+/** One run the quote covers, and how much of it the quote actually is. */
+export interface QuoteRunMatch {
+	readonly item: PageTextItem;
+	/** First character of the quote *inside this run*. */
+	readonly start: number;
+	/** One past the last character of the quote inside this run. The
+	 *  run's own length, not the page's: a quote inside a long run has
+	 *  `end - start` characters of it, and the geometry stage needs
+	 *  that number against `item.text.length`, not against the page. */
+	readonly end: number;
+}
 
 /** A quote found on the page, and the runs it covers. */
 export interface QuoteMatch {
-	/** The runs the quote spans, in reading order. A quote inside one
-	 *  run yields one item; a quote across two yields both. */
-	readonly items: readonly PageTextItem[];
-	/** The same runs as display rects, in raw PDF user-space — the
-	 *  space `PdfAnchor.rects` is defined in, so the result needs no
-	 *  transform before it is stored. */
-	readonly rects: readonly PdfRect[];
-	/** Character offset of the match within the page text. Useful for
-	 *  asserting which occurrence was chosen; the caller should not
-	 *  build anything on it. */
+	/** The runs the quote spans, in reading order, each with the
+	 *  quote's extent inside it. */
+	readonly runs: readonly QuoteRunMatch[];
+	/** Character offset of the match within `pageText(layer)`. Exported
+	 *  for tests and for a caller that wants to say which occurrence
+	 *  was chosen; nothing downstream should build on the page-level
+	 *  offset where a run-level one is what it needs. */
 	readonly start: number;
 }
 
@@ -130,10 +167,10 @@ function contextMatches(text: string, quote: TextQuote, start: number): boolean 
 	return true;
 }
 
-/** The runs a match spans, as items and as rects. */
+/** The runs a match spans, each with the quote's extent inside it. */
 function matchAt(layer: PageTextLayer, start: number, length: number): QuoteMatch {
 	const end = start + length;
-	const items: PageTextItem[] = [];
+	const runs: QuoteRunMatch[] = [];
 	let offset = 0;
 	for (const item of layer.items) {
 		const itemStart = offset;
@@ -141,23 +178,17 @@ function matchAt(layer: PageTextLayer, start: number, length: number): QuoteMatc
 		offset = itemEnd;
 		// Empty runs (pdf.js emits them around marked content) carry no
 		// characters, so they can never cover a match and are skipped
-		// rather than being added as zero-width rects.
+		// rather than being reported as zero-length coverage.
 		if (itemEnd === itemStart) continue;
 		if (itemEnd <= start || itemStart >= end) continue;
-		items.push(item);
+		runs.push({
+			item,
+			// Page offsets clamped into the run's own coordinate space, so
+			// a quote that starts part-way into a run reports the
+			// characters it really covers rather than the whole run.
+			start: Math.max(0, start - itemStart),
+			end: Math.min(item.text.length, end - itemStart),
+		});
 	}
-	// A quote that starts or ends inside a run still takes the whole
-	// run's rect: the layer exposes a rect per run and nothing finer,
-	// and a partially-covered run is a display approximation the
-	// `display`-only half of the anchor model is allowed to make.
-	return {
-		items,
-		rects: items.map((item) => ({
-			x: item.rect.x,
-			y: item.rect.y,
-			width: item.rect.width,
-			height: item.rect.height,
-		})),
-		start,
-	};
+	return { runs, start };
 }

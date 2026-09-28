@@ -10,7 +10,9 @@
  * changes cannot produce.
  *
  * What is worth a test, in the order it has bitten someone:
- *   - A quote that spans several runs, and one that sits inside one.
+ *   - A quote that spans several runs, and one that sits inside one —
+ *     and a quote that covers *part* of a run, which is the case a
+ *     whole-run rect gets visibly wrong.
  *   - The same phrase twice on a page, told apart by context — the
  *     case `prefix` / `suffix` exist for. A running head or a
  *     repeated heading is not exotic.
@@ -54,23 +56,56 @@ describe('pageText', () => {
 });
 
 describe('findQuote', () => {
-	it('finds a quote inside one run and returns that run', () => {
+	it('finds a quote inside one run and reports the characters it covers', () => {
 		const match = findQuote(ALPHA, { exact: 'beta' });
 
 		expect(match?.start).toBe(6);
-		expect(match?.items.map((item) => item.text)).toEqual(['beta ']);
-		expect(match?.rects).toEqual([{ x: 10, y: 200, width: 25, height: 12 }]);
+		expect(match?.runs.map((run) => run.item.text)).toEqual(['beta ']);
+		// Run-local, not page-local: 'beta' is characters 0..4 of its own
+		// run and characters 6..10 of the page. The geometry stage needs
+		// the first pair.
+		expect(match?.runs.map((run) => [run.start, run.end])).toEqual([[0, 4]]);
 	});
 
-	it('finds a quote that spans runs and returns all of them', () => {
-		// Spanning runs is the ordinary case for a sentence, and it is
-		// where a run-per-rect mistake would drop a line of highlight.
+	it('reports partial coverage of a run instead of the whole run', () => {
+		// One run holding a whole line: a quote covering two words of it
+		// must not be reported as covering the line. A geometry stage
+		// given [0, runLength] would paint the entire run, which is the
+		// bug this shape exists to make impossible.
+		const line = layerOf(['alpha beta gamma']);
+
+		const match = findQuote(line, { exact: 'beta' });
+
+		expect(match?.runs).toHaveLength(1);
+		expect(match?.runs[0]?.item.text).toBe('alpha beta gamma');
+		expect([match?.runs[0]?.start, match?.runs[0]?.end]).toEqual([6, 10]);
+		// A whole-run quote still reports the whole run.
+		expect(findQuote(line, { exact: 'gamma' })?.runs.map((run) => [run.start, run.end])).toEqual([
+			[11, 16],
+		]);
+	});
+
+	it("finds a quote that spans runs and reports each run's own extent", () => {
+		// Spanning runs is the ordinary case for a sentence. The first run
+		// is covered to its end, the second from its start — and saying so
+		// is what lets the geometry stage merge them into one line.
 		const match = findQuote(ALPHA, { exact: 'beta gamma' });
 
-		expect(match?.items.map((item) => item.text)).toEqual(['beta ', 'gamma.']);
-		expect(match?.rects).toEqual([
-			{ x: 10, y: 200, width: 25, height: 12 },
-			{ x: 10, y: 300, width: 30, height: 12 },
+		expect(match?.runs.map((run) => run.item.text)).toEqual(['beta ', 'gamma.']);
+		expect(match?.runs.map((run) => [run.start, run.end])).toEqual([
+			[0, 5],
+			[0, 5],
+		]);
+	});
+
+	it('clamps coverage to the runs it actually spans', () => {
+		// The quote starts inside run 2 and ends inside run 3, so run 1
+		// gets no coverage at all and must not appear.
+		const match = findQuote(ALPHA, { exact: 'ha be' });
+
+		expect(match?.runs.map((run) => [run.start, run.end])).toEqual([
+			[3, 6],
+			[0, 2],
 		]);
 	});
 
@@ -83,7 +118,8 @@ describe('findQuote', () => {
 		const match = findQuote(page, { exact: 'the cat', suffix: ' left' });
 
 		expect(match?.start).toBe(30);
-		expect(match?.items.map((item) => item.text)).toEqual(['and the cat left.']);
+		expect(match?.runs.map((run) => run.item.text)).toEqual(['and the cat left.']);
+		expect(match?.runs.map((run) => [run.start, run.end])).toEqual([[4, 11]]);
 	});
 
 	it('takes the first occurrence when the quote carries no context', () => {
@@ -132,19 +168,21 @@ describe('findQuote', () => {
 		// comparing it to a real neighbour would fail a match that is
 		// perfectly good.
 		expect(findQuote(page, { exact: 'alpha', prefix: '' })?.start).toBe(0);
-		expect(findQuote(page, { exact: 'tail' })?.items.map((item) => item.text)).toEqual(['tail']);
+		expect(findQuote(page, { exact: 'tail' })?.runs.map((run) => run.item.text)).toEqual(['tail']);
 	});
 
-	it('skips empty runs instead of returning zero-width rects', () => {
+	it('skips empty runs instead of reporting zero-length coverage', () => {
 		// pdf.js emits empty runs around marked content. They carry no
-		// characters, so they cannot cover a match, and returning one
-		// would paint an invisible overlay the reader could not account
-		// for.
+		// characters, so they cannot cover a match, and reporting one
+		// would produce an empty rect for a geometry stage to place.
 		const page = layerOf(['', 'alpha ', '', 'beta ', '']);
 
 		const match = findQuote(page, { exact: 'alpha beta' });
 
-		expect(match?.items.map((item) => item.text)).toEqual(['alpha ', 'beta ']);
-		expect(match?.rects).toHaveLength(2);
+		expect(match?.runs.map((run) => run.item.text)).toEqual(['alpha ', 'beta ']);
+		expect(match?.runs.map((run) => [run.start, run.end])).toEqual([
+			[0, 6],
+			[0, 4],
+		]);
 	});
 });
