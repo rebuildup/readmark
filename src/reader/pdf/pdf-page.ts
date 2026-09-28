@@ -32,6 +32,7 @@ import type { PageIndex } from '../../domain/reading-state.ts';
 import type {
 	PageHandle,
 	PageTextLayer,
+	PaintedAnchor,
 	ReaderSelection,
 	RenderOptions,
 	ResolvedAnchor,
@@ -248,16 +249,19 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 	 *     completed render, including one mid-re-render. Each is a caller
 	 *     that lost track of what it was talking to, and each is a case
 	 *     where drawing something plausible would be worse than failing.
-	 *   - **Display data this page does not recognise is a no-op.**
-	 *     `display` came out of storage, and a row written by a version
-	 *     this build has never heard of has to paint as nothing rather
-	 *     than take the reader down.
+	 *   - **Display data this page does not recognise is a no-op**,
+	 *     answered with `null`. `display` came out of storage, and a row
+	 *     written by a version this build has never heard of has to
+	 *     paint as nothing rather than take the reader down.
 	 *
 	 * The caller errors are checked first: they are about the call, and
 	 * reporting them does not depend on the data being one we can read.
 	 */
-	async paintResolvedAnchor(anchor: ResolvedAnchor, target: HTMLElement): Promise<void> {
-		if (anchor.format !== 'pdf') return;
+	async paintResolvedAnchor(
+		anchor: ResolvedAnchor,
+		target: HTMLElement,
+	): Promise<PaintedAnchor | null> {
+		if (anchor.format !== 'pdf') return null;
 		if (anchor.page !== this.index) {
 			throw new Error(
 				`readmark: paintResolvedAnchor called on page ${this.index} with an anchor for ` +
@@ -283,7 +287,7 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 					'rendered into',
 			);
 		}
-		if (!isPdfResolvedDisplay(anchor.display)) return;
+		if (!isPdfResolvedDisplay(anchor.display)) return null;
 		const { viewport, page } = rendered;
 
 		const layer = document.createElement('div');
@@ -310,8 +314,19 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 			layer.appendChild(fragment);
 		}
 		// An empty layer would be a `div` covering the page for nothing.
-		if (layer.childElementCount === 0) return;
+		// Measured in a layout-free way: `cssRectsFor` dropped every
+		// fragment, so there is nothing to draw and nothing to hand back.
+		if (layer.childElementCount === 0) return null;
 		page.appendChild(layer);
+		return {
+			element: layer,
+			// Idempotent, and safe on a detached node: a re-render that
+			// already rebuilt the page leaves this pointing at an element
+			// that is no longer in the document.
+			remove: () => {
+				layer.remove();
+			},
+		};
 	}
 
 	/** Cancel any in-flight render and release the page. Idempotent:

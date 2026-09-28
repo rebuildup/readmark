@@ -437,6 +437,53 @@ describe('PdfPageHandle.paintResolvedAnchor', () => {
 		return { page, into };
 	}
 
+	it('hands back a handle so the caller can reconcile overlays against rows', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+
+		const painted = await page.paintResolvedAnchor(resolved(), into);
+
+		// The element is reachable so the UI can apply `Highlight.color` to
+		// it: the painter decides geometry and freshness, and the palette
+		// belongs to the theme.
+		expect(painted?.element).not.toBeNull();
+		painted?.element.setAttribute('data-highlight-color', 'yellow');
+		expect(painted?.element.getAttribute('data-highlight-color')).toBe('yellow');
+
+		// A re-paint after a recovery or a zoom would otherwise stack a
+		// second overlay over the first, and two translucent fills over the
+		// same words is a visibly darker highlight.
+		const repainted = await page.paintResolvedAnchor(resolved(), into);
+		expect(into.querySelectorAll('.rm-highlight').length).toBe(2);
+		repainted?.remove();
+		expect(into.querySelectorAll('.rm-highlight').length).toBe(1);
+	});
+
+	it('removes idempotently, including after the page was rebuilt', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+		const painted = await page.paintResolvedAnchor(resolved(), into);
+
+		painted?.remove();
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+		// A re-render replaces the page's children, so the handle is left
+		// pointing at a detached node. Removing that is a no-op, not an
+		// error — the UI will not know which of the two happened.
+		painted?.remove();
+		await page.render(into, { scale: 2 });
+		painted?.remove();
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+	});
+
+	it('answers null when it drew nothing', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+
+		// A caller that treats `null` as a handle is holding a hole in its
+		// map; one that treats it as an error will fall over on a row from a
+		// future version. It has to be a value that means "no overlay".
+		expect(await page.paintResolvedAnchor(resolved({}, 'nope' as never), into)).toBeNull();
+		expect(await page.paintResolvedAnchor(resolved({ format: 'epub' as never }), into)).toBeNull();
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+	});
+
 	it('draws one positioned element per fragment, in CSS pixels', async () => {
 		const { page, into } = await renderedPage(makeProxy().proxy);
 

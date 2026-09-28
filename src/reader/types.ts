@@ -194,6 +194,33 @@ export interface ResolvedAnchor {
 }
 
 /**
+ * A highlight the page has painted, and the only way to take it back
+ * off.
+ *
+ * Returned rather than merely created because the caller has to be able
+ * to reconcile overlays against the rows they belong to, and every one
+ * of those needs an identity to do it:
+ *
+ *   - re-painting after a recovery or a zoom would otherwise stack a
+ *     second overlay over the first, and two translucent fills over the
+ *     same words is a visibly darker highlight;
+ *   - deleting a row needs to know which element to remove, and a
+ *     painter that keeps its own list cannot answer for a row the UI
+ *     added or the reader deleted in another tab;
+ *   - `Highlight.color` is a semantic name, so the colour is applied by
+ *     the UI — which means the UI has to be able to reach the element.
+ *
+ * So the element is handed out, and `remove()` is idempotent: a
+ * re-render that already replaced the page leaves the handle pointing at
+ * a detached node, and calling `remove()` on that is a no-op rather
+ * than an error.
+ */
+export interface PaintedAnchor {
+	readonly element: HTMLElement;
+	remove(): void;
+}
+
+/**
  * A single page of an open source. Format-agnostic shape;
  * format-specific handles may carry extra fields via subtyping.
  */
@@ -253,8 +280,15 @@ export interface PageHandle<F extends DocumentFormat> {
 	 * `display` is gated separately from a persisted anchor's
 	 * `payload` — it is a different field on a different type, and
 	 * `isPdfAnchor` does not apply to it. See ADR-0004 §Two gates.
+	 *
+	 * Returns a handle to what was painted, so the caller can reconcile
+	 * overlays against rows, replace them, and take them off — or `null`
+	 * when the display data was not one this page recognises and nothing
+	 * was drawn. A caller that treats `null` as a handle is holding a
+	 * hole in its map; one that treats it as an error will fall over on
+	 * a row from a future version.
 	 */
-	paintResolvedAnchor(anchor: ResolvedAnchor, target: HTMLElement): Promise<void>;
+	paintResolvedAnchor(anchor: ResolvedAnchor, target: HTMLElement): Promise<PaintedAnchor | null>;
 }
 
 /** Render options. Format-specific readers map these to their

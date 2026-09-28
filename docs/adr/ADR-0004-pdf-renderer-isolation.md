@@ -195,11 +195,22 @@ export interface PageHandle<F extends DocumentFormat> {
    *  Reads `anchor.display` (opaque to generic UI) and converts it
    *  through the transform of the last render that completed into
    *  `target`. There is no options parameter: see §"What the painter
-   *  may refuse, and where it draws". */
+   *  may refuse, and where it draws".
+   *
+   *  Returns a handle to what was painted, or null when the display was
+   *  not one this reader recognises and nothing was drawn. */
   paintResolvedAnchor(
     anchor: ResolvedAnchor,
     target: HTMLElement,
-  ): Promise<void>;
+  ): Promise<PaintedAnchor | null>;
+}
+
+/** A painted highlight, and the only way to take it off. */
+export interface PaintedAnchor {
+  /** The overlay element. The UI applies `Highlight.color` to it. */
+  readonly element: HTMLElement;
+  /** Idempotent. Safe on a node a re-render already detached. */
+  remove(): void;
 }
 ```
 
@@ -365,7 +376,17 @@ Refusals are two kinds, and the difference is worth a stack trace:
 The painter decides geometry and freshness and nothing else. Colour is a
 semantic name on a generic domain type, resolved to a token by the UI's
 own stylesheet; a painter that chose a colour would freeze one theme's
-decision into persisted data.
+decision into persisted data. The UI applies it to the element the paint
+call hands back, which is also what makes that name reachable at all.
+
+**Paint returns a handle, because the caller has to reconcile.** A
+`Promise<void>` leaves the UI unable to say which overlay belongs to
+which row, and every one of those needs to: re-painting after a
+recovery or a zoom would stack a second overlay over the first, deleting
+a row has to know what to remove, and the colour needs an element to
+land on. The handle carries the element and an idempotent `remove()`,
+which is safe on a node a re-render already detached — a case the UI
+cannot distinguish from a live one, and must not have to.
 
 Two properties the diagram is asserting, not just describing:
 
