@@ -223,27 +223,38 @@ export interface PageHandle<F extends DocumentFormat> {
 	 * decides whether the overlay is drawn as a resolved highlight or
 	 * as the "this position is a guess" marker ADR-0007 asks for. The
 	 * page owns the conversion from the format's stored coordinates to
-	 * the viewport rects the current `options` imply, because it is
-	 * the only thing that knows the transform the page was rendered
-	 * with — a generic UI reading `display` would have to re-derive it
-	 * and would get it wrong the first time zoom or rotation changed.
+	 * viewport rects, because it is the only thing that knows the
+	 * transform the page was rendered with — a generic UI reading
+	 * `display` would have to re-derive it and would get it wrong the
+	 * first time zoom or rotation changed.
 	 *
-	 * `options` defaults to the options this page was last rendered
-	 * with, which is what a caller that is not changing render state
-	 * wants. A page that has never been rendered has no transform to
-	 * default to, and inventing one would place every rect in the
-	 * wrong place while looking like it worked: calling this before
-	 * `render` is a programming error and rejects.
+	 * There is deliberately no `options` parameter, which revises an
+	 * earlier version of this contract. The only transform that puts a
+	 * highlight on its glyphs is the one the canvas in `target` was
+	 * actually drawn with, and only a completed render knows it.
+	 * Honouring options would mean re-deriving a transform, which is
+	 * the exact mistake the method exists to prevent. A caller that
+	 * wants a different transform re-renders the page and waits.
+	 *
+	 * `target` is the element the page was rendered into, and the
+	 * overlay is placed inside the page box that render created: inside
+	 * it, its coordinates are the canvas's coordinates and it inherits
+	 * whatever the caller set on the host. A target holding no
+	 * rendered page is a caller that passed the wrong element.
+	 *
+	 * Both of those are programming errors and reject. So does a page
+	 * with no completed render — including one whose re-render is still
+	 * in flight, where the target is being rebuilt and an overlay placed
+	 * now would either be wiped or converted through a transform that
+	 * no longer describes what is on screen. Data the page does not
+	 * recognise (`display` it cannot gate) is not a programming error
+	 * and paints nothing.
 	 *
 	 * `display` is gated separately from a persisted anchor's
 	 * `payload` — it is a different field on a different type, and
 	 * `isPdfAnchor` does not apply to it. See ADR-0004 §Two gates.
 	 */
-	paintResolvedAnchor(
-		anchor: ResolvedAnchor,
-		target: HTMLElement,
-		options?: RenderOptions,
-	): Promise<void>;
+	paintResolvedAnchor(anchor: ResolvedAnchor, target: HTMLElement): Promise<void>;
 }
 
 /** Render options. Format-specific readers map these to their

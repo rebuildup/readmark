@@ -79,6 +79,13 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 		if (this.closed) return;
 		const generation = ++this.generation;
 		this.cancelPendingRender();
+		// Dropped at the *start*, not just on failure. While a re-render
+		// is in flight the previous transform no longer describes what is
+		// in the target — the target is being rebuilt — and a paint that
+		// converted through it would place fragments against a canvas that
+		// is about to be replaced. Dropping it makes such a paint say so
+		// instead of quietly drawing in the wrong place.
+		this.lastViewport = null;
 
 		const scale = options.scale ?? 1;
 		const rotation = options.rotation ?? 0;
@@ -222,28 +229,23 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 	 * persisted data (ADR-0004 §"Where the refreshed anchor is
 	 * written").
 	 *
-	 * Three ways this can decline, and they are different in kind:
+	 * Two kinds of "nothing happens", kept apart because they are
+	 * different in kind and only one of them is worth a stack trace:
 	 *
-	 *   - **A page mismatch rejects.** An anchor for page 7 offered to
-	 *     page 7's handle is a caller that lost track of which page it
-	 *     was talking to, and painting it here would put a highlight on
-	 *     the wrong page. That is a bug in the call, not a fact about
-	 *     the document, and it is worth a throw.
-	 *   - **Display data it does not recognise is a no-op.** `display`
-	 *     came out of storage, and a row written by a version this one
-	 *     has never heard of must paint as nothing rather than take the
-	 *     reader down.
-	 *   - **A page with no completed render paints nothing.** There is
-	 *     no transform to convert through, and inventing one would place
-	 *     every fragment in the wrong place while looking like it
-	 *     worked — the same reasoning as the contract's rejection of a
-	 *     paint before the first render.
+	 *   - **Programming errors reject.** An anchor for a page this is
+	 *     not; a target holding no rendered page; a page with no
+	 *     completed render, including one mid-re-render. Each is a caller
+	 *     that lost track of what it was talking to, and each is a case
+	 *     where drawing something plausible would be worse than failing.
+	 *   - **Display data this page does not recognise is a no-op.**
+	 *     `display` came out of storage, and a row written by a version
+	 *     this build has never heard of has to paint as nothing rather
+	 *     than take the reader down.
+	 *
+	 * The caller errors are checked first: they are about the call, and
+	 * reporting them does not depend on the data being one we can read.
 	 */
-	async paintResolvedAnchor(
-		anchor: ResolvedAnchor,
-		target: HTMLElement,
-		options?: RenderOptions,
-	): Promise<void> {
+	async paintResolvedAnchor(anchor: ResolvedAnchor, target: HTMLElement): Promise<void> {
 		if (anchor.format !== 'pdf') return;
 		if (anchor.page !== this.index) {
 			throw new Error(
@@ -251,21 +253,29 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 					`page ${anchor.page}`,
 			);
 		}
+		const viewport = this.lastViewport;
+		if (viewport === null) {
+			// Also the case where a re-render is in flight: the transform
+			// was dropped when it started, and the target is mid-rebuild.
+			throw new Error(
+				`readmark: paintResolvedAnchor called before page ${this.index} finished rendering`,
+			);
+		}
+		// The page box, not the host: `render` puts the canvas and the
+		// text layer inside it, so an overlay appended to the host instead
+		// would be positioned in a different coordinate system and would
+		// sit outside the tokens the caller set on the host.
+		const page = target.querySelector<HTMLElement>(`.${PDF_PAGE_CLASS}`);
+		if (page === null) {
+			throw new Error(`readmark: paintResolvedAnchor target holds no rendered page ${this.index}`);
+		}
 		if (!isPdfResolvedDisplay(anchor.display)) return;
-		const viewport =
-			options === undefined
-				? this.lastViewport
-				: this.pdfPage.getViewport({
-						scale: options.scale ?? 1,
-						rotation: options.rotation ?? 0,
-					});
-		if (viewport === null) return;
 
 		const layer = document.createElement('div');
 		layer.className = 'rm-highlight';
 		// `stale` is a fact about how the rects were derived, and the UI
-		// needs to show it as such. It is data rather than a class because
-		// the stylesheet is not the only thing that will read it.
+		// needs to show it as such. It is data rather than only a class
+		// because the stylesheet is not the only thing that will read it.
 		layer.dataset.freshness = anchor.freshness;
 		// A highlight is under the text, never over it: `pointer-events:
 		// none` is what keeps a drag across a highlighted sentence a
@@ -286,7 +296,7 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 		}
 		// An empty layer would be a `div` covering the page for nothing.
 		if (layer.childElementCount === 0) return;
-		target.appendChild(layer);
+		page.appendChild(layer);
 	}
 
 	/** Cancel any in-flight render and release the page. Idempotent:
@@ -296,6 +306,9 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 		if (this.closed) return;
 		this.closed = true;
 		this.generation++;
+		// A closed page has no canvas left to describe, so it has no
+		// transform to convert through either.
+		this.lastViewport = null;
 		this.cancelPendingRender();
 		this.pdfPage.cleanup();
 	}

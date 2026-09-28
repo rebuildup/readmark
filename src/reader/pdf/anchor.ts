@@ -194,6 +194,13 @@ export function isPdfResolvedDisplay(value: unknown): value is readonly PdfRect[
 			Number.isFinite((rect as PdfRect).x) &&
 			Number.isFinite((rect as PdfRect).y) &&
 			Number.isFinite((rect as PdfRect).width) &&
-			Number.isFinite((rect as PdfRect).height),
+			Number.isFinite((rect as PdfRect).height) &&
+			// A fragment with no area is not a highlight, it is a hairline
+			// nobody asked for. The measurement never produces one, so
+			// this is a foreign shape rather than an edge case, and it is
+			// rejected as a whole: one degenerate rect means this is not
+			// the display we recognise.
+			(rect as PdfRect).width > 0 &&
+			(rect as PdfRect).height > 0,
 	);
 }

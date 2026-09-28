@@ -131,6 +131,20 @@ describe('isPdfResolvedDisplay', () => {
 		expect(isPdfResolvedDisplay([{ ...RECT, width: '3' }])).toBe(false);
 	});
 
+	it('rejects a fragment with no area, which is a foreign shape', () => {
+		// A highlight with no height is a hairline nobody asked for, and
+		// the measurement never produces one. It rejects the whole list
+		// rather than one fragment of it, because a list with a degenerate
+		// entry in it is not the display we recognise — and a painter that
+		// drew the rest of it would look like a highlight that lost a
+		// line.
+		expect(isPdfResolvedDisplay([{ ...RECT, width: 0 }])).toBe(false);
+		expect(isPdfResolvedDisplay([{ ...RECT, height: 0 }])).toBe(false);
+		expect(isPdfResolvedDisplay([{ ...RECT, width: -4 }])).toBe(false);
+		expect(isPdfResolvedDisplay([{ ...RECT, height: -4 }])).toBe(false);
+		expect(isPdfResolvedDisplay([RECT, { ...RECT, width: 0 }])).toBe(false);
+	});
+
 	it('rejects numbers that cannot be a position', () => {
 		// `NaN` passes `typeof === 'number'` and would put a fragment at
 		// a coordinate no box can be drawn at.

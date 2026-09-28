@@ -324,6 +324,38 @@ the whole `ResolvedAnchor` to the page that produced it.**
   storage (repositories own the write)
 ```
 
+### What the painter may refuse, and where it draws
+
+`paintResolvedAnchor` draws inside the page box `render` created, not
+into whatever element it was handed. The canvas and the text layer are
+children of that box, so an overlay appended beside it would be
+positioned in a different coordinate system — and outside whatever the
+caller set on the host. The target is therefore part of the contract
+rather than a convenience: an element holding no rendered page is a
+caller that passed the wrong one.
+
+It converts through the transform of the last render that *completed*,
+and there is no parameter to override that. An earlier version of the
+contract took `RenderOptions` and re-derived a viewport from them; that
+is the exact mistake the method exists to prevent, because the transform
+that puts a highlight on its glyphs is the one the canvas was drawn
+with. The viewport is also dropped when a render *starts*, so a paint
+during a re-render cannot convert through a transform that no longer
+describes what is on screen.
+
+Refusals are two kinds, and the difference is worth a stack trace:
+
+- **Programming errors reject** — an anchor for another page, a target
+  with no rendered page, no completed render.
+- **Unrecognised `display` is a no-op** — it came out of storage, and a
+  row from a version this build has not seen has to paint as nothing
+  rather than take the reader down.
+
+The painter decides geometry and freshness and nothing else. Colour is a
+semantic name on a generic domain type, resolved to a token by the UI's
+own stylesheet; a painter that chose a colour would freeze one theme's
+decision into persisted data.
+
 Two properties the diagram is asserting, not just describing:
 
 - **The narrowing happens on the format side.** `display` is read
@@ -394,7 +426,7 @@ separately:
 | entry point | value being read | gate | lives in |
 | --- | --- | --- | --- |
 | `resolveAnchor(anchor)` | `Anchor.payload` | `isAnchorOfFormat(anchor, 'pdf') && isPdfAnchor(anchor)` | `domain/annotation/` + `reader/pdf/anchor.ts` |
-| `paintResolvedAnchor(resolved, target)` | `ResolvedAnchor.display` | `resolved.format === 'pdf' && isPdfResolvedDisplay(resolved.display)` | `reader/pdf/` |
+| `paintResolvedAnchor(anchor, target)` | `ResolvedAnchor.display` | `anchor.format === 'pdf' && isPdfResolvedDisplay(anchor.display)` | `reader/pdf/anchor.ts` |
 
 `isPdfResolvedDisplay(value): value is readonly PdfRect[]` is a
 separate validator because the thing it checks is a different thing:

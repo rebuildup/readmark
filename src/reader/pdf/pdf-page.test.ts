@@ -423,15 +423,22 @@ describe('PdfPageHandle.paintResolvedAnchor', () => {
 		return element;
 	}
 
-	async function renderedPage(proxy: PDFPageProxy): Promise<PdfPageHandle> {
+	/** A page rendered into the element it will be painted into: the
+	 *  overlay has to land inside the box `render` created, so a test
+	 *  that paints into a fresh element is asserting the wrong contract.
+	 */
+	async function renderedPage(
+		proxy: PDFPageProxy,
+		options: { scale?: number } = {},
+	): Promise<{ page: PdfPageHandle; into: HTMLElement }> {
 		const page = new PdfPageHandle(PAGE_ONE, proxy);
-		await page.render(target(), { scale: 1 });
-		return page;
+		const into = target();
+		await page.render(into, { scale: options.scale ?? 1 });
+		return { page, into };
 	}
 
 	it('draws one positioned element per fragment, in CSS pixels', async () => {
-		const page = await renderedPage(makeProxy().proxy);
-		const into = target();
+		const { page, into } = await renderedPage(makeProxy().proxy);
 
 		await page.paintResolvedAnchor(resolved(), into);
 
@@ -448,8 +455,7 @@ describe('PdfPageHandle.paintResolvedAnchor', () => {
 	});
 
 	it('keeps the highlight out of the way of a selection', async () => {
-		const page = await renderedPage(makeProxy().proxy);
-		const into = target();
+		const { page, into } = await renderedPage(makeProxy().proxy);
 
 		await page.paintResolvedAnchor(resolved(), into);
 
@@ -460,8 +466,7 @@ describe('PdfPageHandle.paintResolvedAnchor', () => {
 	});
 
 	it('marks freshness, because the UI has to be able to show it', async () => {
-		const page = await renderedPage(makeProxy().proxy);
-		const into = target();
+		const { page, into } = await renderedPage(makeProxy().proxy);
 
 		await page.paintResolvedAnchor(resolved({ freshness: 'fresh' }), into);
 		await page.paintResolvedAnchor(resolved({ freshness: 'stale' }), into);
@@ -475,22 +480,18 @@ describe('PdfPageHandle.paintResolvedAnchor', () => {
 		// A highlight converted through a re-derived viewport is a
 		// highlight beside its text. The page is rendered at scale 2 and
 		// painted with no options: the fragments must come out doubled.
-		const page = await renderedPage(makeProxy().proxy);
-		const scaled = new PdfPageHandle(PAGE_ONE, makeProxy().proxy);
-		await scaled.render(target(), { scale: 2 });
-		const into = target();
+		const { page: scaled, into } = await renderedPage(makeProxy().proxy, { scale: 2 });
 
 		await scaled.paintResolvedAnchor(resolved(), into);
 
 		const style = (into.querySelector('.rm-highlight__fragment') as HTMLElement).style;
 		expect(style.width).toBe('400px');
 		expect(style.top).toBe('320px');
-		expect(page.index).toBe(1);
+		expect(scaled.index).toBe(1);
 	});
 
 	it('declines display data it does not recognise', async () => {
-		const page = await renderedPage(makeProxy().proxy);
-		const into = target();
+		const { page, into } = await renderedPage(makeProxy().proxy);
 
 		// `display` came out of storage. A row from a version this build
 		// has never heard of paints as nothing rather than taking the
@@ -498,13 +499,17 @@ describe('PdfPageHandle.paintResolvedAnchor', () => {
 		await page.paintResolvedAnchor(resolved({}, 'rects' as never), into);
 		await page.paintResolvedAnchor(resolved({}, []), into);
 		await page.paintResolvedAnchor(resolved({}, [{ x: 1, y: 2, width: 3 }] as never), into);
+		// A fragment with no area is a hairline nobody asked for, and the
+		// measurement never produces one — so it is a foreign shape, and a
+		// foreign shape rejects the whole list rather than one fragment of it.
+		await page.paintResolvedAnchor(resolved({}, [{ x: 1, y: 2, width: 0, height: 5 }]), into);
+		await page.paintResolvedAnchor(resolved({}, [{ x: 1, y: 2, width: 5, height: -1 }]), into);
 
 		expect(into.querySelector('.rm-highlight')).toBeNull();
 	});
 
 	it('declines an anchor for a format it does not paint', async () => {
-		const page = await renderedPage(makeProxy().proxy);
-		const into = target();
+		const { page, into } = await renderedPage(makeProxy().proxy);
 
 		await page.paintResolvedAnchor(resolved({ format: 'epub' as never }), into);
 
@@ -512,8 +517,7 @@ describe('PdfPageHandle.paintResolvedAnchor', () => {
 	});
 
 	it('rejects an anchor belonging to another page', async () => {
-		const page = await renderedPage(makeProxy().proxy);
-		const into = target();
+		const { page, into } = await renderedPage(makeProxy().proxy);
 
 		// A caller that lost track of which page it was talking to. That is
 		// a bug in the call, not a fact about the document, and painting it
@@ -524,15 +528,55 @@ describe('PdfPageHandle.paintResolvedAnchor', () => {
 		expect(into.querySelector('.rm-highlight')).toBeNull();
 	});
 
-	it('paints nothing before the page has been rendered', async () => {
+	it('rejects before the page has finished rendering', async () => {
 		const page = new PdfPageHandle(PAGE_ONE, makeProxy().proxy);
 		const into = target();
 
 		// There is no transform to convert through, and inventing one
 		// would place every fragment in the wrong place while looking like
-		// it worked.
+		// it worked. The contract says this is a caller bug, so it throws.
+		await expect(page.paintResolvedAnchor(resolved(), into)).rejects.toThrow(/finished rendering/);
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+	});
+
+	it('rejects while a re-render is in flight, rather than using the old transform', async () => {
+		// The transform is dropped when a render *starts*, because the
+		// target is mid-rebuild: converting through the previous viewport
+		// would place fragments against a canvas about to be replaced, and
+		// an overlay appended now would be wiped by `replaceChildren`.
+		const slow = makeProxy({ autoResolve: false });
+		const page = new PdfPageHandle(PAGE_ONE, slow.proxy);
+		const into = target();
+		const rendering = page.render(into, { scale: 2 });
+
+		await expect(page.paintResolvedAnchor(resolved(), into)).rejects.toThrow(/finished rendering/);
+		slow.renders[0]?.resolve();
+		await rendering;
+		// Once it has completed, the page paints through the new transform.
+		await page.paintResolvedAnchor(resolved(), into);
+		const style = (into.querySelector('.rm-highlight__fragment') as HTMLElement).style;
+		expect(style.width).toBe('400px');
+	});
+
+	it('rejects a target that holds no rendered page', async () => {
+		const { page } = await renderedPage(makeProxy().proxy);
+
+		// `render` puts the canvas and the text layer inside a page box it
+		// creates; the overlay has to go in there too, or it is positioned
+		// in a different coordinate system and sits outside the tokens the
+		// caller set on the host.
+		await expect(page.paintResolvedAnchor(resolved(), target())).rejects.toThrow(
+			/holds no rendered page/,
+		);
+	});
+
+	it('places the overlay inside the page box, not beside it', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+
 		await page.paintResolvedAnchor(resolved(), into);
 
-		expect(into.querySelector('.rm-highlight')).toBeNull();
+		const box = into.querySelector('.rm-page');
+		expect(box?.querySelector('.rm-highlight')).not.toBeNull();
+		expect(into.querySelector(':scope > .rm-highlight')).toBeNull();
 	});
 });
