@@ -85,6 +85,15 @@ vi.mock('../storage/reading-state-repo.ts', () => ({
 	deleteReadingProgress: vi.fn(async () => false),
 }));
 
+// The view reads the mark list on mount. This screen is not where
+// bookmark behaviour is under test, so the list only has to be empty —
+// and it has to be a mock, because the real repository needs IndexedDB.
+vi.mock('../storage/bookmarks-repo.ts', () => ({
+	listBookmarks: vi.fn(async () => []),
+	addBookmark: vi.fn(),
+	deleteBookmark: vi.fn(),
+}));
+
 vi.mock('../reader/pdf/index.ts', () => ({
 	createPdfReader: () => createPdfReader(),
 	// The view reads this class name to measure a rendered page.

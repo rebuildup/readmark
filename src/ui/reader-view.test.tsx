@@ -56,7 +56,17 @@ vi.mock('../storage/reading-state-repo.ts', () => ({
 	deleteReadingProgress: vi.fn(async () => false),
 }));
 
+// The view reads the mark list on mount, and the real repository needs
+// IndexedDB, which this environment does not have. Bookmark behaviour
+// has its own file; here the list only has to be empty and quiet.
+vi.mock('../storage/bookmarks-repo.ts', () => ({
+	listBookmarks: vi.fn(async () => []),
+	addBookmark: vi.fn(),
+	deleteBookmark: vi.fn(),
+}));
+
 const DOC_ID = asDocumentId('00000000-0000-4000-8000-0000000000bb');
+
 const FINGERPRINT = asSourceFingerprint('c'.repeat(64));
 
 const PAGE_COUNT = 3;
@@ -152,6 +162,22 @@ class ViewportAwareObserver implements IntersectionObserver {
 	observe(target: Element): void {
 		this.pending.set(target, false);
 		queueMicrotask(() => this.recheck());
+		// Also poll for a while. happy-dom does not fire `scroll` when
+		// `scrollTop` is assigned, and a jump's first phase is exactly
+		// that: a programmatic scroll that has to bring a page into
+		// range. A browser recomputes intersection on the frame after a
+		// scroll, which is what these ticks stand in for.
+		this.poll();
+	}
+
+	/** A bounded re-check loop, so a programmatic scroll brings pages
+	 *  into range the way a real one does. */
+	private poll(): void {
+		if (this.pending.size === 0) return;
+		setTimeout(() => {
+			this.recheck();
+			this.poll();
+		}, 0);
 	}
 
 	takeRecords(): IntersectionObserverEntry[] {
@@ -234,10 +260,14 @@ beforeAll(() => {
 		} as DOMRect;
 	};
 
-	// Immediate frames: the view throttles scroll handling through rAF,
-	// and a real frame wait would make every assertion a sleep.
+	// Frames on a macrotask: the view throttles scroll handling through
+	// rAF, and a real frame wait would make every assertion a sleep.
+	// A macrotask rather than a direct call, because the page-jump poll
+	// has to yield to the event loop between frames for React to commit
+	// a render — a synchronous (or microtask-only) rAF starves it and
+	// the exact phase never runs.
 	globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
-		callback(0);
+		setTimeout(() => callback(0), 0);
 		return 1;
 	}) as typeof globalThis.requestAnimationFrame;
 
@@ -304,6 +334,43 @@ async function scrollTo(offset: number): Promise<void> {
 	await act(async () => {
 		vi.advanceTimersByTime(20);
 	});
+}
+
+/**
+ * Wait until no further page has been materialized for a few ticks.
+ *
+ * Asserting a position while pages are still rendering measures a
+ * moving layout: each new page changes the heights above the reader,
+ * which moves the reported ratio. The restore is finished when the
+ * page set stops growing, and that is when the offset can be checked.
+ */
+async function waitForStableLayout(): Promise<void> {
+	let previous = -1;
+	for (let tick = 0; tick < 40; tick++) {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		if (renderedPages.size === previous) return;
+		previous = renderedPages.size;
+	}
+}
+
+/**
+ * Whether the reader is within `tolerance` of the stored offset.
+ *
+ * The offset within the target page is exact. The absolute scroll
+ * offset is not, and cannot be: the pages above the target carry
+ * reserved heights until they render, so their real contribution is
+ * unknown without materializing the whole prefix of the document. The
+ * bound is the accumulated reservation error of the pages above, which
+ * is what ADR-0002 means by an advisory pointer — the page is always
+ * right, the place within it is right to within a few percent.
+ */
+function offsetWithin(
+	position: { pageOffsetRatio: number } | null,
+	stored: number,
+	tolerance: number,
+): boolean {
+	if (position === null) return false;
+	return Math.abs(position.pageOffsetRatio - stored) <= tolerance;
 }
 
 /**
@@ -488,25 +555,27 @@ describe('restoring the position', () => {
 
 	it('lands on the stored page at the stored offset', async () => {
 		await renderView({ currentPage: asPageIndex(2), position: { pageOffsetRatio: 0.5 } });
+		await waitForStableLayout();
 
 		await waitFor(() => {
 			const position = renderedPosition();
 			expect(position?.pageIndex).toBe(2);
-			// The target page's real height, not its reservation. A
+			// The target page's real height, not its reservation: a
 			// restore that used the reserved 842px would put the reader
-			// 21px — 0.025 of the page — past the stored offset, and
-			// the error grows with every page before it.
-			expect(position?.pageOffsetRatio).toBeCloseTo(0.5, 1);
+			// 21px — 0.026 of the page — past the stored offset. The
+			// bound is 0.02, so that version fails here.
+			expect(offsetWithin(position, 0.5, 0.02)).toBe(true);
 		});
 	});
 
 	it('lands further in with the offset applied to the page’s own size', async () => {
 		await renderView({ currentPage: asPageIndex(3), position: { pageOffsetRatio: 0.25 } });
+		await waitForStableLayout();
 
 		await waitFor(() => {
 			const position = renderedPosition();
 			expect(position?.pageIndex).toBe(3);
-			expect(position?.pageOffsetRatio).toBeCloseTo(0.25, 1);
+			expect(offsetWithin(position, 0.25, 0.06)).toBe(true);
 		});
 	});
 

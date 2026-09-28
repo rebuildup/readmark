@@ -40,9 +40,11 @@ import { createPortal } from 'react-dom';
 import { Button } from './primitives/button.tsx';
 
 /** Focusable, non-disabled descendants, in tab order. Kept as a
- *  selector rather than tabbable library because the dialog has two
- *  buttons and no form fields; extend it if that stops being true. */
-const FOCUSABLE_SELECTOR = 'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+ *  selector rather than tabbable library because the dialog is a small
+ *  form: two buttons and, for a dialog that asks for something, at most
+ *  one field. Extend it if that stops being true. */
+const FOCUSABLE_SELECTOR =
+	'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
 
 interface ConfirmDialogProps {
 	readonly title: string;
@@ -60,6 +62,16 @@ interface ConfirmDialogProps {
 	 *  error feedback when the action failed and the dialog stayed
 	 *  open. */
 	readonly errorMessage?: string | null;
+	/** A field or two, rendered between the description and the
+	 *  buttons, for a dialog that asks the reader for something. */
+	readonly children?: ReactNode;
+	/**
+	 * Where focus starts. `cancel` is the safe default and stays right
+	 * for anything destructive; `first` focuses the first focusable
+	 * thing in the dialog, which for a dialog with a field is that
+	 * field.
+	 */
+	readonly initialFocus?: 'cancel' | 'first';
 	/** Disable both actions and relabel the confirm button while
 	 *  the caller's async work is in flight. */
 	readonly busy?: boolean;
@@ -76,6 +88,8 @@ export function ConfirmDialog({
 	tone = 'primary',
 	errorMessage = null,
 	busy = false,
+	initialFocus = 'cancel',
+	children,
 	onConfirm,
 	onCancel,
 }: ConfirmDialogProps) {
@@ -132,8 +146,16 @@ export function ConfirmDialog({
 	}, [container]);
 
 	useEffect(() => {
+		if (initialFocus === 'first') {
+			// The first focusable in DOM order, which is the field when
+			// the dialog has one. Refs are attached before effects run,
+			// so the panel is already here on the first commit.
+			const first = panelRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR) ?? null;
+			(first ?? cancelRef.current)?.focus();
+			return;
+		}
 		cancelRef.current?.focus();
-	}, []);
+	}, [initialFocus]);
 
 	useEffect(() => {
 		function focusableElements(): HTMLElement[] {
@@ -216,6 +238,7 @@ export function ConfirmDialog({
 						{errorMessage}
 					</p>
 				)}
+				{children}
 				<div className="rm-dialog__actions">
 					<Button
 						ref={cancelRef}
