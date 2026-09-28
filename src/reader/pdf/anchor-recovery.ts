@@ -335,27 +335,42 @@ interface CoveredRun {
  * Character offsets come from the DOM, and the page's text is the
  * layer's items joined — the same string `findQuote` searches and
  * `quoteForRange` slices. So the selection has to be *located* in that
- * string rather than measured: each endpoint's containing text node is
- * matched against the layer's runs in order, and the offsets are
- * counted from there.
+ * string rather than measured.
  *
- * A caret inside a run carries no character of its own, so an endpoint
- * is placed between the two runs it sits between, by which run contains
- * it. That is why a selection can be resolved when the reader dragged
- * to the very end of a line.
+ * ## The selection has to belong to this page
  *
- * `null` for a selection this page cannot account for: none, collapsed,
- * or one whose endpoints are not both inside this page's text layer.
- * The last case is the cross-page selection, and it is the one that must
- * not be guessed at — a highlight that silently covered the wrong page
- * is worse than one that was not offered.
+ * `container` is the page host, and the layer it rendered is found
+ * there. Everything after that is scoped to *that* layer, and the
+ * scoping is the point: two pages of one document very often have
+ * identical run structure, so a selection from page B resolves to
+ * perfectly plausible offsets in page A's text, and an anchor built
+ * that way points at a place the reader never highlighted while
+ * looking completely ordinary. Three checks stand between that and a
+ * stored anchor:
+ *
+ *   - both endpoints must be inside the layer found in `container`;
+ *   - the run index comes from *that layer's* direct spans, never from
+ *     a walk up from the endpoint, which would find whatever page the
+ *     endpoint happens to live in;
+ *   - the span's own text must equal `items[runIndex].text`, which
+ *     fails loudly if the DOM and the layer ever disagree.
+ *
+ * A boundary that is not a text node is `null` rather than a guess. A
+ * browser reports an element as the container when a selection starts
+ * or ends between spans, and reading an offset against the wrong
+ * element is a wrong anchor with no way to tell it apart from a right
+ * one. Not offering the highlight is the recoverable mistake.
  */
 export function selectionRangeInLayer(
+	container: HTMLElement,
 	range: Range,
 	layer: PageTextLayer,
 ): { readonly start: number; readonly end: number } | null {
-	const start = offsetOfNode(range.startContainer, range.startOffset, layer);
-	const end = offsetOfNode(range.endContainer, range.endOffset, layer);
+	const textLayer = container.querySelector<HTMLElement>('.rm-text-layer');
+	if (textLayer === null) return null;
+	const spans = directSpans(textLayer);
+	const start = offsetOfNode(textLayer, spans, range.startContainer, range.startOffset, layer);
+	const end = offsetOfNode(textLayer, spans, range.endContainer, range.endOffset, layer);
 	if (start === null || end === null) return null;
 	// The DOM orders a range's endpoints, so this is a guard rather than
 	// a path: a range whose start sits after its end is a caller that
@@ -364,22 +379,43 @@ export function selectionRangeInLayer(
 	return { start: Math.min(start, end), end: Math.max(start, end) };
 }
 
+/** The layer's own spans, in order — the direct children, so a nested
+ *  element cannot be counted as a run. */
+function directSpans(textLayer: HTMLElement): readonly HTMLSpanElement[] {
+	const spans: HTMLSpanElement[] = [];
+	for (const child of textLayer.children) {
+		if (child instanceof HTMLSpanElement) spans.push(child);
+	}
+	return spans;
+}
+
 /** Where a DOM endpoint lands in the layer's text, or `null` when the
- *  endpoint is not part of this page's text layer. */
-function offsetOfNode(node: Node | null, offset: number, layer: PageTextLayer): number | null {
-	if (node === null) return null;
-	const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
-	if (!(element instanceof HTMLElement)) return null;
-	const span = element.closest('span');
-	if (span === null) return null;
-	// The run's position is its position in the layer, which is the
-	// position of its span: same projection, same order.
-	const spans = span.parentElement?.querySelectorAll('span');
-	if (spans === undefined) return null;
-	const runIndex = Array.from(spans).indexOf(span);
+ *  endpoint is not a character of *this* layer. */
+function offsetOfNode(
+	textLayer: HTMLElement,
+	spans: readonly HTMLSpanElement[],
+	node: Node | null,
+	offset: number,
+	layer: PageTextLayer,
+): number | null {
+	// A boundary that is not a text node carries no character offset to
+	// read. Guessing at one is how a highlight ends up a line out.
+	if (node === null || node.nodeType !== Node.TEXT_NODE) return null;
+	// Scoped to the layer found in `container`. A selection from another
+	// page of the same document fails here even when both pages have the
+	// same run structure.
+	if (node.parentElement === null || !textLayer.contains(node)) return null;
+	const span = node.parentElement;
+	if (!(span instanceof HTMLSpanElement)) return null;
+	const runIndex = spans.indexOf(span);
 	if (runIndex === -1) return null;
 	const item = layer.items[runIndex];
 	if (item === undefined) return null;
+	// The span and the item have to be the same run of the same text.
+	// Without this the mapping is an index coincidence, and an index
+	// coincidence across two pages is indistinguishable from the real
+	// thing until the reader is looking at the wrong words.
+	if (span.textContent !== item.text) return null;
 
 	let base = 0;
 	for (let index = 0; index < runIndex; index++) {

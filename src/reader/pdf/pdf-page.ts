@@ -176,7 +176,7 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 	 */
 	async createAnchorFromSelection(selection: ReaderSelection): Promise<Anchor | null> {
 		const layer = await this.text();
-		const range = selectionRangeInLayer(selection.range, layer);
+		const range = selectionRangeInLayer(selection.container, selection.range, layer);
 		// A collapsed range is a click, not a drag.
 		if (range === null) return null;
 		const quote = quoteForRange(layer, range);

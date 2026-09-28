@@ -396,22 +396,27 @@ describe('quoteForRange', () => {
 });
 
 describe('selectionRangeInLayer', () => {
-	/** A text layer shaped like the DOM `buildTextLayer` produces: one
-	 *  span per run, in the same order, holding the same text. */
-	function domFor(layer: PageTextLayer): {
-		layer: HTMLElement;
-		spanAt: (index: number) => HTMLSpanElement;
-	} {
+	/** A page host shaped like the one `render` produces: the layer, and
+	 *  one span per run in the same order holding the same text. */
+	function pageFor(layer: PageTextLayer): HTMLElement {
 		const host = document.createElement('div');
-		host.className = 'rm-text-layer';
+		host.dataset.pageIndex = '1';
+		const textLayer = document.createElement('div');
+		textLayer.className = 'rm-text-layer';
 		for (const item of layer.items) {
 			const span = document.createElement('span');
 			span.textContent = item.text;
-			host.appendChild(span);
+			textLayer.appendChild(span);
 		}
+		host.appendChild(textLayer);
 		document.body.appendChild(host);
-		const spans = [...host.querySelectorAll('span')];
-		return { layer: host, spanAt: (index) => spans[index] as HTMLSpanElement };
+		return host;
+	}
+
+	function spanAt(host: HTMLElement, index: number): HTMLSpanElement {
+		const span = host.querySelectorAll('.rm-text-layer > span')[index];
+		if (span === undefined) throw new Error(`no span at ${index}`);
+		return span as HTMLSpanElement;
 	}
 
 	function rangeIn(span: HTMLSpanElement, start: number, end: number): Range {
@@ -437,39 +442,83 @@ describe('selectionRangeInLayer', () => {
 	}
 
 	it('locates a selection inside one run', () => {
-		const dom = domFor(ALPHA);
+		const host = pageFor(ALPHA);
 
 		// 'beta' is characters 6..10 of the page, and characters 0..4 of
 		// its own run.
-		const range = selectionRangeInLayer(rangeIn(dom.spanAt(1), 0, 4), ALPHA);
+		const range = selectionRangeInLayer(host, rangeIn(spanAt(host, 1), 0, 4), ALPHA);
 
 		expect(range).toEqual({ start: 6, end: 10 });
 	});
 
 	it('locates a selection that starts and ends in different runs', () => {
-		const dom = domFor(ALPHA);
+		const host = pageFor(ALPHA);
 
 		// From the start of 'beta ' to inside 'gamma.': the endpoints are
 		// in different spans, and the page offset has to account for the
 		// whole first run rather than restarting at the second.
-		const range = selectionRangeInLayer(rangeAcross(dom.spanAt(1), 0, dom.spanAt(2), 5), ALPHA);
+		const range = selectionRangeInLayer(
+			host,
+			rangeAcross(spanAt(host, 1), 0, spanAt(host, 2), 5),
+			ALPHA,
+		);
 
 		expect(range).toEqual({ start: 6, end: 16 });
 	});
 
 	it('reads a caret at the end of a run without running into the next one', () => {
-		const dom = domFor(ALPHA);
+		const host = pageFor(ALPHA);
 
 		// Dragging to the end of a line produces an offset equal to the
 		// text length. Addressing the next run's text with it would make
 		// the highlight start a word early.
-		const range = selectionRangeInLayer(rangeIn(dom.spanAt(0), 0, 6), ALPHA);
+		const range = selectionRangeInLayer(host, rangeIn(spanAt(host, 0), 0, 6), ALPHA);
 
 		expect(range).toEqual({ start: 0, end: 6 });
 	});
 
+	it('refuses a selection from another page with the same run structure', () => {
+		// Two pages of one document very often have identical runs. Before
+		// the layer was scoped to the container, this resolved to
+		// perfectly plausible offsets in page A — an anchor pointing at a
+		// place the reader never highlighted, looking entirely ordinary.
+		const pageA = pageFor(ALPHA);
+		const pageB = pageFor(ALPHA);
+		const onB = rangeIn(spanAt(pageB, 1), 0, 4);
+
+		expect(selectionRangeInLayer(pageA, onB, ALPHA)).toBeNull();
+		// The same selection against its own page still resolves, so the
+		// refusal is about ownership and not about the range.
+		expect(selectionRangeInLayer(pageB, onB, ALPHA)).toEqual({ start: 6, end: 10 });
+	});
+
+	it('refuses a selection whose span does not match the layer it is read from', () => {
+		// The span and the item have to be the same run of the same text.
+		// Without the check the mapping is an index coincidence, and an
+		// index coincidence across two pages is indistinguishable from
+		// the real thing until the reader is looking at the wrong words.
+		const host = pageFor(ALPHA);
+		spanAt(host, 1).textContent = 'something else entirely';
+
+		expect(selectionRangeInLayer(host, rangeIn(spanAt(host, 1), 0, 4), ALPHA)).toBeNull();
+	});
+
+	it('refuses a boundary that is not a text node', () => {
+		// A browser reports an element as the container when a selection
+		// starts or ends between spans. Reading an offset against the
+		// wrong element is a wrong anchor with no way to tell it apart
+		// from a right one, so MVP declines instead of guessing.
+		const host = pageFor(ALPHA);
+		const layer = host.querySelector('.rm-text-layer') as HTMLElement;
+		const range = document.createRange();
+		range.setStart(layer, 0);
+		range.setEnd(spanAt(host, 1).firstChild as Text, 4);
+
+		expect(selectionRangeInLayer(host, range, ALPHA)).toBeNull();
+	});
+
 	it('refuses a selection this page cannot account for', () => {
-		domFor(ALPHA);
+		const host = pageFor(ALPHA);
 		const elsewhere = document.createElement('span');
 		elsewhere.textContent = 'another page';
 		document.body.appendChild(elsewhere);
@@ -478,11 +527,11 @@ describe('selectionRangeInLayer', () => {
 		outside.setStart(outsideText, 0);
 		outside.setEnd(outsideText, 4);
 
-		// Cross-page selections are two anchors (ADR-0007), and a
-		// highlight that silently covered the wrong page is worse than one
-		// that was not offered.
-		expect(selectionRangeInLayer(outside, ALPHA)).toBeNull();
-		expect(selectionRangeInLayer(document.createRange(), ALPHA)).toBeNull();
+		expect(selectionRangeInLayer(host, outside, ALPHA)).toBeNull();
+		expect(selectionRangeInLayer(host, document.createRange(), ALPHA)).toBeNull();
+		// And a container that never rendered a layer has no text to
+		// locate the selection in at all.
+		expect(selectionRangeInLayer(document.createElement('div'), outside, ALPHA)).toBeNull();
 	});
 });
 
