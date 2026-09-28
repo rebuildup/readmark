@@ -23,10 +23,16 @@
  * the problem: `Range.getClientRects()` over the matched characters of
  * the text layer DOM returns exactly the visual fragments those
  * characters occupy, kerning, line wrap, and rotated runs included.
- * Those client rects are then converted back to raw PDF user-space
- * through the same viewport the layer was built with, so what comes
- * out is transform-free and survives a later zoom or rotation
- * (ADR-0007).
+ * Those rects are then brought back to raw PDF user-space in two
+ * steps, and both are necessary:
+ *
+ *   1. Client coordinates are viewport coordinates, and this layer is
+ *      hosted far off-screen to be measured (below), so its rects carry
+ *      that offset. The layer's own box is subtracted.
+ *   2. What is left is layer-local, which is what the layer's viewport
+ *      transform was built for. The same viewport converts it back to
+ *      user-space, so what comes out is transform-free and survives a
+ *      later zoom or rotation (ADR-0007).
  *
  * ## Measured in a known state
  *
@@ -89,7 +95,37 @@ export interface ClientRectLike {
 }
 
 /**
- * Convert measured client rects into raw PDF user-space fragments.
+ * Move measured client rects into coordinates relative to `origin`.
+ *
+ * `getClientRects()` answers in viewport coordinates, so a layer hosted
+ * a hundred thousand pixels to the left of the document reports
+ * coordinates a hundred thousand pixels to the left of it. Handing
+ * those straight to a viewport transform produces a rect in the right
+ * place in the file and a wildly wrong one on the page — the largest
+ * kind of wrong, because it still looks like a rectangle.
+ *
+ * Subtracting the layer's own box is the correction, and it is the
+ * only one: every rect from the same layer shares the same origin, so
+ * one subtraction per rect against one origin removes it exactly.
+ */
+export function layerRectsFromClientRects(
+	rects: Iterable<ClientRectLike>,
+	origin: { readonly left: number; readonly top: number },
+): readonly ClientRectLike[] {
+	const local: ClientRectLike[] = [];
+	for (const rect of rects) {
+		const left = rect.left - origin.left;
+		const top = rect.top - origin.top;
+		const right = rect.right - origin.left;
+		const bottom = rect.bottom - origin.top;
+		local.push({ left, top, right, bottom, width: right - left, height: bottom - top });
+	}
+	return local;
+}
+
+/**
+ * Convert measured layer-local rects into raw PDF user-space
+ * fragments.
  *
  * Two corners go through the viewport and the result is normalised,
  * rather than trusting which corner is which: with rotation 0 the flip
@@ -100,7 +136,7 @@ export interface ClientRectLike {
  * run or a range that landed on nothing produces, and painting it
  * would put an invisible box on the page that no reader could explain.
  */
-export function fragmentsFromClientRects(
+export function fragmentsFromLayerRects(
 	rects: Iterable<ClientRectLike>,
 	viewport: ViewportLike,
 ): readonly PdfRect[] {
@@ -158,21 +194,32 @@ export async function fragmentsForRuns(
 		const textLayer = await buildTextLayer(page, viewport, host);
 		const spans = textLayer.querySelectorAll('span');
 		if (spans.length !== layer.items.length) return null;
-		const rects: ClientRectLike[] = [];
-		for (const [index, run] of runs.entries()) {
-			const span = spans[index];
-			// The item the offsets were computed against, not just any
-			// span: a run that moved would mean the offsets are talking
-			// about characters this measurement cannot see.
-			if (span === undefined || run.item.text !== layer.items[index]?.text) return null;
+		const measured: ClientRectLike[] = [];
+		for (const run of runs) {
+			// Addressed by the run's position in the *page*: a quote
+			// beginning halfway down the page must measure the run it
+			// covers, not the first run on it.
+			const span = spans[run.runIndex];
+			// Identity, not text: the item the offsets were computed
+			// against, and proof that this span is that run.
+			if (span === undefined || run.item !== layer.items[run.runIndex]) return null;
 			const text = span.firstChild;
 			if (text === null || text.nodeType !== Node.TEXT_NODE) return null;
 			const range = document.createRange();
 			range.setStart(text, run.start);
 			range.setEnd(text, run.end);
-			rects.push(...range.getClientRects());
+			// Copied out of the live list: `getClientRects()` returns a
+			// list that can track the range, and the offsets above go out
+			// of scope with it.
+			measured.push(...Array.from(range.getClientRects()));
 		}
-		const fragments = fragmentsFromClientRects(rects, viewport);
+		// The layer is hosted a long way off-screen, so its client rects
+		// are nowhere near the document's. The origin is subtracted
+		// before the transform, or every fragment lands thousands of
+		// points off the page.
+		const origin = textLayer.getBoundingClientRect();
+		const local = layerRectsFromClientRects(measured, origin);
+		const fragments = fragmentsFromLayerRects(local, viewport);
 		return fragments.length === 0 ? null : fragments;
 	} finally {
 		// The host is a measurement artefact. Leaving hundreds of spans

@@ -13,6 +13,9 @@
  *   - A quote that spans several runs, and one that sits inside one —
  *     and a quote that covers *part* of a run, which is the case a
  *     whole-run rect gets visibly wrong.
+ *   - `runIndex` is the address in the *page*, so a quote that begins
+ *     halfway down a page reports the run it covers and not the run it
+ *     happens to be first in.
  *   - The same phrase twice on a page, told apart by context — the
  *     case `prefix` / `suffix` exist for. A running head or a
  *     repeated heading is not exotic.
@@ -107,6 +110,20 @@ describe('findQuote', () => {
 			[3, 6],
 			[0, 2],
 		]);
+	});
+
+	it('addresses each run by its position in the page, not in the match', () => {
+		// The geometry stage finds a run's element by this index, so a
+		// match-local position would send a quote in the fifth run to the
+		// first one on the page: a highlight, drawn in the wrong place.
+		const page = layerOf(['zero ', 'one ', 'two ', 'three ', 'four ']);
+
+		const match = findQuote(page, { exact: 'two three' });
+
+		expect(match?.runs.map((run) => run.runIndex)).toEqual([2, 3]);
+		// A single-run match halfway down reports where it is, not 0.
+		expect(findQuote(page, { exact: 'four' })?.runs.map((run) => run.runIndex)).toEqual([4]);
+		expect(findQuote(page, { exact: 'zero' })?.runs.map((run) => run.runIndex)).toEqual([0]);
 	});
 
 	it('picks the occurrence the context points at', () => {

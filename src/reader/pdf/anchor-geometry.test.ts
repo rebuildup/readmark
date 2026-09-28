@@ -4,10 +4,12 @@
  * Split by what happy-dom can and cannot do, which is also the split
  * that matters:
  *
- *   - `fragmentsFromClientRects` is pure: client rects and a viewport
- *     in, user-space rects out. Pinned here against a viewport whose
- *     maths is written out longhand, the way `pdf-coords.test.ts` does
- *     it, including the corners-cross and zero-area cases.
+ *   - The two conversion steps are pure: client rects → layer-local,
+ *     and layer-local → user-space. Pinned here against a viewport
+ *     whose maths is written out longhand, the way `pdf-coords.test.ts`
+ *     does it, including the corners-cross and zero-area cases, and
+ *     against the off-screen offset that the measurement layer always
+ *     has.
  *   - `fragmentsForRuns` needs a layout engine, because what it
  *     produces *is* browser geometry. happy-dom returns no boxes for
  *     any element, so every assertion about it here would be vacuous.
@@ -25,7 +27,11 @@ import { describe, expect, it } from 'vitest';
 
 import { asPageIndex } from '../../domain/reading-state.ts';
 import type { PageTextItem, PageTextLayer } from '../types.ts';
-import { fragmentsForRuns, fragmentsFromClientRects } from './anchor-geometry.ts';
+import {
+	fragmentsForRuns,
+	fragmentsFromLayerRects,
+	layerRectsFromClientRects,
+} from './anchor-geometry.ts';
 import type { QuoteRunMatch } from './anchor-recovery.ts';
 import type { ViewportLike } from './pdf-coords.ts';
 
@@ -63,11 +69,36 @@ function clientRect(
 	return { left, top, right, bottom, width: right - left, height: bottom - top };
 }
 
-describe('fragmentsFromClientRects', () => {
-	it('converts a client rect back to raw user-space', () => {
-		const fragments = fragmentsFromClientRects([clientRect(100, 40, 300, 80)], viewport);
+describe('layerRectsFromClientRects', () => {
+	it('subtracts the layer origin, so an off-screen layer measures in place', () => {
+		// The measurement layer is hosted far off-screen, so every client
+		// rect arrives carrying that offset. Without this subtraction the
+		// fragments convert to a rectangle in the right place in the file
+		// and hundreds of thousands of points off the page.
+		const hosted = layerRectsFromClientRects([clientRect(-99_900, -100_000, -99_700, -99_960)], {
+			left: -100_000,
+			top: -100_000,
+		});
 
-		// x 50..150, and the y flip: client 40..80 is user-space
+		expect(hosted).toEqual([clientRect(100, 0, 300, 40)]);
+	});
+
+	it('moves a rect without resizing it', () => {
+		const [moved] = layerRectsFromClientRects([clientRect(10, 20, 110, 60)], {
+			left: 4,
+			top: 5,
+		});
+
+		expect(moved?.width).toBe(100);
+		expect(moved?.height).toBe(40);
+	});
+});
+
+describe('fragmentsFromLayerRects', () => {
+	it('converts a layer-local rect back to raw user-space', () => {
+		const fragments = fragmentsFromLayerRects([clientRect(100, 40, 300, 80)], viewport);
+
+		// x 50..150, and the y flip: layer-local 40..80 is user-space
 		// 580..560, normalised to 560..580.
 		expect(fragments).toEqual([{ x: 50, y: 560, width: 100, height: 20 }]);
 	});
@@ -77,7 +108,7 @@ describe('fragmentsFromClientRects', () => {
 		// them would cover the gap between the lines, so they stay
 		// separate — the count is not part of the contract, only that
 		// they cover the selection.
-		const fragments = fragmentsFromClientRects(
+		const fragments = fragmentsFromLayerRects(
 			[clientRect(100, 40, 300, 60), clientRect(100, 300, 260, 320)],
 			viewport,
 		);
@@ -92,7 +123,7 @@ describe('fragmentsFromClientRects', () => {
 		// A range that landed on nothing, or a zero-width run, measures
 		// as a degenerate rect. Painting it would put a box on the page
 		// that no reader could account for.
-		const fragments = fragmentsFromClientRects(
+		const fragments = fragmentsFromLayerRects(
 			[clientRect(100, 40, 100, 60), clientRect(100, 40, 300, 40), clientRect(100, 40, 300, 60)],
 			viewport,
 		);
@@ -101,7 +132,7 @@ describe('fragmentsFromClientRects', () => {
 	});
 
 	it('returns nothing for a measurement that measured nothing', () => {
-		expect(fragmentsFromClientRects([], viewport)).toEqual([]);
+		expect(fragmentsFromLayerRects([], viewport)).toEqual([]);
 	});
 
 	it('normalises a y axis that flips the corners', () => {
@@ -115,7 +146,7 @@ describe('fragmentsFromClientRects', () => {
 			convertToPdfPoint: (x: number, y: number) => [x / 2, y / 2],
 		};
 
-		const fragments = fragmentsFromClientRects([clientRect(100, 40, 300, 80)], flipped);
+		const fragments = fragmentsFromLayerRects([clientRect(100, 40, 300, 80)], flipped);
 
 		expect(fragments).toEqual([{ x: 50, y: 20, width: 100, height: 20 }]);
 	});
@@ -129,7 +160,7 @@ describe('fragmentsFromClientRects', () => {
 		const broken = { ...viewport, convertToPdfPoint: () => [] } as unknown as ViewportLike;
 
 		expect(
-			fragmentsFromClientRects([clientRect(100, 40, 300, 60), clientRect(0, 0, 10, 10)], broken),
+			fragmentsFromLayerRects([clientRect(100, 40, 300, 60), clientRect(0, 0, 10, 10)], broken),
 		).toEqual([]);
 	});
 });
@@ -156,7 +187,18 @@ describe('fragmentsForRuns', () => {
 		// characters and returning them as a highlight: confident,
 		// plausible, and wrong. A page whose text yields no runs is the
 		// cheapest way to break the correspondence.
-		const run: QuoteRunMatch = { item: ITEM, start: 6, end: 10 };
+		const run: QuoteRunMatch = { runIndex: 0, item: ITEM, start: 6, end: 10 };
+
+		return expect(fragmentsForRuns(fakePage([]), LAYER, [run])).resolves.toBeNull();
+	});
+
+	it('refuses a run whose page position does not hold it', () => {
+		// `runIndex` is the page-global address, and the item it points
+		// at has to be the item the offsets were computed from. A match
+		// that begins on the fifth run carries `runIndex: 4`, and a
+		// helper that used the match-local position instead would measure
+		// the first run of the page and return it as a highlight.
+		const run: QuoteRunMatch = { runIndex: 4, item: ITEM, start: 6, end: 10 };
 
 		return expect(fragmentsForRuns(fakePage([]), LAYER, [run])).resolves.toBeNull();
 	});
@@ -173,7 +215,7 @@ describe('fragmentsForRuns', () => {
 		// geometry could not be rebuilt, which is `stale` with the stored
 		// rects, not `fresh` with nothing to paint. `null` carries that
 		// and `[]` would not.
-		const run: QuoteRunMatch = { item: ITEM, start: 6, end: 10 };
+		const run: QuoteRunMatch = { runIndex: 0, item: ITEM, start: 6, end: 10 };
 
 		return expect(fragmentsForRuns(fakePage([]), LAYER, [run])).resolves.not.toEqual([]);
 	});

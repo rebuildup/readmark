@@ -84,6 +84,15 @@ import type { TextQuote } from './anchor.ts';
 
 /** One run the quote covers, and how much of it the quote actually is. */
 export interface QuoteRunMatch {
+	/** The run's position in the *page*, not in this match.
+	 *
+	 *  This is the address a consumer needs: the geometry stage finds
+	 *  the run's element by index, and a match that begins halfway down
+	 *  a page has no `runs[0]` to point at anything. A local index would
+	 *  silently measure the first run of the page for a quote in the
+	 *  fifth, which is the kind of wrong that looks like a highlight
+	 *  and is one instead. */
+	readonly runIndex: number;
 	readonly item: PageTextItem;
 	/** First character of the quote *inside this run*. */
 	readonly start: number;
@@ -172,7 +181,7 @@ function matchAt(layer: PageTextLayer, start: number, length: number): QuoteMatc
 	const end = start + length;
 	const runs: QuoteRunMatch[] = [];
 	let offset = 0;
-	for (const item of layer.items) {
+	for (const [runIndex, item] of layer.items.entries()) {
 		const itemStart = offset;
 		const itemEnd = offset + item.text.length;
 		offset = itemEnd;
@@ -182,6 +191,7 @@ function matchAt(layer: PageTextLayer, start: number, length: number): QuoteMatc
 		if (itemEnd === itemStart) continue;
 		if (itemEnd <= start || itemStart >= end) continue;
 		runs.push({
+			runIndex,
 			item,
 			// Page offsets clamped into the run's own coordinate space, so
 			// a quote that starts part-way into a run reports the

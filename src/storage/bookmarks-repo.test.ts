@@ -182,6 +182,25 @@ describe('listBookmarks', () => {
 	});
 });
 
+it('orders marks made in the same millisecond by id, so the list is stable', async () => {
+	// `createdAt` is millisecond resolution and the id is random, so
+	// two marks made in one tick have no creation order to recover.
+	// What the panel needs is for the order not to change between
+	// two reads, or it renumbers the marks on a page under the
+	// reader's eyes.
+	const first = await add({ pageIndex: 5, createdAt: 1000 });
+	const second = await add({ pageIndex: 5, createdAt: 1000 });
+	const third = await add({ pageIndex: 5, createdAt: 1000 });
+
+	const listed = await listBookmarks({ documentId: DOC_A, sourceFingerprint: FINGERPRINT_A });
+	const again = await listBookmarks({ documentId: DOC_A, sourceFingerprint: FINGERPRINT_A });
+
+	expect(listed.map((row) => row.id)).toEqual(again.map((row) => row.id));
+	expect(listed.map((row) => row.id)).toEqual(
+		[first.id, second.id, third.id].sort((a, b) => a.localeCompare(b)),
+	);
+});
+
 describe('listBookmarksOnPage', () => {
 	it('returns only the marks on that page', async () => {
 		await add({ pageIndex: 1, createdAt: 200 });
