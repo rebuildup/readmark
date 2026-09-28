@@ -26,6 +26,8 @@ import { asDocumentId, asSourceFingerprint, type DocumentId } from '../domain/do
 import { asPageIndex } from '../domain/reading-state.ts';
 
 const rows = new Map<string, Record<string, unknown>>();
+/** Ids a "second tab" deletes at the moment of the next write. */
+const deletedElsewhere = new Set<string>();
 let sequence = 0;
 
 function useDeterministicIds(): void {
@@ -55,6 +57,16 @@ vi.mock('./db.ts', () => ({
 				return row.id;
 			},
 			update: async (id: string, changes: Record<string, unknown>) => {
+				// Another tab's delete, landing between a caller's
+				// decision and this write. Dexie reports the number of
+				// rows it modified, and that count is the only honest
+				// answer — which is what the fake has to be able to
+				// produce for the race to be testable at all.
+				if (deletedElsewhere.has(id)) {
+					deletedElsewhere.delete(id);
+					rows.delete(id);
+					return 0;
+				}
 				const row = rows.get(id);
 				if (row === undefined) return 0;
 				rows.set(id, { ...row, ...changes });
@@ -83,6 +95,7 @@ const FINGERPRINT_B = asSourceFingerprint('b'.repeat(64));
 
 beforeEach(() => {
 	rows.clear();
+	deletedElsewhere.clear();
 	sequence = 0;
 	useDeterministicIds();
 	vi.unstubAllGlobals();
@@ -243,6 +256,19 @@ describe('replaceHighlightAnchor', () => {
 		await add({ pageIndex: 1 });
 
 		expect(await replaceHighlightAnchor('no-such-highlight', anchorFor('q'))).toBe(false);
+	});
+
+	it('reports failure when the row is deleted between the decision and the write', async () => {
+		// The race that a read-then-write cannot see: the resolver has
+		// decided the anchor is still valid, another tab removes the row,
+		// and the write then matches nothing. Saying "stored" would hide a
+		// highlight that is gone — from a resolver, which is the one caller
+		// with no way to notice for itself.
+		const highlight = await add({ pageIndex: 3, quote: 'the cat' });
+		deletedElsewhere.add(highlight.id);
+
+		expect(await replaceHighlightAnchor(highlight.id, anchorFor('the cat sat down'))).toBe(false);
+		expect(rows.has(highlight.id)).toBe(false);
 	});
 });
 

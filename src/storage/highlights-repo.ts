@@ -140,13 +140,13 @@ export async function listHighlightsOnPage(
  * repository refuses to invent.
  */
 export async function replaceHighlightAnchor(id: string, anchor: Anchor): Promise<boolean> {
-	// Dexie 4 types `Table.delete` as `void`, so "was there a row" is
-	// answered by reading first. Highlight lists are small and a single
-	// write is not a hot path.
-	const existing = await getDb().highlights.get(id);
-	if (existing === undefined) return false;
-	await getDb().highlights.update(id, { anchor });
-	return true;
+	// The count is the answer, and there is no read in front of it. A
+	// read-then-write reports what was true a moment ago: another tab
+	// deleting the row in between leaves the write matching nothing while
+	// the function still says it stored something. A resolver that has
+	// just decided an anchor is valid would then report success for a
+	// highlight that is gone.
+	return (await getDb().highlights.update(id, { anchor })) > 0;
 }
 
 /** Remove a highlight. A reader action — see the file header. */
