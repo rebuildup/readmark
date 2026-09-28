@@ -169,11 +169,17 @@ export function fragmentsFromLayerRects(
  *
  * ## The index correspondence
  *
- * `runs[i].item` is `layer.items[i]`, and the layer built here has one
- * span per run in the same order. That holds by construction: both
- * projections normalise the page's `TextContent` through the same
- * `glyphRuns()`, so "span i" and "item i" are the same run by
- * definition rather than by two filters agreeing.
+ * `runs[i].runIndex` is where the run sits in the page, and the layer
+ * built here has one span per run in that same order. That holds by
+ * construction: both projections normalise the page's `TextContent`
+ * through the same `glyphRuns()`, so "span i" and "item i" are the same
+ * run by definition rather than by two filters agreeing.
+ *
+ * The index is the *page-global* one and not the run's position within
+ * the match. A match that begins halfway down a page has no
+ * `runs[0]` to point at anything, and addressing a span by match
+ * position would measure the first run of the page for a quote in the
+ * fifth — a highlight, drawn over the wrong words.
  *
  * The checks below are therefore an invariant test, not the mechanism.
  * They stay because the alternative is worse: this function's failure

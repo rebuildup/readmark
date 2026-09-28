@@ -152,6 +152,36 @@ export interface ResolvedAnchor {
 	 *  for painting. `unknown` (not `any`) so the compiler
 	 *  forces an explicit cast / type guard at any read site. */
 	readonly display: unknown;
+	/**
+	 * The stored anchor, refreshed — or `null` when there is nothing to
+	 * write back.
+	 *
+	 * Recovery rebuilds the display half of an anchor from the source
+	 * (ADR-0007), and those rects are better than the ones in storage:
+	 * they were measured against the copy of the file in front of the
+	 * reader. Somebody has to persist them, and it cannot be the
+	 * reader: `src/reader/` does not import the storage layer, and a
+	 * reader that reached into IndexedDB would be a second, invisible
+	 * writer whose failures no screen could report.
+	 *
+	 * So recovery hands the refreshed anchor back and lets the caller
+	 * decide. `null` covers the two cases where writing would be wrong:
+	 *
+	 *   - `fresh` with rects that did not move — the stored anchor is
+	 *     already correct, and rewriting it would churn a row that is
+	 *     right. "Did not move" is a tolerance, not equality: the two
+	 *     measurements are floats from two sessions.
+	 *   - `stale` — ADR-0007 is explicit that a stale anchor's stored
+	 *     rects are *not* rewritten. They are the best available hint,
+	 *     and keeping the original lets the anchor recover if the
+	 *     change that broke it is undone.
+	 *
+	 * The caller persists it without reading the payload: this is the
+	 * "persist and route an `Anchor` opaquely" half of the boundary,
+	 * and an `Anchor<unknown>` on the way to a repository is exactly as
+	 * opaque as one on the way out of storage.
+	 */
+	readonly updatedAnchor: Anchor | null;
 }
 
 /**

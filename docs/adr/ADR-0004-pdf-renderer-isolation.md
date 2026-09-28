@@ -304,7 +304,8 @@ the whole `ResolvedAnchor` to the page that produced it.**
         │    rects refreshed from glyph geometry, or kept + stale
         ▼
   ResolvedAnchor                         ← in memory, per session
-  { format, page, freshness, selectedText, display: PdfRect[] }
+  { format, page, freshness, selectedText,
+    display: PdfRect[], updatedAnchor }
         │
         │   generic UI reads: page, freshness, selectedText
         │   generic UI must NOT read: display
@@ -316,6 +317,11 @@ the whole `ResolvedAnchor` to the page that produced it.**
         │    → pdf.js viewport transform
         ▼
   overlay elements in `target` (viewport CSS px)
+
+  updatedAnchor                          ← only when it is not null
+        │   generic caller persists it, payload unread
+        ▼
+  storage (repositories own the write)
 ```
 
 Two properties the diagram is asserting, not just describing:
@@ -335,6 +341,38 @@ Two properties the diagram is asserting, not just describing:
 overlay is drawn as a resolved highlight or as the "this position is a
 guess" marker is a format decision about how the rects were derived,
 so the page needs it, not the UI.
+
+### Where the refreshed anchor is written
+
+Recovery rebuilds the display half of an anchor from the source, and
+the rebuilt rects are better than the ones in storage — they were
+measured against the copy of the file in front of the reader. ADR-0007
+assumes they are written back. That assumption needs a path, and this
+layer is the only place one can be added without breaking the
+isolation this ADR exists for:
+
+- **Not the reader.** `src/reader/` does not import the storage layer.
+  A reader that wrote to IndexedDB would be a second, invisible writer:
+  no screen would see its failures, and the same document opened in two
+  tabs would have two writers with no order between them.
+- **Not generic UI reading the payload.** The refreshed anchor is
+  `Anchor<unknown>` to anything outside `reader/<format>/`, and the
+  boundary rule is that payload is never read there.
+
+So `resolveAnchor` returns it on `ResolvedAnchor.updatedAnchor` and the
+caller decides what to do with it. `null` means *do not write*: either
+the anchor was fresh and its rects had not moved (the stored row is
+already right, and rewriting it churns a correct row — the comparison
+is a tolerance, because the two measurements are floats from two
+sessions), or it was stale, which ADR-0007 forbids rewriting. The
+distinction matters: a caller that cannot tell "nothing changed" from
+"stale, keep the old rects" will eventually write over the one hint a
+stale anchor has.
+
+Persisting it is the same operation as storing it in the first place —
+hand an `Anchor` to a repository, payload unread — so the opacity that
+protects the boundary on the way out of storage protects it on the way
+back in.
 
 ### Two gates, not one
 

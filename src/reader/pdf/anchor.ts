@@ -14,17 +14,19 @@
  *     glyphs in the PDF's text layer.
  *
  *   - **Display position** is `rects`. PDF user-space rectangles
- *     (raw, untransformed), one per visual line of the selection
- *     (multi-rect for cross-line selections). Drawn over the
- *     rendered page.
+ *     (raw, untransformed): one or more visual fragments covering
+ *     the selection, not one per line and not one per text-layer
+ *     run. Drawn over the rendered page.
  *
  *   - **Recovery order**: text quote → rects. On open, the reader
  *     searches the page's text layer for the quote; if found, it
- *     re-derives rects from the text layer's glyph geometry (in
- *     raw PDF user-space) and updates the stored anchor. If not
- *     found (PDF re-encoded, OCR-corrected), the stored rects are
- *     used for display only and the anchor is flagged "stale" in
- *     the UI.
+ *     re-derives rects by measuring the text layer (in raw PDF
+ *     user-space) and hands the refreshed anchor back through
+ *     `ResolvedAnchor.updatedAnchor` for the caller to persist — the
+ *     reader does not write, and generic UI does not read the
+ *     payload it carries. If the quote is not found, or its geometry
+ *     cannot be rebuilt, the stored rects are used for display only
+ *     and the anchor is flagged "stale" in the UI.
  *
  *   - **Single page**. A `PdfAnchor` cannot span pages. Cross-page
  *     selections are two highlights (post-MVP: a "merge adjacent"

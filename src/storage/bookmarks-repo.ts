@@ -36,19 +36,11 @@ export interface BookmarkScope {
 
 /** Every bookmark in a source, oldest first. */
 export async function listBookmarks(scope: BookmarkScope): Promise<readonly Bookmark[]> {
-	const rows = await getDb()
+	return await getDb()
 		.bookmarks.where('documentId')
 		.equals(scope.documentId)
 		.filter((row) => row.sourceFingerprint === scope.sourceFingerprint)
 		.sortBy('createdAt');
-	// `createdAt` is millisecond resolution, so two marks made in the
-	// same tick tie, and Dexie is free to return a tied pair in either
-	// order. The panel numbers the marks on a page by list position, so
-	// an unstable order is a list that renumbers itself between two
-	// reads. The tiebreak cannot recover creation order — a random id
-	// carries none — but it makes the order *stable*, and stable is what
-	// the reader sees.
-	return [...rows].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
 }
 
 /** Bookmarks on one page, oldest first — the query the reader's

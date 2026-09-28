@@ -56,8 +56,8 @@
  * the bounding box of the whole run, so a quote that covers two words
  * of a fifty-character run would be painted as fifty characters: the
  * highlight would read as a bug, and it would be one. `PdfAnchor.rects`
- * asks for "one entry per visual line of the selection", which a
- * per-run rect is not even when the run happens to be a whole line.
+ * asks for fragments that cover the selection, and a per-run rect does
+ * not — not even when the run happens to be a whole line.
  *
  * Turning offsets into rects is a separate stage, and it does not
  * measure anything itself: it measures the text layer with

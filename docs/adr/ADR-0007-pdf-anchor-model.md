@@ -256,7 +256,12 @@ On open, for each stored PDF anchor:
      not evidence that the anchor is still where it was, so it is
      `stale` with the stored rects — not `fresh` with no rects.
    - Update the stored anchor with the new rects in place. The
-     quote is left unchanged.
+     quote is left unchanged. **Mechanism:** the reader hands the
+     refreshed anchor back as `ResolvedAnchor.updatedAnchor` and the
+     caller persists it — the reader does not write to storage, and the
+     caller does not read the payload. See ADR-0004 §"Where the
+     refreshed anchor is written". It is `null` when the new rects
+     did not move, so an already-correct row is not rewritten.
    - Display the new rects. The anchor is considered fresh.
 2. **If the text quote fails (exact match not found), or the
    matched quote's geometry could not be rebuilt:**
