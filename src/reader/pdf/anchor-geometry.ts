@@ -134,13 +134,17 @@ export function fragmentsFromClientRects(
  * ## The index correspondence
  *
  * `runs[i].item` is `layer.items[i]`, and the layer built here has one
- * span per surviving run in the same order, because both projections
- * walk the same `getTextContent()` items and skip the same ones
- * (`toGlyphRun` returning null). That correspondence is what makes
- * offsets meaningful, and it is an assumption about two functions in
- * another file rather than a fact this one can prove — so the span
- * count is checked against the item count, and a disagreement is
- * reported as a failure instead of measuring the wrong characters.
+ * span per run in the same order. That holds by construction: both
+ * projections normalise the page's `TextContent` through the same
+ * `glyphRuns()`, so "span i" and "item i" are the same run by
+ * definition rather than by two filters agreeing.
+ *
+ * The checks below are therefore an invariant test, not the mechanism.
+ * They stay because the alternative is worse: this function's failure
+ * mode is measuring the wrong characters and returning them as a
+ * highlight, which is confident, plausible, and wrong — and the day
+ * someone gives the two projections different filters, the count
+ * comparison is what notices.
  */
 export async function fragmentsForRuns(
 	page: PDFPageProxy,

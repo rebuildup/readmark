@@ -149,12 +149,13 @@ const LAYER: PageTextLayer = { format: 'pdf', page: asPageIndex(1), items: [ITEM
 
 describe('fragmentsForRuns', () => {
 	it('refuses when the layer it built does not match the layer the offsets came from', () => {
-		// The span-to-item correspondence is an assumption about two
-		// functions in another file — both projections walk the same
-		// getTextContent items and skip the same ones. A page whose text
-		// yields no runs at all is the cheapest way to break it, and the
-		// helper has to notice rather than measure the wrong characters
-		// and call the result a highlight.
+		// The correspondence now holds by construction — both
+		// projections normalise through the same `glyphRuns()` — so this
+		// is an invariant test rather than the mechanism. It stays
+		// because the failure it guards against is measuring the wrong
+		// characters and returning them as a highlight: confident,
+		// plausible, and wrong. A page whose text yields no runs is the
+		// cheapest way to break the correspondence.
 		const run: QuoteRunMatch = { item: ITEM, start: 6, end: 10 };
 
 		return expect(fragmentsForRuns(fakePage([]), LAYER, [run])).resolves.toBeNull();
