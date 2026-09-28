@@ -190,6 +190,15 @@ export interface PageHandle<F extends DocumentFormat> {
   createAnchorFromSelection(
     selection: ReaderSelection,
   ): Promise<Anchor | null>;
+
+  /** Paint a resolved anchor's highlight overlay into `target`.
+   *  Reads `anchor.display` (opaque to generic UI) and computes
+   *  viewport-space rects from the page's current render options. */
+  paintResolvedAnchor(
+    anchor: ResolvedAnchor,
+    target: HTMLElement,
+    options?: RenderOptions,
+  ): Promise<void>;
 }
 ```
 
@@ -278,6 +287,55 @@ wrong on two counts:
 
 The new contract reflects both corrections.
 
+### Where `ResolvedAnchor.display` goes
+
+`display` is `unknown`, so this is the one place the boundary is worth
+drawing down. The rule: **generic UI never reads `display`; it hands
+the whole `ResolvedAnchor` to the page that produced it.**
+
+```
+  selection (DOM)
+        │  PageHandle.createAnchorFromSelection(selection)
+        ▼
+  Anchor<unknown>                        ← persisted (IndexedDB)
+  { format: 'pdf', payload: PdfAnchor }
+        │  ReaderHandle.resolveAnchor(anchor)
+        │  → ADR-0007 recovery: quote search in the text layer,
+        │    rects refreshed from glyph geometry, or kept + stale
+        ▼
+  ResolvedAnchor                         ← in memory, per session
+  { format, page, freshness, selectedText, display: PdfRect[] }
+        │
+        │   generic UI reads: page, freshness, selectedText
+        │   generic UI must NOT read: display
+        ▼
+  PageHandle.paintResolvedAnchor(resolved, target)
+        │  isAnchorOfFormat(anchor,'pdf') && isPdfAnchor(anchor)
+        │  display  → PdfRect[]  (narrowed inside reader/pdf/)
+        │  PdfRect[] (raw user-space) + RenderOptions
+        │    → pdf.js viewport transform
+        ▼
+  overlay elements in `target` (viewport CSS px)
+```
+
+Two properties the diagram is asserting, not just describing:
+
+- **The narrowing happens on the format side.** `display` is read
+  through `isPdfAnchor`'s companion check inside `reader/pdf/`, never
+  by a cast in `src/ui/`. `unknown` is what forces that: a UI that
+  tried to read it would not typecheck.
+- **The transform is applied once, at paint time.** Stored rects are
+  raw user-space (ADR-0007), so a zoom or rotation change never
+  invalidates them; the page applies the transform the *current*
+  `RenderOptions` imply. A generic UI that positioned rects itself
+  would have to re-derive that transform on every zoom, and would
+  diverge from the canvas the first time it did.
+
+`freshness` travels with the anchor for the same reason: whether an
+overlay is drawn as a resolved highlight or as the "this position is a
+guess" marker is a format decision about how the rects were derived,
+so the page needs it, not the UI.
+
 ### Why `page()` is async
 
 PDF's `pdfDocument.getPage(n)` returns `Promise<PDFPageProxy>`.
@@ -310,9 +368,9 @@ Negative / explicit costs:
 
 - One more layer of indirection. Cheap.
 - `ResolvedAnchor.display` is opaque to generic UI (`unknown`).
-  Generic code that wants to render highlights must hand the
-  display data back to the format-specific reader (e.g.
-  `pageHandle.paint(target, resolved.display)`). The reader
+  Generic code that wants to render highlights must hand the whole
+  `ResolvedAnchor` back to the format-specific reader
+  (`pageHandle.paintResolvedAnchor(resolved, target)`). The reader
   control flow stays on the format-specific side.
 - `Promise<PageHandle<F>>` adds an `await` at every page access.
   Unavoidable: PDF's getPage is async.
@@ -337,7 +395,8 @@ Negative / explicit costs:
 
 Issue **#1** implements this contract. #2 (worker setup) and #11
 (reader screen) implement against it. #7 (text selection + highlight)
-implements `createAnchorFromSelection` and `paintAnchor` against it.
+implements `createAnchorFromSelection` and `paintResolvedAnchor`
+against it.
 
 ## References
 

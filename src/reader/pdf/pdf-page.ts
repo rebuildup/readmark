@@ -29,7 +29,13 @@
 import type { PDFPageProxy, RenderTask } from 'pdfjs-dist';
 import type { Anchor } from '../../domain/annotation/index.ts';
 import type { PageIndex } from '../../domain/reading-state.ts';
-import type { PageHandle, PageTextLayer, ReaderSelection, RenderOptions } from '../types.ts';
+import type {
+	PageHandle,
+	PageTextLayer,
+	ReaderSelection,
+	RenderOptions,
+	ResolvedAnchor,
+} from '../types.ts';
 import type { ViewportLike } from './pdf-coords.ts';
 import { buildTextLayer, extractPageTextLayer } from './pdf-text-layer.ts';
 
@@ -148,6 +154,28 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 	 */
 	async createAnchorFromSelection(_selection: ReaderSelection): Promise<Anchor | null> {
 		return null;
+	}
+
+	/**
+	 * Painting a resolved anchor is #7's work, and the anchor it would
+	 * paint does not exist yet: `PdfReaderHandle.resolveAnchor` returns
+	 * `null`, so nothing can produce a `ResolvedAnchor` with display
+	 * data to draw.
+	 *
+	 * This throws rather than returning quietly. The sibling stubs
+	 * return `null` because their signatures have an honest "nothing to
+	 * give" value; `void` does not, and a no-op paint is the one
+	 * failure shape a highlight cannot have — a stored highlight would
+	 * render as absent, and nothing would say why. The throw is
+	 * unreachable until the recovery pass lands, and it is removed in
+	 * the same ticket.
+	 */
+	async paintResolvedAnchor(
+		_anchor: ResolvedAnchor,
+		_target: HTMLElement,
+		_options?: RenderOptions,
+	): Promise<void> {
+		throw new Error('readmark: paintResolvedAnchor is #7 work, not yet implemented');
 	}
 
 	/** Cancel any in-flight render and release the page. Idempotent:

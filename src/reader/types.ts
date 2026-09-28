@@ -175,6 +175,29 @@ export interface PageHandle<F extends DocumentFormat> {
 	 *  multiple pages (cross-page selections are out of MVP per
 	 *  ADR-0007 §"Single page, MVP scope"). */
 	createAnchorFromSelection(selection: ReaderSelection): Promise<Anchor | null>;
+
+	/**
+	 * Paint a resolved anchor's highlight overlay into `target`.
+	 *
+	 * The whole `ResolvedAnchor` goes back, not just its `display`:
+	 * `display` is `unknown` to generic UI, and `freshness` is what
+	 * decides whether the overlay is drawn as a resolved highlight or
+	 * as the "this position is a guess" marker ADR-0007 asks for. The
+	 * page owns the conversion from the format's stored coordinates to
+	 * the viewport rects the current `options` imply, because it is
+	 * the only thing that knows the transform the page was rendered
+	 * with — a generic UI reading `display` would have to re-derive it
+	 * and would get it wrong the first time zoom or rotation changed.
+	 *
+	 * `options` defaults to the options this page was last rendered
+	 * with, which is what a caller that is not changing the render
+	 * state wants.
+	 */
+	paintResolvedAnchor(
+		anchor: ResolvedAnchor,
+		target: HTMLElement,
+		options?: RenderOptions,
+	): Promise<void>;
 }
 
 /** Render options. Format-specific readers map these to their
