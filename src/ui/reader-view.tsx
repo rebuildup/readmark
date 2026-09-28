@@ -44,13 +44,24 @@ import type {
 	ResolvedAnchor,
 } from '../reader/types.ts';
 import { addBookmark, deleteBookmark, listBookmarks } from '../storage/bookmarks-repo.ts';
-import { listHighlights, replaceHighlightAnchor } from '../storage/highlights-repo.ts';
+import {
+	addHighlight,
+	deleteHighlight,
+	listHighlights,
+	replaceHighlightAnchor,
+} from '../storage/highlights-repo.ts';
 import { saveReadingPosition } from '../storage/reading-state-repo.ts';
 import { useUiStore } from '../stores/ui-store.ts';
 import { AddBookmarkDialog, BookmarkDeleteDialog, BookmarksPanel } from './bookmarks-panel.tsx';
 import { Button } from './primitives/button.tsx';
 import { LibraryLink } from './primitives/library-link.tsx';
 import { jumpToPage } from './scroll-to-page.ts';
+import {
+	type SelectionSnapshot,
+	SelectionToolbar,
+	selectionStillMatches,
+	snapshotSelection,
+} from './selection-toolbar.tsx';
 
 /**
  * Where the reader is, in the reader's own coordinate space: which page
@@ -463,15 +474,30 @@ export function ReaderView({
 		() => new Map(),
 	);
 	const [renderError, setRenderError] = useState<string | null>(null);
+	// A user-visible error from a selection action (highlight or bookmark).
+	// Render errors have their own surface because they describe a different
+	// failure: a page that would not draw, not a write that did not stick.
+	const [actionError, setActionError] = useState<string | null>(null);
 	const [currentPage, setCurrentPage] = useState<PageIndex | null>(null);
 	const [bookmarks, setBookmarks] = useState<readonly Bookmark[]>([]);
 	const [highlights, setHighlights] = useState<readonly HighlightRow[]>([]);
+	// The selection the toolbar is acting on, as it was when the
+	// toolbar appeared. Not re-read on click — see the module header for
+	// why a click can change the DOM Selection out from under it.
+	const [selection, setSelection] = useState<SelectionSnapshot | null>(null);
 	const [pendingAdd, setPendingAdd] = useState<{
 		readonly pageIndex: PageIndex;
 		readonly pageOffsetRatio: number;
 	} | null>(null);
 	const [pendingDelete, setPendingDelete] = useState<Bookmark | null>(null);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
+	// The sticky header, so the selection toolbar knows the one thing it
+	// can land underneath.
+	const headerRef = useRef<HTMLElement | null>(null);
+	// In-flight tracking for the highlight action. A ref, not state, because
+	// a re-render between the two clicks would be wasteful and the second
+	// click is racing the first whether it does or not.
+	const highlightInFlight = useRef(false);
 	const sidePanel = useUiStore((state) => state.sidePanel);
 	const setSidePanel = useUiStore((state) => state.setSidePanel);
 
@@ -735,6 +761,43 @@ export function ReaderView({
 	// gets a stable prop identity.
 	const byPage = useMemo(() => highlightsByPage(highlights), [highlights]);
 
+	/**
+	 * Resolve one stored row into a state, applying the write-back rule.
+	 *
+	 *  Shared by the open path and by an add, so a highlight made a
+	 *  moment ago goes through exactly the same gates as one that was
+	 *  already on disk: a `null` resolution is kept and unpainted, a page
+	 *  disagreement paints and writes nothing, and a write-back that says
+	 *  the row is gone is not painted.
+	 */
+	const resolveRow = useCallback(
+		async (row: Highlight): Promise<HighlightRow> => {
+			const resolved = await handle.resolveAnchor(row.anchor).catch((error: unknown) => {
+				console.error('readmark: could not resolve a highlight anchor', error);
+				return null;
+			});
+			if (resolved === null) return { row, state: { kind: 'unresolved' } };
+			if (resolved.page !== row.pageIndex) {
+				console.error('readmark: highlight page mismatch', {
+					id: row.id,
+					storedPage: row.pageIndex,
+					resolvedPage: resolved.page,
+				});
+				return { row, state: { kind: 'mismatch' } };
+			}
+			if (resolved.updatedAnchor !== null) {
+				if (!(await replaceHighlightAnchor(row.id, resolved.updatedAnchor))) {
+					// The repository knows the row is gone — another tab, or
+					// the reader themselves. Painting it would resurrect a
+					// deleted highlight from a list that is already stale.
+					return { row, state: { kind: 'vanished' } };
+				}
+			}
+			return { row, state: { kind: 'paintable', resolved } };
+		},
+		[handle],
+	);
+
 	// Highlight resolution is a *source* lifecycle, not a render one.
 	//
 	// Recovery answers "is this anchor still where it was in this file",
@@ -759,48 +822,7 @@ export function ReaderView({
 			const rows: HighlightRow[] = [];
 			for (const row of stored) {
 				if (cancelled) return;
-				// A malformed or unresolvable anchor resolves to null. The
-				// row is kept and simply not painted: this reader cannot
-				// resolve it against this source, which says nothing about
-				// whether the highlight exists, and deleting it would throw
-				// away a reader's work over a file they may not have the
-				// whole of.
-				const resolved = await handle.resolveAnchor(row.anchor).catch((error: unknown) => {
-					console.error('readmark: could not resolve a highlight anchor', error);
-					return null;
-				});
-				if (resolved === null) {
-					rows.push({ row, state: { kind: 'unresolved' } });
-					continue;
-				}
-				// Both are generic fields, so this is detectable without
-				// reading the payload. Disagreement means the row and the
-				// resolution are about different places, which is an
-				// integrity failure: nothing is painted, nothing is
-				// written, and the stored row is left as it is.
-				if (resolved.page !== row.pageIndex) {
-					console.error('readmark: highlight page mismatch', {
-						id: row.id,
-						storedPage: row.pageIndex,
-						resolvedPage: resolved.page,
-					});
-					rows.push({ row, state: { kind: 'mismatch' } });
-					continue;
-				}
-				if (resolved.updatedAnchor !== null) {
-					const wasStored = await replaceHighlightAnchor(row.id, resolved.updatedAnchor);
-					// The write-back is the only persistence this flow
-					// causes, and its boolean is why it is safe: false
-					// means the repository knows the row is gone — another
-					// tab, or the reader themselves. Painting it anyway
-					// would resurrect a deleted highlight on screen from a
-					// list that is already out of date.
-					if (!wasStored) {
-						rows.push({ row, state: { kind: 'vanished' } });
-						continue;
-					}
-				}
-				rows.push({ row, state: { kind: 'paintable', resolved } });
+				rows.push(await resolveRow(row));
 			}
 			if (cancelled) return;
 			setHighlights(rows);
@@ -808,7 +830,54 @@ export function ReaderView({
 		return () => {
 			cancelled = true;
 		};
-	}, [documentId, handle, sourceFingerprint]);
+	}, [documentId, resolveRow, sourceFingerprint]);
+
+	// Selection observation. `mouseup` is what ends a drag, and
+	// `selectionchange` is what dismisses the toolbar afterwards — it
+	// fires when the selection collapses, moves, or lands on another
+	// page, which is every ordinary click-away. There is deliberately no
+	// `pointerdown` dismissal: it would fire on the *start* of a drag and
+	// close the toolbar while the reader is making the selection.
+	useEffect(() => {
+		const scroller = scrollRef.current;
+		if (scroller === null) return;
+
+		const onMouseUp = () => {
+			setSelection(snapshotSelection(window.getSelection()));
+		};
+		const onSelectionChange = () => {
+			setSelection((previous) => {
+				if (previous === null) return null;
+				return selectionStillMatches(previous, window.getSelection()) ? previous : null;
+			});
+		};
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key !== 'Escape') return;
+			const target = event.target;
+			if (target instanceof HTMLElement) {
+				const control = target.closest('input, textarea, select, [contenteditable]');
+				if (control !== null) return;
+			}
+			setSelection(null);
+		};
+
+		scroller.addEventListener('mouseup', onMouseUp, { passive: true });
+		document.addEventListener('selectionchange', onSelectionChange);
+		document.addEventListener('keydown', onKeyDown);
+		return () => {
+			scroller.removeEventListener('mouseup', onMouseUp);
+			document.removeEventListener('selectionchange', onSelectionChange);
+			document.removeEventListener('keydown', onKeyDown);
+		};
+	}, []);
+
+	/** Where the sticky header ends, in viewport coordinates. Read at
+	 *  measure time rather than memoised: it moves with a scroll, and a
+	 *  stale value is a toolbar tucked under a header that has gone. */
+	const headerBottom = useCallback(
+		() => headerRef.current?.getBoundingClientRect().bottom ?? 0,
+		[],
+	);
 
 	// The bookmark list is read once per open and reconciled locally
 	// after every add or delete, so opening the panel is instant and a
@@ -829,6 +898,109 @@ export function ReaderView({
 			cancelled = true;
 		};
 	}, [documentId, sourceFingerprint]);
+
+	/**
+	 * The highlight the reader's current selection already has, if any.
+	 *
+	 *  Matched on `selectedText`, which is a generic field — comparing
+	 *  the words they just selected against the text each stored row
+	 *  remembers is a question the UI may answer, while comparing quotes
+	 *  would mean reading a payload. The flip side is that it is a text
+	 *  match and not an identity: two marks of the same words are
+	 *  interchangeable, and the first one found is offered for removal.
+	 *  For the MVP, marking the same words twice is not something a
+	 *  reader does on purpose.
+	 */
+	const selectionHighlight = useCallback(
+		(snapshot: SelectionSnapshot): Highlight | null => {
+			const text = snapshot.selection.range.toString();
+			if (text === '') return null;
+			return highlights.find((row) => row.row.selectedText === text)?.row ?? null;
+		},
+		[highlights],
+	);
+
+	/** Mark the words the reader selected — or take off a mark already
+	 *  on them.
+	 *
+	 *  The double-click guard is a ref, not state, because a re-render
+	 *  between the two clicks is not the same race as the second click
+	 *  racing the first: the second click always races the first, and a
+	 *  guard that disappears between them is a guard that does not fire.
+	 *  Errors fall through to a user-visible banner — silently dropped
+	 *  writes are how a reader ends up with a mark that was never
+	 *  stored.
+	 */
+	const handleHighlightSelection = useCallback(
+		async (snapshot: SelectionSnapshot) => {
+			if (highlightInFlight.current) return;
+			highlightInFlight.current = true;
+			setActionError(null);
+			try {
+				const existing = selectionHighlight(snapshot);
+				if (existing !== null) {
+					if (await deleteHighlight(existing.id)) {
+						setHighlights((previous) => previous.filter((row) => row.row.id !== existing.id));
+					}
+					return;
+				}
+				const page = await handle.page(snapshot.page);
+				// The anchor and its text come from one call, so the stored
+				// mirror cannot disagree with the quote it came from.
+				const created = await page.createAnchorFromSelection(snapshot.selection);
+				if (created === null) return;
+				const highlight = await addHighlight({
+					documentId,
+					sourceFingerprint,
+					pageIndex: snapshot.page,
+					anchor: created.anchor,
+					selectedText: created.selectedText,
+				});
+				// Painted now rather than on the next open, through the same
+				// gates as a row that was already stored. If this throws,
+				// the row is on disk but no overlay goes up: a second pass
+				// from the effect will paint it on the next render. The
+				// banner is for the writer failure above, not for the
+				// resolution failure.
+				const resolvedRow = await resolveRow(highlight);
+				setHighlights((previous) => [...previous, resolvedRow]);
+			} catch (error: unknown) {
+				console.error('readmark: could not save the selection highlight', error);
+				setActionError('ハイライトを保存できませんでした。もう一度お試しください。');
+			} finally {
+				highlightInFlight.current = false;
+			}
+		},
+		[documentId, handle, resolveRow, selectionHighlight, sourceFingerprint],
+	);
+
+	/** Pin the words the reader selected, as a bookmark with an anchor. */
+	const handleBookmarkSelection = useCallback(
+		async (snapshot: SelectionSnapshot) => {
+			setActionError(null);
+			try {
+				const page = await handle.page(snapshot.page);
+				const created = await page.createAnchorFromSelection(snapshot.selection);
+				if (created === null) return;
+				// A different row from a page pin, and deliberately not on the
+				// header's button: the header is "back to this page", this is
+				// "back to these words". Two overlapping ways to mark a page is
+				// a choice the reader makes for no gain.
+				await addBookmark({
+					documentId,
+					sourceFingerprint,
+					pageIndex: snapshot.page,
+					anchor: created.anchor,
+					position: null,
+				});
+				setSidePanel('bookmarks');
+			} catch (error: unknown) {
+				console.error('readmark: could not save the selection bookmark', error);
+				setActionError('栞を保存できませんでした。もう一度お試しください。');
+			}
+		},
+		[documentId, handle, setSidePanel, sourceFingerprint],
+	);
 
 	/**
 	 * Open the add dialog for the page the reader is on.
@@ -876,9 +1048,26 @@ export function ReaderView({
 	);
 
 	const handleJump = useCallback(
-		(bookmark: Bookmark) => {
+		async (bookmark: Bookmark) => {
 			const scroller = scrollRef.current;
 			if (scroller === null) return;
+			// Selection bookmarks carry an anchor; resolving it confirms
+			// the words are still where the reader left them, and picks
+			// the page they belong to now (the file may have grown, or
+			// the mark outlived the original page). A page pin has no
+			// anchor to resolve and goes straight to the jump.
+			//
+			// A resolver failure is not a refusal: the row stays. A
+			// stored anchor that the reader cannot find in *this* file
+			// may yet be the row the reader was looking at in the file
+			// they had when they wrote it.
+			let targetPage = bookmark.pageIndex;
+			if (bookmark.anchor !== null) {
+				const resolved = await handle.resolveAnchor(bookmark.anchor).catch(() => null);
+				if (resolved !== null) {
+					targetPage = resolved.page;
+				}
+			}
 			// Starting a jump retires the one in flight, if any: the
 			// reader has asked to be somewhere else, and the previous
 			// jump is not theirs to finish. It also retires a restore
@@ -886,7 +1075,7 @@ export function ReaderView({
 			const takeover = ++takeoverCountRef.current;
 			void jumpToPage({
 				scroller,
-				pageIndex: bookmark.pageIndex,
+				pageIndex: targetPage,
 				// A mark with no usable stored offset jumps to the top of
 				// its page, which is the honest thing to do with
 				// "somewhere on this page".
@@ -896,7 +1085,7 @@ export function ReaderView({
 				shouldAbort: () => takeoverCountRef.current !== takeover,
 			});
 		},
-		[pageCount],
+		[handle, pageCount],
 	);
 
 	const handleConfirmDelete = useCallback(async () => {
@@ -949,7 +1138,7 @@ export function ReaderView({
 
 	return (
 		<div className="rm-app rm-app--reader">
-			<header className="rm-reader-header">
+			<header className="rm-reader-header" ref={headerRef}>
 				<LibraryLink testId="rm-reader-back" />
 				<h1 className="rm-reader-header__title">{title}</h1>
 				<span className="rm-reader-header__spacer" />
@@ -993,11 +1182,34 @@ export function ReaderView({
 				</div>
 			</header>
 
+			<SelectionToolbar
+				snapshot={selection}
+				boundsRef={scrollRef}
+				headerBottom={headerBottom}
+				// A reader who re-selects marked text is offered the
+				// removal instead of a second identical mark.
+				highlightLabel={
+					selection !== null && selectionHighlight(selection) !== null
+						? 'ハイライトを外す'
+						: 'ハイライト'
+				}
+				onHighlight={(snapshot) => void handleHighlightSelection(snapshot)}
+				onBookmark={(snapshot) => void handleBookmarkSelection(snapshot)}
+			/>
+			{actionError !== null && (
+				<p
+					className="rm-alert rm-reader-action-error"
+					role="alert"
+					data-testid="rm-reader-action-error"
+				>
+					{actionError}
+				</p>
+			)}
 			{sidePanel === 'bookmarks' && (
 				<BookmarksPanel
 					bookmarks={bookmarks}
 					documentTitle={title}
-					onJump={handleJump}
+					onJump={(bookmark) => void handleJump(bookmark)}
 					onDelete={(bookmark) => setPendingDelete(bookmark)}
 				/>
 			)}
@@ -1027,6 +1239,11 @@ export function ReaderView({
 				{renderError !== null && (
 					<p className="rm-alert" role="alert" data-testid="rm-reader-error" style={{ margin: 12 }}>
 						{renderError}
+					</p>
+				)}
+				{actionError !== null && (
+					<p className="rm-alert" role="alert" data-testid="rm-action-error" style={{ margin: 12 }}>
+						{actionError}
 					</p>
 				)}
 				<div className="rm-reader-pages">

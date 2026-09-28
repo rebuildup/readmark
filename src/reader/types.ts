@@ -193,6 +193,12 @@ export interface ResolvedAnchor {
 	readonly updatedAnchor: Anchor | null;
 }
 
+/** A new annotation anchor, and the exact text it was made from. */
+export interface NewAnchor {
+	readonly anchor: Anchor;
+	readonly selectedText: string;
+}
+
 /**
  * A highlight the page has painted, and the only way to take it back
  * off.
@@ -237,10 +243,20 @@ export interface PageHandle<F extends DocumentFormat> {
 	text(): Promise<PageTextLayer>;
 
 	/** Build an `Anchor` from a DOM Selection inside this page.
-	 *  Returns `null` if the selection is empty or spans
-	 *  multiple pages (cross-page selections are out of MVP per
-	 *  ADR-0007 §"Single page, MVP scope"). */
-	createAnchorFromSelection(selection: ReaderSelection): Promise<Anchor | null>;
+	 *  Returns `null` if the selection is empty, if its geometry could
+	 *  not be measured, or if it spans multiple pages (cross-page
+	 *  selections are out of MVP per ADR-0007 §"Single page, MVP
+	 *  scope").
+	 *
+	 *  The exact text comes back beside the anchor rather than being
+	 *  read out of its payload. A caller has to store it — ADR-0002
+	 *  duplicates it onto `Highlight` so a list can show the words
+	 *  without the reader — and the only layer that knows that text
+	 *  canonically is the one that built the quote, because the quote is
+	 *  assembled from the text layer rather than from the DOM. A caller
+	 *  taking the text from `Selection.toString()` instead would store a
+	 *  mirror that disagrees with its own anchor at every line wrap. */
+	createAnchorFromSelection(selection: ReaderSelection): Promise<NewAnchor | null>;
 
 	/**
 	 * Paint a resolved anchor's highlight overlay into `target`.

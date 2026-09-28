@@ -44,6 +44,10 @@
  *  10. The same reader on a 2× display: the backing store is scaled,
  *      and the painted ink covers the whole canvas rather than its
  *      top-left quarter.
+ *  10. Selection → highlight → removal, driven by a real mouse drag:
+ *      the floating toolbar appears next to the selection, a click on it
+ *      marks the words, the mark is painted on top of its own text, and
+ *      re-selecting the same words offers to take the mark off again.
  *  11. No console errors and no fake-worker / legacy-build warnings.
  *
  * Why this exists rather than a unit test: happy-dom has no canvas,
@@ -255,6 +259,16 @@ async function waitForPageLayers(page, index) {
 /** The page the reader is actually looking at, read off the real
  *  rendered layout: the invariant is "on this page", not "at some
  *  offset in a column of estimates". */
+/** Poll a predicate until it holds, so a wait is for the thing being
+ *  asserted rather than for a timer this script does not own. */
+async function waitUntil(predicate, label, attempts = 40) {
+	for (let attempt = 0; attempt < attempts; attempt++) {
+		if (await predicate()) return;
+		await wait(250);
+	}
+	fail(`timed out waiting for ${label}`);
+}
+
 /** Widths in the log are rounded to whole pixels; this keeps the
  *  sentence honest about a fractional measurement. */
 function firstRunWidthText(value) {
@@ -1112,6 +1126,192 @@ async function main() {
 		await page.click('[data-testid="rm-toggle-bookmarks"]');
 		if ((await panel.count()) !== 0) fail('the panel toggle did not close the panel');
 		log('bookmarks deleted, panel empty, panel closed');
+
+		// --- Selection, highlight, and taking it off again ---
+		// Here, before the zoom and rotation sections: the drag is a real
+		// pointer gesture, so it needs the page on screen, and "above the
+		// selection" is a statement about a page that is not on its side.
+		await pageHost(page, 1).scrollIntoViewIfNeeded();
+		await waitForPageLayers(page, 1);
+		const selection = await selectAcrossTextLayer(page, 1);
+		if (!selection.includes(PAGE_TEXT)) {
+			fail(`could not select the text layer to mark it: ${JSON.stringify(selection)}`);
+		}
+		// The toolbar hangs from the selection, and only from a real
+		// selection — a page that reported one for a collapsed range would
+		// be offering to mark nothing.
+		const toolbar = page.locator('[data-testid="rm-selection-toolbar"]');
+		await toolbar.waitFor({ state: 'visible', timeout: 5_000 });
+		const geometry = await page.evaluate(() => {
+			const bar = document.querySelector('[data-testid="rm-selection-toolbar"]');
+			const host = document.querySelector('[data-page-index="1"]');
+			if (bar === null || host === null) return null;
+			const box = bar.getBoundingClientRect();
+			const hostBox = host.getBoundingClientRect();
+			// The same fragment the toolbar hangs from: the last non-empty
+			// rect of the selection. The union box of a multi-line
+			// selection has its centre in the whitespace between lines, and
+			// a toolbar placed there passes "is it visible" while being
+			// nowhere near the text.
+			const rects = Array.from(window.getSelection()?.getRangeAt(0).getClientRects() ?? []);
+			const fragment = rects.filter((rect) => rect.width > 0 && rect.height > 0).at(-1);
+			return {
+				bar: { top: box.top, bottom: box.bottom, left: box.left, right: box.right },
+				host: { left: hostBox.left, right: hostBox.right },
+				fragment:
+					fragment === undefined
+						? null
+						: { top: fragment.top, bottom: fragment.bottom, left: fragment.left },
+			};
+		});
+		if (geometry === null) fail('the toolbar or the page host has no measurable box');
+		if (geometry.fragment === null) fail('the selection reported no fragment to anchor to');
+		const { bar, fragment } = geometry;
+		// Above the selected words, or below them when the sticky header
+		// is in the way. Anything else — over the text, or floating in the
+		// gap between two lines — would pass "is it visible".
+		const above = bar.bottom <= fragment.top + 1;
+		const below = bar.top >= fragment.bottom - 1;
+		if (!above && !below) {
+			fail(
+				`the toolbar is neither above nor below the selected text: it spans ` +
+					`${Math.round(bar.top)}..${Math.round(bar.bottom)} against a selection at ` +
+					`${Math.round(fragment.top)}..${Math.round(fragment.bottom)}`,
+			);
+		}
+		if (bar.left < geometry.host.left - 1 || bar.right > geometry.host.right + 1) {
+			fail(
+				`the toolbar is not inside the page's column: x ${Math.round(bar.left)}..${Math.round(bar.right)} ` +
+					`against a page at ${Math.round(geometry.host.left)}..${Math.round(geometry.host.right)}`,
+			);
+		}
+		log(
+			`selection toolbar ${above ? 'above' : 'below'} the selected text at y ` +
+				`${Math.round(above ? bar.bottom : bar.top)} (selection ${Math.round(fragment.top)}..` +
+				`${Math.round(fragment.bottom)}), 2 actions`,
+		);
+
+		// Mark it. A click on the toolbar must not take the selection away
+		// from the action it is for, which is why the toolbar preventDefaults
+		// its own mousedown and acts on a snapshot.
+		await page.click('[data-testid="rm-selection-highlight"]');
+		await waitUntil(
+			async () => findStoreCount(await readStoreCounts(page), 'highlights') === 1,
+			'the toolbar to write a highlight row',
+		);
+		const markRow = await page.evaluate(async () => {
+			const db = await new Promise((resolve, reject) => {
+				const request = indexedDB.open('readmark');
+				request.onsuccess = () => resolve(request.result);
+				request.onerror = () => reject(request.error);
+			});
+			const row = await new Promise((resolve) => {
+				const store = db.transaction('highlights', 'readonly').objectStore('highlights');
+				const cursor = store.openCursor();
+				cursor.onsuccess = () => resolve(cursor.result?.value ?? null);
+			});
+			db.close();
+			return row;
+		});
+		if (markRow === null) fail('the toolbar wrote no highlight row');
+		// The text the row remembers is the quote's own text, from the same
+		// call — a mirror taken from the browser's selection would disagree
+		// with the anchor it belongs to at a line wrap.
+		if (!String(markRow.selectedText).includes(PAGE_TEXT)) {
+			fail(`the row's text is not what was selected: ${JSON.stringify(markRow.selectedText)}`);
+		}
+		if (markRow.anchor === null || markRow.anchor?.format !== 'pdf') {
+			fail(`the row has no PDF anchor: ${JSON.stringify(markRow.anchor)}`);
+		}
+		log(
+			`highlight written from the selection: "${String(markRow.selectedText).trim()}" ` +
+				`on page ${markRow.pageIndex}`,
+		);
+
+		// Painted on top of the words it marks, and inside that page's box.
+		await page.waitForFunction(
+			() => document.querySelectorAll('.rm-highlight').length === 1,
+			undefined,
+			{ timeout: 5_000 },
+		);
+		const painted = await page.evaluate(() => {
+			const overlay = document.querySelector('.rm-highlight');
+			const fragment = document.querySelector('.rm-highlight__fragment');
+			const textLayer = document.querySelector('[data-page-index="1"] .rm-text-layer');
+			if (overlay === null || fragment === null || textLayer === null) return null;
+			const overlayBox = overlay.getBoundingClientRect();
+			const fragmentBox = fragment.getBoundingClientRect();
+			const textBox = textLayer.getBoundingClientRect();
+			return {
+				color: overlay.dataset.highlightColor ?? null,
+				freshness: overlay.dataset.freshness ?? null,
+				pointerEvents: getComputedStyle(overlay).pointerEvents,
+				// Inside the page box it is painted in, and overlapping the
+				// text layer rather than beside it.
+				insideLayer:
+					fragmentBox.left >= textBox.left - 1 &&
+					fragmentBox.right <= textBox.right + 1 &&
+					fragmentBox.top >= textBox.top - 1 &&
+					fragmentBox.bottom <= textBox.bottom + 1,
+				hasArea: fragmentBox.width > 0 && fragmentBox.height > 0,
+				overlayInsideLayer:
+					overlayBox.left >= textBox.left - 1 && overlayBox.right <= textBox.right + 1,
+			};
+		});
+		if (painted === null) fail('the highlight overlay is missing');
+		if (painted.color !== 'yellow') {
+			fail(`the overlay did not get the stored colour name: ${JSON.stringify(painted.color)}`);
+		}
+		if (painted.freshness !== 'fresh') {
+			fail(`a highlight made from a live selection resolved as ${painted.freshness}`);
+		}
+		// A highlight that swallows pointer events would stop the reader
+		// selecting text that runs through it — which is most of the text
+		// they might want to mark next.
+		if (painted.pointerEvents !== 'none') {
+			fail(`the overlay intercepts pointer events: ${painted.pointerEvents}`);
+		}
+		if (!painted.hasArea || !painted.insideLayer || !painted.overlayInsideLayer) {
+			fail(`the overlay is not laid over the text: ${JSON.stringify(painted)}`);
+		}
+		log(
+			`overlay painted over the text: colour ${painted.color}, ${painted.freshness}, ` +
+				'pointer-events none',
+		);
+
+		// The text is still selectable through the highlight.
+		const throughHighlight = await selectAcrossTextLayer(page, 1);
+		if (!throughHighlight.includes(PAGE_TEXT)) {
+			fail(
+				`selecting text that runs under the highlight produced ${JSON.stringify(throughHighlight)}; ` +
+					'the overlay is in the way of the reader',
+			);
+		}
+		// And the toolbar offers to take the mark off, because the same words
+		// are selected again.
+		await page.locator('[data-testid="rm-selection-highlight"]').waitFor({ state: 'visible' });
+		const removeLabel = await page.locator('[data-testid="rm-selection-highlight"]').textContent();
+		if (removeLabel === null || !removeLabel.includes('外す')) {
+			fail(`re-selecting marked text offered "${removeLabel}" instead of a removal`);
+		}
+		await page.click('[data-testid="rm-selection-highlight"]');
+		await waitUntil(
+			async () => findStoreCount(await readStoreCounts(page), 'highlights') === 0,
+			'the confirmed removal to delete the row',
+		);
+		await page.waitForFunction(
+			() => document.querySelectorAll('.rm-highlight').length === 0,
+			undefined,
+			{ timeout: 5_000 },
+		);
+		log('the mark was taken off: the row is gone and the overlay with it');
+
+		// Escape closes the toolbar without touching what is selected.
+		await selectAcrossTextLayer(page, 1);
+		await toolbar.waitFor({ state: 'visible', timeout: 5_000 });
+		await page.keyboard.press('Escape');
+		await toolbar.waitFor({ state: 'detached', timeout: 5_000 });
+		log('Escape dismissed the toolbar');
 
 		// --- Zoom keeps the two layers registered ---
 		// Zoom and rotation are claims about the page on screen, and the

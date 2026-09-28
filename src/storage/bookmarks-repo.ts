@@ -22,6 +22,7 @@
  * where the reader has been rather than as an index.
  */
 
+import type { Anchor } from '../domain/annotation/index.ts';
 import type { DocumentId, SourceFingerprint } from '../domain/document.ts';
 import type { Bookmark, PageIndex } from '../domain/reading-state.ts';
 import { getDb } from './db.ts';
@@ -58,10 +59,17 @@ export interface NewBookmark {
 	readonly documentId: DocumentId;
 	readonly sourceFingerprint: SourceFingerprint;
 	readonly pageIndex: PageIndex;
-	/** Always `null` in the MVP: selecting text and turning it into an
-	 *  `Anchor` is #7, and a bookmark that claimed an anchor without
-	 *  one would be a quote it cannot honour. */
-	readonly anchor: null;
+	/**
+	 * The text region this mark points at, or `null` for a page pin.
+	 *
+	 *  Both are MVP bookmarks and they are different things. A page pin
+	 *  has no selection behind it, which is what ADR-0002 requires the
+	 *  product to support — a reader marks a page without selecting
+	 *  anything first. A selection bookmark points at words, and carries
+	 *  the anchor the reader's selection produced, stored unread for the
+	 *  same reason every other anchor is.
+	 */
+	readonly anchor: Anchor | null;
 	/** Sub-page pointer, the same shape reading progress stores. */
 	readonly position: Bookmark['position'];
 	/**
