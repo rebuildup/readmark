@@ -86,19 +86,44 @@ vi.mock('../storage/reading-state-repo.ts', () => ({
 /** Painted overlays, so a test can count them and find their owners. */
 let overlays: PaintedAnchor[] = [];
 
+/**
+ * A page that behaves like the real one about *when* it may be painted.
+ *
+ * The real `PdfPageHandle` drops its remembered transform the moment a
+ * render starts, because the target is about to be rebuilt, and refuses
+ * to paint until a render completes. A fake that painted unconditionally
+ * hid that contract, and with it a bug where an ordinary zoom raised a
+ * render alert: the render effect and the paint effect re-run in the same
+ * commit, so the paint asked a page whose transform had just been
+ * dropped.
+ */
+let renderSettled = false;
+/** Held open to stand in for a render that has not finished. */
+let pendingRender: { promise: Promise<void>; resolve: () => void } | null = null;
+
 const fakePage = {
 	format: 'pdf',
 	render: vi.fn(async (target: HTMLElement) => {
+		renderSettled = false;
+		if (pendingRender !== null) {
+			// A render in flight, standing in for a slow one.
+			await pendingRender.promise;
+			pendingRender = null;
+		}
 		target.replaceChildren();
 		const page = document.createElement('div');
 		page.className = 'rm-page';
 		page.style.width = '420px';
 		page.style.height = '600px';
 		target.appendChild(page);
+		renderSettled = true;
 	}),
 	text: vi.fn(async () => ({ format: 'pdf', page: asPageIndex(1), items: [] })),
 	createAnchorFromSelection: vi.fn(async () => null),
 	paintResolvedAnchor: vi.fn(async (anchor: ResolvedAnchor, target: HTMLElement) => {
+		if (!renderSettled) {
+			throw new Error('readmark: paintResolvedAnchor called before the page finished rendering');
+		}
 		if (anchor.display === 'unpaintable') return null;
 		const element = document.createElement('div');
 		element.className = 'rm-highlight';
@@ -150,6 +175,8 @@ beforeEach(() => {
 	stored.length = 0;
 	writeBacks.clear();
 	overlays = [];
+	renderSettled = false;
+	pendingRender = null;
 	resolve = async () => null;
 	useUiStore.setState({ sidePanel: 'none' });
 	vi.mocked(fakePage.paintResolvedAnchor).mockClear();
@@ -375,6 +402,124 @@ describe('paint reconciliation', () => {
 			rerender(view(ANOTHER_SOURCE));
 		});
 		await waitFor(() => expect(overlays).toHaveLength(0));
+	});
+
+	it('does not paint while a render is in flight, and repaints after it', async () => {
+		stored.push(row());
+		resolve = async () => resolved();
+		// The first render is still running when the rows arrive. Both are
+		// I/O — a page parse and a store read — so either can win, and
+		// "rows arrived first" is the ordinary case on a cold open.
+		let release = (): void => {};
+		pendingRender = {
+			promise: new Promise<void>((resolve_) => {
+				release = () => {
+					resolve_();
+				};
+			}),
+			resolve: () => {},
+		};
+
+		renderReader();
+		await waitFor(() => expect(stored).toHaveLength(1));
+		await settle();
+
+		// The paint must not have gone ahead of the render: the page has no
+		// transform to convert through, and asking anyway is a programming
+		// error the reader would see as a render alert.
+		expect(renderSettled).toBe(false);
+		expect(overlays).toHaveLength(0);
+		expect(screen.queryByTestId('rm-reader-error')).toBeNull();
+
+		await act(async () => {
+			release();
+		});
+		// The completed render's epoch bump is what brings the paint back.
+		await waitFor(() => expect(overlays).toHaveLength(1));
+		expect(screen.queryByTestId('rm-reader-error')).toBeNull();
+	});
+
+	it('does not repaint mid-zoom', async () => {
+		stored.push(row());
+		resolve = async () => resolved();
+		renderReader();
+		await waitFor(() => expect(overlays).toHaveLength(1));
+
+		// A zoom changes `options`, which re-runs the render effect. The
+		// paint effect does not depend on options, so it does not re-run
+		// mid-zoom at all — the prop identity of a page's rows is stable,
+		// and the completed render's epoch is what brings it back.
+		let release = (): void => {};
+		pendingRender = {
+			promise: new Promise<void>((resolve_) => {
+				release = () => {
+					resolve_();
+				};
+			}),
+			resolve: () => {},
+		};
+		await act(async () => {
+			screen.getByTestId('rm-zoom-in').click();
+		});
+		await settle();
+		expect(renderSettled).toBe(false);
+		expect(overlays).toHaveLength(1);
+		expect(screen.queryByTestId('rm-reader-error')).toBeNull();
+
+		await act(async () => {
+			release();
+		});
+		await waitFor(() => expect(renderSettled).toBe(true));
+		// Repainted against the new canvas, and still exactly one overlay.
+		await waitFor(() => expect(overlays).toHaveLength(1));
+		expect(screen.queryByTestId('rm-reader-error')).toBeNull();
+	});
+
+	it('does not paint rows that arrive while a re-render is in flight', async () => {
+		stored.push(row());
+		resolve = async () => resolved();
+		const { rerender } = renderReader();
+		await waitFor(() => expect(overlays).toHaveLength(1));
+
+		// A zoom starts a render that has not finished, and the rows change
+		// while it is in flight: a fresh resolution for the same page. Both
+		// are ordinary — a re-render is I/O, and a resolution is I/O — and
+		// the two overlapping is what an impatient reader on a slow
+		// document produces.
+		let release = (): void => {};
+		pendingRender = {
+			promise: new Promise<void>((resolve_) => {
+				release = () => {
+					resolve_();
+				};
+			}),
+			resolve: () => {},
+		};
+		await act(async () => {
+			screen.getByTestId('rm-zoom-in').click();
+		});
+		await settle();
+		expect(renderSettled).toBe(false);
+
+		// The rows change: a new resolution, so a new `ResolvedAnchor` and
+		// a paint the view wants to do now.
+		resolve = async () => resolved({ selectedText: 'the cat sat down' });
+		await act(async () => {
+			rerender(view(ANOTHER_SOURCE));
+		});
+		await settle();
+
+		// The page still has no transform — the render dropped it when it
+		// started — so nothing may be painted, and nothing may be reported
+		// as broken.
+		expect(renderSettled).toBe(false);
+		expect(screen.queryByTestId('rm-reader-error')).toBeNull();
+
+		await act(async () => {
+			release();
+		});
+		await waitFor(() => expect(overlays).toHaveLength(1));
+		expect(screen.queryByTestId('rm-reader-error')).toBeNull();
 	});
 
 	it('removes every overlay when the view goes away', async () => {

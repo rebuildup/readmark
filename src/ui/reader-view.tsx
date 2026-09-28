@@ -192,9 +192,30 @@ interface HighlightRow {
 	readonly state: HighlightState;
 }
 
-/** The paintable rows for one page, which is all a page view needs. */
-function paintableOn(rows: readonly HighlightRow[], page: PageIndex): readonly HighlightRow[] {
-	return rows.filter((row) => row.state.kind === 'paintable' && row.state.resolved.page === page);
+/** A shared empty list, so a page with no highlights keeps the same
+ *  prop identity across re-renders. */
+const NO_HIGHLIGHTS: readonly HighlightRow[] = [];
+
+/** The paintable rows per page, in one pass.
+ *
+ *  Grouped rather than filtered per page view, and memoised by the
+ *  caller, because a fresh array per render is a fresh *identity* per
+ *  render — and a page view's paint effect depends on its rows. A new
+ *  identity re-runs that effect on every commit of the reader, which is
+ *  how a paint ended up racing a render.
+ */
+function highlightsByPage(
+	rows: readonly HighlightRow[],
+): ReadonlyMap<PageIndex, readonly HighlightRow[]> {
+	const byPage = new Map<PageIndex, HighlightRow[]>();
+	for (const row of rows) {
+		if (row.state.kind !== 'paintable') continue;
+		const page = row.state.resolved.page;
+		const existing = byPage.get(page);
+		if (existing === undefined) byPage.set(page, [row]);
+		else existing.push(row);
+	}
+	return byPage;
 }
 
 interface PdfPageViewProps {
@@ -264,6 +285,21 @@ function PdfPageView({
 	// appearing, changing or being deleted does not bump it: those are
 	// reasons to reconcile overlays, never to redraw a page.
 	const [renderEpoch, setRenderEpoch] = useState(0);
+	// Whether a render is in flight, set synchronously when the effect
+	// below starts and cleared when it settles.
+	//
+	// This is the gate that keeps paint and render in order. A zoom
+	// changes `options`, and in one React commit both effects re-run: the
+	// render effect starts a render — which drops the page handle's
+	// remembered transform immediately, since the target is about to be
+	// rebuilt — and the paint effect would then ask that same handle to
+	// paint against a transform it no longer has. It answered that with a
+	// programming error, so an ordinary zoom could raise a render alert.
+	//
+	// A ref rather than state because it has to be true *before* the paint
+	// effect runs, and re-running the paint effect is not the answer: the
+	// completed render bumps the epoch, which brings it back for a repaint.
+	const renderingRef = useRef(false);
 
 	useEffect(() => {
 		if (!materialized) return;
@@ -273,6 +309,9 @@ function PdfPageView({
 		// counter); `cancelled` only stops this component from reading
 		// the DOM of a page it no longer owns.
 		let cancelled = false;
+		// Before the async body, so the gate is closed by the time the
+		// paint effect below runs in this same commit.
+		renderingRef.current = true;
 		void (async () => {
 			try {
 				const page = await handle.page(index);
@@ -287,6 +326,10 @@ function PdfPageView({
 				setRenderEpoch((previous) => previous + 1);
 			} catch (error: unknown) {
 				if (!cancelled) onError(error);
+			} finally {
+				// Opened again by the completed render's epoch bump, which
+				// is what brings the paint effect back for a repaint.
+				if (!cancelled) renderingRef.current = false;
 			}
 		})();
 		return () => {
@@ -305,6 +348,12 @@ function PdfPageView({
 
 	useEffect(() => {
 		if (!materialized || renderEpoch === 0) return;
+		// A render in flight means the target is being rebuilt and the
+		// page handle has no transform to convert through. The completed
+		// render bumps the epoch, which re-runs this effect; skipping here
+		// is what keeps an ordinary zoom from asking a page to paint
+		// against a canvas that does not exist yet.
+		if (renderingRef.current) return;
 		const host = hostRef.current;
 		if (host === null) return;
 		const painted = paintedRef.current;
@@ -682,6 +731,10 @@ export function ReaderView({
 		// biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the measured sizes, which is the condition the restore waits for
 	}, [footprints, initialPosition, pageCount]);
 
+	// Grouped once per resolution, not once per render, so each page view
+	// gets a stable prop identity.
+	const byPage = useMemo(() => highlightsByPage(highlights), [highlights]);
+
 	// Highlight resolution is a *source* lifecycle, not a render one.
 	//
 	// Recovery answers "is this anchor still where it was in this file",
@@ -986,7 +1039,7 @@ export function ReaderView({
 								index={index}
 								options={options}
 								reserved={footprint ?? provisional}
-								highlights={paintableOn(highlights, index)}
+								highlights={byPage.get(index) ?? NO_HIGHLIGHTS}
 								onMeasured={handleMeasured}
 								onError={handleError}
 							/>
