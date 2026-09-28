@@ -85,6 +85,7 @@ async function add(params: {
 	sourceFingerprint?: string;
 	pageIndex: number;
 	createdAt?: number;
+	title?: string;
 }) {
 	const bookmark = await addBookmark({
 		documentId: params.documentId ?? DOC_A,
@@ -92,6 +93,7 @@ async function add(params: {
 		pageIndex: asPageIndex(params.pageIndex),
 		anchor: null,
 		position: { pageOffsetRatio: 0.25 },
+		...(params.title === undefined ? {} : { title: params.title }),
 	});
 	if (params.createdAt !== undefined) {
 		const row = rows.get(bookmark.id);
@@ -126,6 +128,24 @@ describe('addBookmark', () => {
 		const listed = await listBookmarks({ documentId: DOC_A, sourceFingerprint: FINGERPRINT_A });
 		expect(listed).toHaveLength(2);
 	});
+});
+
+it('stores the name the reader gave the mark, and trims it', async () => {
+	const named = await add({ pageIndex: 4, title: '  第三章の要約  ' });
+	expect(named.title).toBe('第三章の要約');
+
+	// A whitespace-only name would render as a blank row in the
+	// panel, so it is stored as no name at all.
+	const blank = await add({ pageIndex: 4, title: '   ' });
+	expect(blank.title).toBe('');
+
+	// And the field is optional: nothing forces a reader to name a
+	// mark in order to make one.
+	const unnamed = await add({ pageIndex: 4 });
+	expect(unnamed.title).toBe('');
+
+	const listed = await listBookmarks({ documentId: DOC_A, sourceFingerprint: FINGERPRINT_A });
+	expect(listed.map((row) => row.title)).toEqual(['第三章の要約', '', '']);
 });
 
 describe('listBookmarks', () => {

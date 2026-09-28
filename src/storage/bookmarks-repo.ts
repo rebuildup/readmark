@@ -64,6 +64,16 @@ export interface NewBookmark {
 	readonly anchor: null;
 	/** Sub-page pointer, the same shape reading progress stores. */
 	readonly position: Bookmark['position'];
+	/**
+	 * A name the reader gave the mark, or `''` for none.
+	 *
+	 * Asked for when the mark is made, not edited afterwards: the panel
+	 * has no rename affordance in the MVP, so a title that could only be
+	 * set later would be a field no reader could ever fill in. Trimmed
+	 * here rather than in the UI, because a row storing `'  '` renders
+	 * as a blank label in every list that reads it.
+	 */
+	readonly title?: string;
 }
 
 /**
@@ -79,9 +89,9 @@ export async function addBookmark(input: NewBookmark): Promise<Bookmark> {
 		anchor: input.anchor,
 		position: input.position,
 		// The title is a label the reader can scan, not a quotation of
-		// the document. Numbering within the source keeps several marks
-		// on one page distinguishable without inventing titles.
-		title: '',
+		// the document. An empty one is legitimate: the panel falls back
+		// to the page and an ordinal.
+		title: input.title?.trim() ?? '',
 		createdAt: Date.now(),
 	};
 	await getDb().bookmarks.put(bookmark);

@@ -386,6 +386,29 @@ pre {
 	font-size: 14px;
 }
 
+.rm-dialog__field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin: 0 0 12px;
+}
+
+.rm-dialog__field-label {
+	font-size: 13px;
+	color: var(--rm-fg-muted);
+}
+
+.rm-dialog__field input {
+	width: 100%;
+	padding: 6px 10px;
+	border: 1px solid var(--rm-border);
+	border-radius: var(--rm-radius-md);
+	background: var(--rm-bg-surface);
+	color: var(--rm-fg);
+	font-family: inherit;
+	font-size: 14px;
+}
+
 .rm-dialog__actions {
 	display: flex;
 	justify-content: flex-end;
