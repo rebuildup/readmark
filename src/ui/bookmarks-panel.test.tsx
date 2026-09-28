@@ -28,7 +28,7 @@ import { asDocumentId, asSourceFingerprint } from '../domain/document.ts';
 import { asPageIndex, type Bookmark } from '../domain/reading-state.ts';
 import type { PageHandle, ReaderHandle } from '../reader/types.ts';
 import { useUiStore } from '../stores/ui-store.ts';
-import { bookmarkLabels } from './bookmarks-panel.tsx';
+import { bookmarkHints, bookmarkLabels } from './bookmarks-panel.tsx';
 import { ReaderView } from './reader-view.tsx';
 
 const DOC_ID = asDocumentId('00000000-0000-4000-8000-0000000000cc');
@@ -59,6 +59,7 @@ vi.mock('../storage/bookmarks-repo.ts', () => ({
 		pageIndex: number;
 		anchor: null;
 		position: { pageOffsetRatio: number } | null;
+		title?: string;
 	}) => {
 		const row: StoredRow = {
 			id: `bookmark-${store.nextId++}`,
@@ -67,7 +68,7 @@ vi.mock('../storage/bookmarks-repo.ts', () => ({
 			pageIndex: input.pageIndex,
 			anchor: null,
 			position: input.position,
-			title: '',
+			title: input.title ?? '',
 			createdAt: store.rows.length + 1,
 		};
 		store.rows.push(row);
@@ -305,6 +306,15 @@ beforeEach(() => {
 	useUiStore.setState({ sidePanel: 'none' });
 });
 
+/** Press 「栞を追加」, name the mark, confirm. */
+async function addBookmarkWithTitle(title: string): Promise<void> {
+	fireEvent.click(screen.getByTestId('rm-add-bookmark'));
+	const field = await screen.findByTestId('rm-bookmark-title');
+	fireEvent.change(field, { target: { value: title } });
+	fireEvent.click(screen.getByTestId('rm-dialog-confirm'));
+	await settle();
+}
+
 describe('adding a bookmark', () => {
 	it('marks the page the reader is on, at the offset they are at', async () => {
 		renderReader();
@@ -317,7 +327,7 @@ describe('adding a bookmark', () => {
 		});
 		await settle();
 
-		fireEvent.click(screen.getByTestId('rm-add-bookmark'));
+		await addBookmarkWithTitle('第三章の要約');
 
 		await waitFor(() => expect(store.rows).toHaveLength(1));
 		const row = store.rows[0];
@@ -334,10 +344,56 @@ describe('adding a bookmark', () => {
 		renderReader();
 		await settle();
 
-		fireEvent.click(screen.getByTestId('rm-add-bookmark'));
+		await addBookmarkWithTitle('第三章の要約');
 
 		expect(await screen.findByTestId('rm-bookmarks-panel')).toBeTruthy();
 		expect(screen.getByTestId('rm-bookmarks-count').textContent).toBe('1 件');
+	});
+
+	it('stores the name the reader gave it, and shows it instead of the page', async () => {
+		renderReader();
+		await settle();
+
+		await addBookmarkWithTitle('  第三章の要約  ');
+
+		await waitFor(() => expect(store.rows).toHaveLength(1));
+		expect(store.rows[0]?.title).toBe('第三章の要約');
+		const label = await screen.findByTestId('rm-bookmark-jump');
+		expect(label.textContent).toContain('第三章の要約');
+		// A name can describe a place without saying where it is, so
+		// the page stays visible under it.
+		expect(label.textContent).toContain('1 ページ');
+	});
+
+	it('keeps an unnamed mark addressable by its page', async () => {
+		renderReader();
+		await settle();
+
+		fireEvent.click(screen.getByTestId('rm-add-bookmark'));
+		const field = await screen.findByTestId('rm-bookmark-title');
+		// Focus lands in the field, not on the cancel button: the next
+		// move for a dialog that asks for a name is to type one.
+		expect(document.activeElement).toBe(field);
+		fireEvent.click(screen.getByTestId('rm-dialog-confirm'));
+
+		await waitFor(() => expect(store.rows).toHaveLength(1));
+		expect(store.rows[0]?.title).toBe('');
+		const label = await screen.findByTestId('rm-bookmark-jump');
+		expect(label.textContent).toContain('1 ページ');
+	});
+
+	it('adds nothing when the dialog is cancelled', async () => {
+		renderReader();
+		await settle();
+
+		fireEvent.click(screen.getByTestId('rm-add-bookmark'));
+		fireEvent.change(await screen.findByTestId('rm-bookmark-title'), {
+			target: { value: '書きかけ' },
+		});
+		fireEvent.click(screen.getByTestId('rm-dialog-cancel'));
+		await settle();
+
+		expect(store.rows).toHaveLength(0);
 	});
 });
 
@@ -418,6 +474,50 @@ describe('the bookmarks panel', () => {
 		await waitFor(() => expect(renderedPages.has(3)).toBe(true));
 		// The page is brought into range first, then the offset is
 		// applied to its measured height.
+		await waitFor(() => {
+			expect(scroller().scrollTop).toBeGreaterThan(pageTop(3) - VIEWPORT_HEIGHT);
+		});
+	});
+
+	it('still jumps after the reader has scrolled with the wheel', async () => {
+		store.rows = [
+			{
+				id: 'a',
+				documentId: DOC_ID,
+				sourceFingerprint: FINGERPRINT,
+				pageIndex: 3,
+				anchor: null,
+				position: { pageOffsetRatio: 0.25 },
+				title: '',
+				createdAt: 1,
+			},
+		];
+		renderReader();
+		await settle();
+		fireEvent.click(screen.getByTestId('rm-toggle-bookmarks'));
+		await screen.findByTestId('rm-bookmarks-list');
+
+		// The reader's own hand on the wheel, which retires whatever
+		// jump the app had in flight. It must not retire every jump
+		// after it: a latch here meant a reader who scrolled once could
+		// never use a bookmark again, and no test that only ever jumped
+		// with a programmatic scroll would have noticed.
+		fireEvent.wheel(scroller());
+
+		fireEvent.click(screen.getByTestId('rm-bookmark-jump'));
+		await waitFor(() => expect(renderedPages.has(3)).toBe(true));
+		await waitFor(() => {
+			expect(scroller().scrollTop).toBeGreaterThan(pageTop(3) - VIEWPORT_HEIGHT);
+		});
+
+		// And again, with another takeover in between: the marks a
+		// reader comes back to are the ones used more than once.
+		await act(async () => {
+			scroller().scrollTop = 0;
+			fireEvent.scroll(scroller());
+		});
+		fireEvent.wheel(scroller());
+		fireEvent.click(screen.getByTestId('rm-bookmark-jump'));
 		await waitFor(() => {
 			expect(scroller().scrollTop).toBeGreaterThan(pageTop(3) - VIEWPORT_HEIGHT);
 		});
@@ -506,6 +606,32 @@ describe('bookmarkLabels', () => {
 			'2 ページ (1)',
 			'2 ページ (2)',
 			'7 ページ',
+		]);
+	});
+
+	it('shows the name the reader gave a mark, and keeps the page in the hint', () => {
+		const mark = (pageIndex: number, title = ''): Bookmark =>
+			({
+				id: `${pageIndex}-${title}`,
+				documentId: DOC_ID,
+				sourceFingerprint: FINGERPRINT,
+				pageIndex,
+				anchor: null,
+				position: null,
+				title,
+				createdAt: 1,
+			}) as unknown as Bookmark;
+
+		expect(bookmarkLabels([mark(2, '  foxes  '), mark(2), mark(2, 'wolves')])).toEqual([
+			'foxes',
+			// The ordinal counts every mark on the page, so `(2)` means
+			// "the second mark here", not "the second unnamed one".
+			'2 ページ (2)',
+			'wolves',
+		]);
+		expect(bookmarkHints([mark(2, 'foxes'), mark(2)], '吾輩は猫である')).toEqual([
+			'2 ページ · 吾輩は猫である',
+			'吾輩は猫である',
 		]);
 	});
 });
