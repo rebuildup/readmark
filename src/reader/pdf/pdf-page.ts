@@ -29,7 +29,17 @@
 import type { PDFPageProxy, RenderTask } from 'pdfjs-dist';
 import type { Anchor } from '../../domain/annotation/index.ts';
 import type { PageIndex } from '../../domain/reading-state.ts';
-import type { PageHandle, PageTextLayer, ReaderSelection, RenderOptions } from '../types.ts';
+import type {
+	PageHandle,
+	PageTextLayer,
+	PaintedAnchor,
+	ReaderSelection,
+	RenderOptions,
+	ResolvedAnchor,
+} from '../types.ts';
+import { isPdfResolvedDisplay } from './anchor.ts';
+import { cssRectsFor, fragmentsForRuns } from './anchor-geometry.ts';
+import { quoteForRange, runsForRange, selectionRangeInLayer } from './anchor-recovery.ts';
 import type { ViewportLike } from './pdf-coords.ts';
 import { buildTextLayer, extractPageTextLayer } from './pdf-text-layer.ts';
 
@@ -44,6 +54,25 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 	private pending: RenderTask | null = null;
 	private generation = 0;
 	private closed = false;
+
+	/**
+	 * The last render that completed: its transform, and the two elements
+	 * it produced. `null` before the first one, and again while a render
+	 * is in flight.
+	 *
+	 * All three are held together because all three are what "the pixels
+	 * currently in this element were drawn with" means. The viewport
+	 * alone cannot say a caller's target is the right one: every rendered
+	 * page contains a `.rm-page`, so a host another `PageHandle` painted
+	 * would satisfy a structural check. The painter compares element
+	 * identity, which is the only thing that cannot be true of the wrong
+	 * page by coincidence.
+	 */
+	private lastRender: {
+		readonly viewport: ViewportLike;
+		readonly target: HTMLElement;
+		readonly page: HTMLElement;
+	} | null = null;
 
 	constructor(
 		readonly index: PageIndex,
@@ -62,6 +91,13 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 		if (this.closed) return;
 		const generation = ++this.generation;
 		this.cancelPendingRender();
+		// Dropped at the *start*, not just on failure. While a re-render
+		// is in flight the previous transform no longer describes what is
+		// in the target — the target is being rebuilt — and a paint that
+		// converted through it would place fragments against a canvas that
+		// is about to be replaced. Dropping it makes such a paint say so
+		// instead of quietly drawing in the wrong place.
+		this.lastRender = null;
 
 		const scale = options.scale ?? 1;
 		const rotation = options.rotation ?? 0;
@@ -134,6 +170,14 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 				console.error('readmark: text layer build failed', cause);
 			}
 		}
+
+		// Remembered only once the page has actually been painted, and
+		// the object is kept rather than the options: `paintResolvedAnchor`
+		// has to convert through *this* transform, and re-deriving one
+		// from options is how a highlight ends up beside its text.
+		if (this.generation === generation && !this.closed) {
+			this.lastRender = { viewport, target, page };
+		}
 	}
 
 	/** The page's glyph runs, in raw PDF user-space (ADR-0007). */
@@ -142,12 +186,147 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 	}
 
 	/**
-	 * #7 owns selection → `Anchor`. Returning `null` keeps the
-	 * contract honest until then: a rect produced without the quote
-	 * would be stored as a canonical recovery key it cannot honour.
+	 * The anchor for a live selection: what the reader highlighted, and
+	 * where on the page they highlighted it.
+	 *
+	 * Both halves come from the same place on purpose.
+	 *
+	 * The **quote** is built from the text layer's items and the
+	 * selection's offsets within them — never from
+	 * `Selection.toString()`. The browser synthesises whitespace and line
+	 * breaks from layout, so its answer disagrees with the layer the
+	 * quote is later searched against, and an anchor whose quote cannot
+	 * find its own text goes stale on a document nobody changed.
+	 *
+	 * The **rects** are measured, through the same helper recovery uses,
+	 * from a text layer built for measuring. A selection is a live thing
+	 * in the reader's own layer; the anchor outlives it, at a different
+	 * zoom, after a rotation, and possibly in a session that never
+	 * renders this page at all.
+	 *
+	 * `null` when there is no selection to store: an empty one, a
+	 * collapsed one, or one that does not start and end inside this
+	 * page's own text layer. Cross-page selections are two anchors
+	 * (ADR-0007), and a selection that reaches into another page has no
+	 * single page to belong to.
 	 */
-	async createAnchorFromSelection(_selection: ReaderSelection): Promise<Anchor | null> {
-		return null;
+	async createAnchorFromSelection(selection: ReaderSelection): Promise<Anchor | null> {
+		const layer = await this.text();
+		const range = selectionRangeInLayer(selection.container, selection.range, layer);
+		// A collapsed range is a click, not a drag.
+		if (range === null) return null;
+		const quote = quoteForRange(layer, range);
+		if (quote === null) return null;
+		const runs = runsForRange(layer, range);
+		const fragments = await fragmentsForRuns(this.pdfPage, layer, runs);
+		// Rects the anchor could not be measured with. A rect produced
+		// without them would be a claim about where the text is that
+		// nothing checked, and the quote alone cannot answer it.
+		if (fragments === null) return null;
+
+		return {
+			format: 'pdf',
+			payload: { page: this.index, rects: fragments, quote },
+		};
+	}
+
+	/**
+	 * Paint a resolved anchor's highlight into `target`.
+	 *
+	 * Geometry and nothing else: the fragments are converted through the
+	 * page's own viewport and turned into positioned elements. The
+	 * colour is not decided here — `Highlight.color` is a semantic name
+	 * and the palette belongs to the UI and its theme, so a PDF painter
+	 * that hard-coded a colour would freeze one theme's decision into
+	 * persisted data (ADR-0004 §"Where the refreshed anchor is
+	 * written").
+	 *
+	 * Two kinds of "nothing happens", kept apart because they are
+	 * different in kind and only one of them is worth a stack trace:
+	 *
+	 *   - **Programming errors reject.** An anchor for a page this is
+	 *     not; a target holding no rendered page; a page with no
+	 *     completed render, including one mid-re-render. Each is a caller
+	 *     that lost track of what it was talking to, and each is a case
+	 *     where drawing something plausible would be worse than failing.
+	 *   - **Display data this page does not recognise is a no-op**,
+	 *     answered with `null`. `display` came out of storage, and a row
+	 *     written by a version this build has never heard of has to
+	 *     paint as nothing rather than take the reader down.
+	 *
+	 * The caller errors are checked first: they are about the call, and
+	 * reporting them does not depend on the data being one we can read.
+	 */
+	async paintResolvedAnchor(
+		anchor: ResolvedAnchor,
+		target: HTMLElement,
+	): Promise<PaintedAnchor | null> {
+		if (anchor.format !== 'pdf') return null;
+		if (anchor.page !== this.index) {
+			throw new Error(
+				`readmark: paintResolvedAnchor called on page ${this.index} with an anchor for ` +
+					`page ${anchor.page}`,
+			);
+		}
+		const rendered = this.lastRender;
+		if (rendered === null) {
+			// Also the case where a re-render is in flight: the transform
+			// was dropped when it started, and the target is mid-rebuild.
+			throw new Error(
+				`readmark: paintResolvedAnchor called before page ${this.index} finished rendering`,
+			);
+		}
+		// Identity, not "does it contain a page box". Every rendered page
+		// holds a `.rm-page`, so a host some *other* `PageHandle` painted
+		// would pass a structural check — and this page's fragments would
+		// then be laid over someone else's canvas, converted through a
+		// transform that has nothing to do with either.
+		if (rendered.target !== target) {
+			throw new Error(
+				`readmark: paintResolvedAnchor was given an element page ${this.index} was not ` +
+					'rendered into',
+			);
+		}
+		if (!isPdfResolvedDisplay(anchor.display)) return null;
+		const { viewport, page } = rendered;
+
+		const layer = document.createElement('div');
+		layer.className = 'rm-highlight';
+		// `stale` is a fact about how the rects were derived, and the UI
+		// needs to show it as such. It is data rather than only a class
+		// because the stylesheet is not the only thing that will read it.
+		layer.dataset.freshness = anchor.freshness;
+		// A highlight is under the text, never over it: `pointer-events:
+		// none` is what keeps a drag across a highlighted sentence a
+		// selection rather than a click.
+		layer.style.pointerEvents = 'none';
+		layer.style.position = 'absolute';
+		layer.style.inset = '0px';
+
+		for (const rect of cssRectsFor(anchor.display, viewport)) {
+			const fragment = document.createElement('div');
+			fragment.className = 'rm-highlight__fragment';
+			fragment.style.position = 'absolute';
+			fragment.style.left = `${rect.left}px`;
+			fragment.style.top = `${rect.top}px`;
+			fragment.style.width = `${rect.width}px`;
+			fragment.style.height = `${rect.height}px`;
+			layer.appendChild(fragment);
+		}
+		// An empty layer would be a `div` covering the page for nothing.
+		// Measured in a layout-free way: `cssRectsFor` dropped every
+		// fragment, so there is nothing to draw and nothing to hand back.
+		if (layer.childElementCount === 0) return null;
+		page.appendChild(layer);
+		return {
+			element: layer,
+			// Idempotent, and safe on a detached node: a re-render that
+			// already rebuilt the page leaves this pointing at an element
+			// that is no longer in the document.
+			remove: () => {
+				layer.remove();
+			},
+		};
 	}
 
 	/** Cancel any in-flight render and release the page. Idempotent:
@@ -157,6 +336,9 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 		if (this.closed) return;
 		this.closed = true;
 		this.generation++;
+		// A closed page has no canvas left to describe, so it has no
+		// transform to convert through either.
+		this.lastRender = null;
 		this.cancelPendingRender();
 		this.pdfPage.cleanup();
 	}

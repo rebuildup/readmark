@@ -90,7 +90,7 @@ export interface GlyphRun {
 
 /** A run reduced to what the DOM needs. Marked-content items (which
  *  carry structure, not glyphs) never become runs. */
-function toGlyphRun(item: TextContentItem, styles: TextStyleMap): GlyphRun | null {
+export function toGlyphRun(item: TextContentItem, styles: TextStyleMap): GlyphRun | null {
 	if (!isTextItem(item) || item.str.length === 0) return null;
 	const style = styles[item.fontName];
 	return {
@@ -109,6 +109,32 @@ function toGlyphRun(item: TextContentItem, styles: TextStyleMap): GlyphRun | nul
 			vertical: style?.vertical ?? false,
 		},
 	};
+}
+
+/**
+ * The page's runs, in reading order, with the items pdf.js emits that
+ * carry no glyphs dropped.
+ *
+ * Both projections below consume *this* list, and that is the point of
+ * it: `buildTextLayer` produces one span per run and
+ * `extractPageTextLayer` produces one `PageTextItem` per run, so
+ * `spans[i]` is `layer.items[i]` by construction rather than by two
+ * independent filters happening to agree. Selection geometry addresses
+ * a run by index — `QuoteRunMatch` carries offsets *within* a run — so
+ * a correspondence that only held "in practice" would quietly measure
+ * the wrong characters.
+ */
+export function glyphRuns(textContent: {
+	readonly items: readonly TextContentItem[];
+	readonly styles: TextStyleMap;
+}): readonly GlyphRun[] {
+	const runs: GlyphRun[] = [];
+	for (const item of textContent.items) {
+		const run = toGlyphRun(item, textContent.styles);
+		if (run === null) continue;
+		runs.push(run);
+	}
+	return runs;
 }
 
 /**
@@ -354,9 +380,7 @@ export async function buildTextLayer(
 	layer.dataset.textLayer = 'true';
 
 	const fragment = document.createDocumentFragment();
-	for (const item of textContent.items) {
-		const run = toGlyphRun(item, textContent.styles);
-		if (run === null) continue;
+	for (const run of glyphRuns(textContent)) {
 		const layout = layoutRun(run, viewport, options);
 		const span = document.createElement('span');
 		span.textContent = run.text;
@@ -394,9 +418,7 @@ export async function extractPageTextLayer(
 ): Promise<PageTextLayer> {
 	const textContent = await page.getTextContent();
 	const items: PageTextItem[] = [];
-	for (const item of textContent.items) {
-		const run = toGlyphRun(item, textContent.styles);
-		if (run === null) continue;
+	for (const run of glyphRuns(textContent)) {
 		const x = run.transform[4] ?? 0;
 		const baseline = run.transform[5] ?? 0;
 		items.push({

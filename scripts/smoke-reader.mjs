@@ -22,6 +22,11 @@
  *      the rendered page actually grows.
  *   6. Rotating 90° swaps the page viewport and the text layer
  *      follows it.
+ *   6b. What a DOM range knows about a text run, measured against the
+ *      reader's own text layer: a substring is strictly narrower than
+ *      its run and inside it, a second run measures elsewhere, and
+ *      layer-local coordinates survive being measured off-screen. These
+ *      are the browser facts anchor recovery is built on.
  *   7. The header has no interactive nesting, and Library is one
  *      click away.
  *   8. Reading progress: scrolling writes a `readingProgress` row, and
@@ -250,6 +255,12 @@ async function waitForPageLayers(page, index) {
 /** The page the reader is actually looking at, read off the real
  *  rendered layout: the invariant is "on this page", not "at some
  *  offset in a column of estimates". */
+/** Widths in the log are rounded to whole pixels; this keeps the
+ *  sentence honest about a fractional measurement. */
+function firstRunWidthText(value) {
+	return Math.round(value * 10) / 10;
+}
+
 async function lookingAt(page) {
 	return await page.evaluate(() => {
 		const scroller = document.querySelector('[data-testid="rm-reader-scroll"]');
@@ -432,6 +443,207 @@ async function main() {
 		}
 		log(`mouse drag selected ${JSON.stringify(selected)}`);
 
+		// --- What a DOM range knows about a run ---
+		// Measured on the page as opened: unrotated, zoom 1. That is the
+		// state recovery builds its measurement layer in, and it is also
+		// the only state in which "this substring is narrower than its
+		// run" is a statement about a horizontal box. After the rotation
+		// below the same runs are vertical and the varying axis is height.
+
+		// Anchor geometry is measured, not derived: a stored rect comes
+		// from `Range.getClientRects()` over the matched characters of a
+		// text layer built off-screen at scale 1, rotation 0. That is
+		// three browser properties the implementation depends on, and
+		// none of them can be checked in a unit test — happy-dom has no
+		// layout and would agree with a broken implementation.
+		//
+		// They are checked here against the reader's own real text
+		// layer, before the recovery wiring is built on them. Each one
+		// is a bug the wiring would have shipped:
+		//
+		//   1. A range over part of a run is narrower than the run. This
+		//      is the whole reason the run's own rect is not the
+		//      geometry: a run's box is the box of the whole run, so
+		//      highlighting one word with it paints the line.
+		//   2. A range over the *second* run measures somewhere else.
+		//      The recovery helper addresses a run by its index in the
+		//      page; if that index were the position within the match,
+		//      a quote halfway down a page would be drawn on the first
+		//      run of it.
+		//   3. Client coordinates follow the host. A layer parked far
+		//      to the left reports coordinates far to the left, which
+		//      is exactly why the layer's own box is subtracted before
+		//      the transform is applied. Without that subtraction every
+		//      fragment lands far off the page — and still looks like a
+		//      rectangle, which is what makes it hard to notice.
+		const measured = await page
+			.locator('[data-page-index="1"] .rm-text-layer')
+			.evaluate((layer) => {
+				const spans = layer.querySelectorAll('span');
+				const boxOf = (range) => {
+					const rects = Array.from(range.getClientRects()).filter(
+						(rect) => rect.width > 0 && rect.height > 0,
+					);
+					if (rects.length === 0) return null;
+					return rects.map((rect) => ({
+						left: rect.left,
+						top: rect.top,
+						right: rect.right,
+						bottom: rect.bottom,
+					}));
+				};
+				const rangeIn = (span, start, end) => {
+					const text = span.firstChild;
+					if (text === null) return null;
+					const range = document.createRange();
+					range.setStart(text, start);
+					range.setEnd(text, end);
+					return range;
+				};
+				const first = spans[0];
+				const second = spans[1];
+				if (first === undefined || second === undefined) return { spans: spans.length };
+				// Trailing whitespace is trimmed out of an inline box by
+				// the browser, so a substring that only drops the run's
+				// last space measures the same width as the run and would
+				// report "no sub-run geometry" for a browser that has it.
+				// Both measurements below therefore stop at the last
+				// non-space character, and the substring drops a glyph
+				// from *each* end.
+				const firstText = (first.firstChild?.textContent ?? '').replace(/\s+$/, '');
+				const secondText = (second.firstChild?.textContent ?? '').replace(/\s+$/, '');
+				if (firstText.length < 4 || secondText.length < 2) {
+					return { spans: spans.length, tooShort: true };
+				}
+				const whole = boxOf(rangeIn(first, 0, firstText.length));
+				const middle = boxOf(rangeIn(first, 1, firstText.length - 1));
+				const other = boxOf(rangeIn(second, 0, secondText.length));
+
+				// Move the layer far off-screen, exactly the way the
+				// measurement layer is hosted, and measure the same
+				// range again.
+				const origin = layer.getBoundingClientRect();
+				const previousLeft = layer.style.left;
+				layer.style.left = '-100000px';
+				const moved = layer.getBoundingClientRect();
+				const movedBox = boxOf(rangeIn(first, 1, firstText.length - 1));
+				const localBefore = middle === null ? null : middle[0].left - origin.left;
+				const localAfter = movedBox === null ? null : movedBox[0].left - moved.left;
+				layer.style.left = previousLeft;
+
+				return {
+					spans: spans.length,
+					firstText,
+					whole,
+					middle,
+					other,
+					origin: { left: origin.left, top: origin.top },
+					movedOrigin: { left: moved.left, top: moved.top },
+					movedClient: movedBox === null ? null : movedBox[0].left,
+					localBefore,
+					localAfter,
+				};
+			});
+		if (measured.spans < 2) {
+			fail(`the page has ${measured.spans} text runs; the geometry claims need at least 2`);
+		}
+		if (measured.tooShort === true) fail('the fixture runs are too short to measure a substring');
+		if (measured.whole === null || measured.middle === null || measured.other === null) {
+			fail(`a range over the text layer measured nothing: ${JSON.stringify(measured)}`);
+		}
+
+		// 1. A substring is strictly narrower than its run, and sits
+		// inside it.
+		const wholeBox = measured.whole[0];
+		const middleBox = measured.middle[0];
+		const wholeWidth = wholeBox.right - wholeBox.left;
+		const middleWidth = middleBox.right - middleBox.left;
+		log(
+			`DIAGNOSTIC runs: text=${JSON.stringify(measured.firstText)} whole=${JSON.stringify(wholeBox)} middle=${JSON.stringify(middleBox)}`,
+		);
+		if (!(middleWidth < wholeWidth)) {
+			fail(
+				`a range over part of a run measured the same width as the whole run ` +
+					`(${middleWidth} vs ${wholeWidth}); sub-run geometry is not available and ` +
+					'the run rect would have to be used instead',
+			);
+		}
+		if (middleBox.left < wholeBox.left - 0.5 || middleBox.right > wholeBox.right + 0.5) {
+			fail(
+				`a substring measured outside its own run: ${JSON.stringify(middleBox)} not within ` +
+					`${JSON.stringify(wholeBox)}`,
+			);
+		}
+		log(
+			`range geometry: a ${firstRunWidthText(wholeWidth)}px run, its substring ` +
+				`${firstRunWidthText(middleWidth)}px and strictly inside it`,
+		);
+
+		// 2. The second run is a different box, so a run index says
+		// something. Both fixture lines start at the same left margin, so
+		// the axis that tells them apart is the baseline: comparing x
+		// alone would call two genuinely different runs the same run,
+		// and the log would report a difference that is not there.
+		const otherBox = measured.other[0];
+		const sameBox =
+			Math.abs(otherBox.left - wholeBox.left) < 1 && Math.abs(otherBox.top - wholeBox.top) < 1;
+		if (sameBox) {
+			fail(
+				'the first and second runs measured at the same place, so a run index cannot ' +
+					'address them; recovery would measure the wrong characters',
+			);
+		}
+		log(
+			`run addressing: run 2 at y ${Math.round(otherBox.top)}, run 1 at y ` +
+				`${Math.round(wholeBox.top)} (same left margin, x ${Math.round(wholeBox.left)})`,
+		);
+
+		// 3. Client coordinates follow the host; layer-local ones do not.
+		if (measured.movedClient === null || measured.movedOrigin === null) {
+			fail(`moving the layer off-screen lost the measurement: ${JSON.stringify(measured)}`);
+		}
+		const shift = measured.movedOrigin.left - measured.origin.left;
+		if (Math.abs(shift + 100_000) > 1) {
+			fail(
+				`moving the layer to left:-100000px moved its box by ${Math.round(shift)}px; ` +
+					"the measurement layer's origin is not where this smoke assumes it is",
+			);
+		}
+		// The pair is the whole claim: the host moved (asserted by
+		// `shift` above) and the layer-local coordinate did not. An
+		// implementation that ignored the origin would differ by exactly
+		// the shift, which is why both are asserted rather than either.
+		if (
+			measured.localBefore === null ||
+			measured.localAfter === null ||
+			Math.abs(measured.localBefore - measured.localAfter) > 0.5
+		) {
+			fail(
+				`layer-local coordinates changed when the layer moved: ` +
+					`${JSON.stringify(measured.localBefore)} -> ${JSON.stringify(measured.localAfter)}; ` +
+					'subtracting the layer origin is required, and this proves it is sufficient',
+			);
+		}
+		// The same geometry, measured twice, has to land inside the
+		// tolerance `rectsMatch` uses or every reopen would look like a
+		// change and rewrite a correct row. The measurement layer is built
+		// at scale 1, so here a CSS pixel is a PDF point. This is
+		// *layout* drift — the same spans, moved — rather than a full
+		// re-measurement through a second text layer, which needs a
+		// caller and comes with the UI wiring.
+		const drift = Math.abs(measured.localBefore - measured.localAfter);
+		if (drift > 0.25) {
+			fail(
+				`re-measuring identical geometry drifted ${drift}pt, above the 0.25pt tolerance; ` +
+					'every reopen would be reported as a changed highlight',
+			);
+		}
+		log(
+			`off-screen origin: client x moved ${Math.round(shift)}px with the host, ` +
+				`layer-local x stayed at ${Math.round(measured.localBefore)}px ` +
+				`(re-measured ${Number(drift.toFixed(3))}pt away, inside the 0.25pt tolerance)`,
+		);
+
 		// --- Lazy: the far end of the document is still a placeholder ---
 		const lastIndex = PAGE_COUNT;
 		const lastHost = pageHost(page, lastIndex);
@@ -471,33 +683,34 @@ async function main() {
 		await page.waitForFunction(
 			() => (document.querySelector('[data-testid="rm-reader-scroll"]')?.scrollTop ?? 0) > 0,
 		);
-		// The write is debounced; wait for the row rather than for a
-		// timer this script does not own.
+		// Wait for the row to describe *this* position, not merely to
+		// exist. The reader writes its position on open, so a row is
+		// already there describing page 1; reading it as soon as it
+		// appears reports the position from before the scroll and turns
+		// the restore assertion below into a race with the debounce.
+		// Waiting for the row to name the page the reader is actually
+		// on is a condition this script can state, and it fails loudly
+		// if the write never happens at all.
+		const scrolledTo = await lookingAt(page);
+		if (scrolledTo === null) fail('could not read the position after scrolling');
 		let stored = null;
 		for (let attempt = 0; attempt < 40; attempt++) {
 			const counts = await readStoreCounts(page);
 			if (findStoreCount(counts, 'readingProgress') === 1) {
-				stored = await page.evaluate(async () => {
-					const db = await new Promise((resolve, reject) => {
-						const request = indexedDB.open('readmark');
-						request.onsuccess = () => resolve(request.result);
-						request.onerror = () => reject(request.error);
-					});
-					const row = await new Promise((resolve) => {
-						const store = db
-							.transaction('readingProgress', 'readonly')
-							.objectStore('readingProgress');
-						const cursorRequest = store.openCursor();
-						cursorRequest.onsuccess = () => resolve(cursorRequest.result?.value ?? null);
-					});
-					db.close();
-					return row;
-				});
-				break;
+				const row = await readProgressRow(page);
+				if (row !== null && row.currentPage === scrolledTo.page) {
+					stored = row;
+					break;
+				}
 			}
 			await wait(250);
 		}
-		if (stored === null) fail('scrolling did not write a readingProgress row');
+		if (stored === null) {
+			fail(
+				`scrolling to page ${scrolledTo.page} never wrote a progress row describing it: ` +
+					`${JSON.stringify(await readProgressRow(page))}`,
+			);
+		}
 		if (typeof stored.currentPage !== 'number' || stored.currentPage < 1) {
 			fail(`stored progress has no usable page: ${JSON.stringify(stored)}`);
 		}
@@ -822,6 +1035,16 @@ async function main() {
 		// the page with its ordinal.
 		await page.click('[data-testid="rm-add-bookmark"]');
 		await page.locator('[data-testid="rm-bookmark-title"]').waitFor({ state: 'visible' });
+		// The field has to be empty for this mark to be the unnamed one.
+		// A dialog that reopened still holding the previous title would
+		// store it again, and the assertion below would catch a reader's
+		// two marks silently sharing a name.
+		const fieldValue = await page.evaluate(
+			() => document.querySelector('[data-testid="rm-bookmark-title"]')?.value ?? null,
+		);
+		if (fieldValue !== '') {
+			fail(`a reopened add dialog came back holding "${fieldValue}" instead of an empty field`);
+		}
 		await page.click('[data-testid="rm-dialog-confirm"]');
 		for (let attempt = 0; attempt < 40; attempt++) {
 			marked = await readBookmarkRows(page);
@@ -832,8 +1055,16 @@ async function main() {
 			fail(`a second bookmark on the same page replaced the first: ${JSON.stringify(marked)}`);
 		}
 		if (marked[0].id === marked[1].id) fail('two bookmarks on one page share an id');
-		if (marked[1].title !== '') {
-			fail(`an unnamed mark stored a name: ${JSON.stringify(marked[1].title)}`);
+		// IndexedDB hands rows back in primary-key order and a bookmark
+		// id is a random UUID, so "the second row" means nothing here.
+		// The two marks are told apart by what they carry.
+		const titled = marked.filter((candidate) => candidate.title === BOOKMARK_TITLE);
+		const unnamed = marked.filter((candidate) => candidate.title === '');
+		if (titled.length !== 1 || unnamed.length !== 1) {
+			fail(
+				`expected one named and one unnamed mark, got ` +
+					`${JSON.stringify(marked.map((candidate) => candidate.title))}`,
+			);
 		}
 		const jumps = await page.locator('[data-testid="rm-bookmark-jump"]').allTextContents();
 		if (jumps.length !== 2 || jumps[0] === jumps[1]) {

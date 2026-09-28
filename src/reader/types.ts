@@ -113,6 +113,15 @@ export interface ReaderHandle<F extends DocumentFormat> {
 	 *  Returns `null` only if the anchor cannot be resolved at
 	 *  all (e.g. its page no longer exists in this source).
 	 *
+	 *  **`null` is not permission to delete the row.** It says this
+	 *  reader cannot resolve this anchor *against this source*, which
+	 *  is a fact about a file the reader may not even hold the whole
+	 *  of. A caller that reads it as "the annotation is gone" would
+	 *  delete a reader's highlight because they opened a shorter copy
+	 *  of the book, or a different file. Deleting persisted state is a
+	 *  user action; the only mutation a resolver may cause is the
+	 *  `updatedAnchor` write-back, and only when it is not `null`.
+	 *
 	 *  Format-specific display data is opaque (`unknown`) on
 	 *  `ResolvedAnchor.display`. Generic UI cannot read it; pass
 	 *  it back to the format-specific reader for painting. */
@@ -152,6 +161,63 @@ export interface ResolvedAnchor {
 	 *  for painting. `unknown` (not `any`) so the compiler
 	 *  forces an explicit cast / type guard at any read site. */
 	readonly display: unknown;
+	/**
+	 * The stored anchor, refreshed — or `null` when there is nothing to
+	 * write back.
+	 *
+	 * Recovery rebuilds the display half of an anchor from the source
+	 * (ADR-0007), and those rects are better than the ones in storage:
+	 * they were measured against the copy of the file in front of the
+	 * reader. Somebody has to persist them, and it cannot be the
+	 * reader: `src/reader/` does not import the storage layer, and a
+	 * reader that reached into IndexedDB would be a second, invisible
+	 * writer whose failures no screen could report.
+	 *
+	 * So recovery hands the refreshed anchor back and lets the caller
+	 * decide. `null` covers the two cases where writing would be wrong:
+	 *
+	 *   - `fresh` with rects that did not move — the stored anchor is
+	 *     already correct, and rewriting it would churn a row that is
+	 *     right. "Did not move" is a tolerance, not equality: the two
+	 *     measurements are floats from two sessions.
+	 *   - `stale` — ADR-0007 is explicit that a stale anchor's stored
+	 *     rects are *not* rewritten. They are the best available hint,
+	 *     and keeping the original lets the anchor recover if the
+	 *     change that broke it is undone.
+	 *
+	 * The caller persists it without reading the payload: this is the
+	 * "persist and route an `Anchor` opaquely" half of the boundary,
+	 * and an `Anchor<unknown>` on the way to a repository is exactly as
+	 * opaque as one on the way out of storage.
+	 */
+	readonly updatedAnchor: Anchor | null;
+}
+
+/**
+ * A highlight the page has painted, and the only way to take it back
+ * off.
+ *
+ * Returned rather than merely created because the caller has to be able
+ * to reconcile overlays against the rows they belong to, and every one
+ * of those needs an identity to do it:
+ *
+ *   - re-painting after a recovery or a zoom would otherwise stack a
+ *     second overlay over the first, and two translucent fills over the
+ *     same words is a visibly darker highlight;
+ *   - deleting a row needs to know which element to remove, and a
+ *     painter that keeps its own list cannot answer for a row the UI
+ *     added or the reader deleted in another tab;
+ *   - `Highlight.color` is a semantic name, so the colour is applied by
+ *     the UI — which means the UI has to be able to reach the element.
+ *
+ * So the element is handed out, and `remove()` is idempotent: a
+ * re-render that already replaced the page leaves the handle pointing at
+ * a detached node, and calling `remove()` on that is a no-op rather
+ * than an error.
+ */
+export interface PaintedAnchor {
+	readonly element: HTMLElement;
+	remove(): void;
 }
 
 /**
@@ -175,6 +241,54 @@ export interface PageHandle<F extends DocumentFormat> {
 	 *  multiple pages (cross-page selections are out of MVP per
 	 *  ADR-0007 §"Single page, MVP scope"). */
 	createAnchorFromSelection(selection: ReaderSelection): Promise<Anchor | null>;
+
+	/**
+	 * Paint a resolved anchor's highlight overlay into `target`.
+	 *
+	 * The whole `ResolvedAnchor` goes back, not just its `display`:
+	 * `display` is `unknown` to generic UI, and `freshness` is what
+	 * decides whether the overlay is drawn as a resolved highlight or
+	 * as the "this position is a guess" marker ADR-0007 asks for. The
+	 * page owns the conversion from the format's stored coordinates to
+	 * viewport rects, because it is the only thing that knows the
+	 * transform the page was rendered with — a generic UI reading
+	 * `display` would have to re-derive it and would get it wrong the
+	 * first time zoom or rotation changed.
+	 *
+	 * There is deliberately no `options` parameter, which revises an
+	 * earlier version of this contract. The only transform that puts a
+	 * highlight on its glyphs is the one the canvas in `target` was
+	 * actually drawn with, and only a completed render knows it.
+	 * Honouring options would mean re-deriving a transform, which is
+	 * the exact mistake the method exists to prevent. A caller that
+	 * wants a different transform re-renders the page and waits.
+	 *
+	 * `target` is the element the page was rendered into, and the
+	 * overlay is placed inside the page box that render created: inside
+	 * it, its coordinates are the canvas's coordinates and it inherits
+	 * whatever the caller set on the host. A target holding no
+	 * rendered page is a caller that passed the wrong element.
+	 *
+	 * Both of those are programming errors and reject. So does a page
+	 * with no completed render — including one whose re-render is still
+	 * in flight, where the target is being rebuilt and an overlay placed
+	 * now would either be wiped or converted through a transform that
+	 * no longer describes what is on screen. Data the page does not
+	 * recognise (`display` it cannot gate) is not a programming error
+	 * and paints nothing.
+	 *
+	 * `display` is gated separately from a persisted anchor's
+	 * `payload` — it is a different field on a different type, and
+	 * `isPdfAnchor` does not apply to it. See ADR-0004 §Two gates.
+	 *
+	 * Returns a handle to what was painted, so the caller can reconcile
+	 * overlays against rows, replace them, and take them off — or `null`
+	 * when the display data was not one this page recognises and nothing
+	 * was drawn. A caller that treats `null` as a handle is holding a
+	 * hole in its map; one that treats it as an error will fall over on
+	 * a row from a future version.
+	 */
+	paintResolvedAnchor(anchor: ResolvedAnchor, target: HTMLElement): Promise<PaintedAnchor | null>;
 }
 
 /** Render options. Format-specific readers map these to their

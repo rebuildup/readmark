@@ -22,6 +22,8 @@
 import type { PDFPageProxy, RenderTask } from 'pdfjs-dist';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { asPageIndex, type PageIndex } from '../../domain/reading-state.ts';
+import type { ResolvedAnchor } from '../types.ts';
+import type { PdfRect } from './anchor.ts';
 import type { ViewportLike } from './pdf-coords.ts';
 import { PDF_PAGE_CLASS, PdfPageHandle } from './pdf-page.ts';
 
@@ -395,5 +397,270 @@ describe('canvas context', () => {
 		} finally {
 			vi.restoreAllMocks();
 		}
+	});
+});
+
+describe('PdfPageHandle.paintResolvedAnchor', () => {
+	/** A resolved anchor for page 1, as recovery would hand it over. */
+	function resolved(
+		over: Partial<ResolvedAnchor> = {},
+		fragments: readonly PdfRect[] = [{ x: 100, y: 600, width: 200, height: 40 }],
+	): ResolvedAnchor {
+		return {
+			format: 'pdf',
+			page: PAGE_ONE,
+			freshness: 'fresh',
+			selectedText: 'the cat',
+			display: fragments,
+			updatedAnchor: null,
+			...over,
+		};
+	}
+
+	function target(): HTMLElement {
+		const element = document.createElement('div');
+		document.body.appendChild(element);
+		return element;
+	}
+
+	/** A page rendered into the element it will be painted into: the
+	 *  overlay has to land inside the box `render` created, so a test
+	 *  that paints into a fresh element is asserting the wrong contract.
+	 */
+	async function renderedPage(
+		proxy: PDFPageProxy,
+		options: { scale?: number } = {},
+	): Promise<{ page: PdfPageHandle; into: HTMLElement }> {
+		const page = new PdfPageHandle(PAGE_ONE, proxy);
+		const into = target();
+		await page.render(into, { scale: options.scale ?? 1 });
+		return { page, into };
+	}
+
+	it('hands back a handle so the caller can reconcile overlays against rows', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+
+		const painted = await page.paintResolvedAnchor(resolved(), into);
+
+		// The element is reachable so the UI can apply `Highlight.color` to
+		// it: the painter decides geometry and freshness, and the palette
+		// belongs to the theme.
+		expect(painted?.element).not.toBeNull();
+		painted?.element.setAttribute('data-highlight-color', 'yellow');
+		expect(painted?.element.getAttribute('data-highlight-color')).toBe('yellow');
+
+		// A re-paint after a recovery or a zoom would otherwise stack a
+		// second overlay over the first, and two translucent fills over the
+		// same words is a visibly darker highlight.
+		const repainted = await page.paintResolvedAnchor(resolved(), into);
+		expect(into.querySelectorAll('.rm-highlight').length).toBe(2);
+		repainted?.remove();
+		expect(into.querySelectorAll('.rm-highlight').length).toBe(1);
+	});
+
+	it('removes idempotently, including after the page was rebuilt', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+		const painted = await page.paintResolvedAnchor(resolved(), into);
+
+		painted?.remove();
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+		// A re-render replaces the page's children, so the handle is left
+		// pointing at a detached node. Removing that is a no-op, not an
+		// error — the UI will not know which of the two happened.
+		painted?.remove();
+		await page.render(into, { scale: 2 });
+		painted?.remove();
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+	});
+
+	it('answers null when it drew nothing', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+
+		// A caller that treats `null` as a handle is holding a hole in its
+		// map; one that treats it as an error will fall over on a row from a
+		// future version. It has to be a value that means "no overlay".
+		expect(await page.paintResolvedAnchor(resolved({}, 'nope' as never), into)).toBeNull();
+		expect(await page.paintResolvedAnchor(resolved({ format: 'epub' as never }), into)).toBeNull();
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+	});
+
+	it('draws one positioned element per fragment, in CSS pixels', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+
+		await page.paintResolvedAnchor(resolved(), into);
+
+		const layer = into.querySelector('.rm-highlight');
+		expect(layer).not.toBeNull();
+		const fragments = into.querySelectorAll('.rm-highlight__fragment');
+		expect(fragments.length).toBe(1);
+		// Scale 1, y flipped: user-space y 600..640 is viewport y 160..200.
+		const style = (fragments[0] as HTMLElement).style;
+		expect(style.left).toBe('100px');
+		expect(style.top).toBe('160px');
+		expect(style.width).toBe('200px');
+		expect(style.height).toBe('40px');
+	});
+
+	it('keeps the highlight out of the way of a selection', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+
+		await page.paintResolvedAnchor(resolved(), into);
+
+		// A highlight is under the text, never over it. Without this a drag
+		// across a highlighted sentence is a click on the highlight, and
+		// the reader cannot select text they just highlighted.
+		expect((into.querySelector('.rm-highlight') as HTMLElement).style.pointerEvents).toBe('none');
+	});
+
+	it('marks freshness, because the UI has to be able to show it', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+
+		await page.paintResolvedAnchor(resolved({ freshness: 'fresh' }), into);
+		await page.paintResolvedAnchor(resolved({ freshness: 'stale' }), into);
+
+		const layers = into.querySelectorAll('.rm-highlight');
+		expect(layers[0]?.getAttribute('data-freshness')).toBe('fresh');
+		expect(layers[1]?.getAttribute('data-freshness')).toBe('stale');
+	});
+
+	it('reuses the viewport the page was actually rendered with', async () => {
+		// A highlight converted through a re-derived viewport is a
+		// highlight beside its text. The page is rendered at scale 2 and
+		// painted with no options: the fragments must come out doubled.
+		const { page: scaled, into } = await renderedPage(makeProxy().proxy, { scale: 2 });
+
+		await scaled.paintResolvedAnchor(resolved(), into);
+
+		const style = (into.querySelector('.rm-highlight__fragment') as HTMLElement).style;
+		expect(style.width).toBe('400px');
+		expect(style.top).toBe('320px');
+		expect(scaled.index).toBe(1);
+	});
+
+	it('declines display data it does not recognise', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+
+		// `display` came out of storage. A row from a version this build
+		// has never heard of paints as nothing rather than taking the
+		// reader down.
+		await page.paintResolvedAnchor(resolved({}, 'rects' as never), into);
+		await page.paintResolvedAnchor(resolved({}, []), into);
+		await page.paintResolvedAnchor(resolved({}, [{ x: 1, y: 2, width: 3 }] as never), into);
+		// A fragment with no area is a hairline nobody asked for, and the
+		// measurement never produces one — so it is a foreign shape, and a
+		// foreign shape rejects the whole list rather than one fragment of it.
+		await page.paintResolvedAnchor(resolved({}, [{ x: 1, y: 2, width: 0, height: 5 }]), into);
+		await page.paintResolvedAnchor(resolved({}, [{ x: 1, y: 2, width: 5, height: -1 }]), into);
+
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+	});
+
+	it('declines an anchor for a format it does not paint', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+
+		await page.paintResolvedAnchor(resolved({ format: 'epub' as never }), into);
+
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+	});
+
+	it('rejects an anchor belonging to another page', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+
+		// A caller that lost track of which page it was talking to. That is
+		// a bug in the call, not a fact about the document, and painting it
+		// here would put a highlight on the wrong page.
+		await expect(
+			page.paintResolvedAnchor(resolved({ page: asPageIndex(7) }), into),
+		).rejects.toThrow(/page 7/);
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+	});
+
+	it('rejects before the page has finished rendering', async () => {
+		const page = new PdfPageHandle(PAGE_ONE, makeProxy().proxy);
+		const into = target();
+
+		// There is no transform to convert through, and inventing one
+		// would place every fragment in the wrong place while looking like
+		// it worked. The contract says this is a caller bug, so it throws.
+		await expect(page.paintResolvedAnchor(resolved(), into)).rejects.toThrow(/finished rendering/);
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+	});
+
+	it('rejects while a re-render is in flight, rather than using the old transform', async () => {
+		// The transform is dropped when a render *starts*, because the
+		// target is mid-rebuild: converting through the previous viewport
+		// would place fragments against a canvas about to be replaced, and
+		// an overlay appended now would be wiped by `replaceChildren`.
+		const slow = makeProxy({ autoResolve: false });
+		const page = new PdfPageHandle(PAGE_ONE, slow.proxy);
+		const into = target();
+		const rendering = page.render(into, { scale: 2 });
+
+		await expect(page.paintResolvedAnchor(resolved(), into)).rejects.toThrow(/finished rendering/);
+		slow.renders[0]?.resolve();
+		await rendering;
+		// Once it has completed, the page paints through the new transform.
+		await page.paintResolvedAnchor(resolved(), into);
+		const style = (into.querySelector('.rm-highlight__fragment') as HTMLElement).style;
+		expect(style.width).toBe('400px');
+	});
+
+	it('rejects an element this page was not rendered into', async () => {
+		const { page } = await renderedPage(makeProxy().proxy);
+
+		// The overlay has to land inside the box `render` created, or it is
+		// positioned in a different coordinate system and sits outside the
+		// tokens the caller set on the host.
+		await expect(page.paintResolvedAnchor(resolved(), target())).rejects.toThrow(
+			/was not rendered into/,
+		);
+	});
+
+	it('rejects a host that another page handle rendered', async () => {
+		// Every rendered page contains a `.rm-page`, so "the target holds a
+		// page box" is not evidence of anything. This is the check that
+		// stops one page's fragments being laid over another's canvas and
+		// converted through an unrelated transform.
+		const { page, into } = await renderedPage(makeProxy().proxy);
+		const other = await renderedPage(makeProxy().proxy, { scale: 2 });
+
+		await expect(page.paintResolvedAnchor(resolved(), other.into)).rejects.toThrow(
+			/was not rendered into/,
+		);
+		// Its own host still works, and the two handles are independent.
+		await page.paintResolvedAnchor(resolved(), into);
+		expect(into.querySelector('.rm-highlight')).not.toBeNull();
+		expect(other.into.querySelector('.rm-highlight')).toBeNull();
+	});
+
+	it('lets a colour set on the host reach the overlay, and only that way', async () => {
+		// `Highlight.color` is a semantic name on a generic domain type.
+		// The UI sets it on the host it owns; the custom property inherits
+		// down to the overlay inside the box, and the painter emits neither
+		// a colour nor a colour hook. An unlabelled host leaves the overlay
+		// transparent, which is the painter declining to choose rather than
+		// choosing a default.
+		const { page, into } = await renderedPage(makeProxy().proxy);
+		into.setAttribute('data-highlight-color', 'yellow');
+
+		await page.paintResolvedAnchor(resolved(), into);
+
+		const host = into as HTMLElement;
+		expect(host.getAttribute('data-highlight-color')).toBe('yellow');
+		const box = into.querySelector('.rm-page');
+		// The box is created by the reader, not by the UI, and the painter
+		// writes neither an attribute nor a colour into it.
+		expect(box?.hasAttribute('data-highlight-color')).toBe(false);
+		expect(box?.querySelector('.rm-highlight__fragment')).not.toBeNull();
+	});
+
+	it('places the overlay inside the page box, not beside it', async () => {
+		const { page, into } = await renderedPage(makeProxy().proxy);
+
+		await page.paintResolvedAnchor(resolved(), into);
+
+		const box = into.querySelector('.rm-page');
+		expect(box?.querySelector('.rm-highlight')).not.toBeNull();
+		expect(into.querySelector(':scope > .rm-highlight')).toBeNull();
 	});
 });

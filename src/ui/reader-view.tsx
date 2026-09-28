@@ -34,11 +34,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { DocumentId, SourceFingerprint } from '../domain/document.ts';
-import type { Bookmark, PageIndex } from '../domain/reading-state.ts';
+import type { Bookmark, Highlight, PageIndex } from '../domain/reading-state.ts';
 import { nextRotation, PDF_PAGE_CLASS, viewportSize } from '../reader/pdf/index.ts';
 import { currentPositionFrom, type PageExtent, type ScrollPosition } from '../reader/position.ts';
-import type { ReaderHandle, RenderOptions } from '../reader/types.ts';
+import type {
+	PaintedAnchor,
+	ReaderHandle,
+	RenderOptions,
+	ResolvedAnchor,
+} from '../reader/types.ts';
 import { addBookmark, deleteBookmark, listBookmarks } from '../storage/bookmarks-repo.ts';
+import { listHighlights, replaceHighlightAnchor } from '../storage/highlights-repo.ts';
 import { saveReadingPosition } from '../storage/reading-state-repo.ts';
 import { useUiStore } from '../stores/ui-store.ts';
 import { AddBookmarkDialog, BookmarkDeleteDialog, BookmarksPanel } from './bookmarks-panel.tsx';
@@ -139,17 +145,112 @@ interface PageFootprint {
 	readonly height: number;
 }
 
+/** The colour names this build knows how to paint. A stored row
+ *  carries a name; the palette that gives it a colour is the theme's
+ *  business, so the only narrowing that happens here is "is this a
+ *  name we know", and anything else falls back rather than being drawn
+ *  as an arbitrary colour. */
+const HIGHLIGHT_COLOR_TOKENS = ['yellow'] as const;
+type HighlightColorToken = (typeof HIGHLIGHT_COLOR_TOKENS)[number];
+const HIGHLIGHT_COLOR_FALLBACK: HighlightColorToken = 'yellow';
+
+/** A stored colour name to a token this build paints. */
+function highlightColorToken(color: string): HighlightColorToken {
+	const known: readonly string[] = HIGHLIGHT_COLOR_TOKENS;
+	return known.includes(color) ? (color as HighlightColorToken) : HIGHLIGHT_COLOR_FALLBACK;
+}
+
+/**
+ * One stored highlight and what resolving it produced.
+ *
+ * The four states are separate types rather than a flag because each
+ * one means a different thing to the reader, and collapsing them is how
+ * "this reader could not resolve it" turns into "this highlight is
+ * gone" — which is a reader losing work they did on purpose.
+ */
+type HighlightState =
+	/** Resolved, and paintable at the page it says it is on. */
+	| { readonly kind: 'paintable'; readonly resolved: ResolvedAnchor }
+	/** The reader cannot resolve this anchor against *this* source. The
+	 *  row stays: that is a fact about the file, not about whether the
+	 *  highlight exists. Nothing is deleted and no overlay is drawn. */
+	| { readonly kind: 'unresolved' }
+	/** The row's page and the resolved page disagree, which is
+	 *  detectable without reading the payload and is an integrity
+	 *  failure rather than a rendering one. Excluded from painting and
+	 *  from the write-back; the row is left exactly as it is stored. */
+	| { readonly kind: 'mismatch' }
+	/** The write-back reported the row is no longer there — another tab,
+	 *  or the reader themselves. Not painted: a stale list snapshot must
+	 *  not put a highlight back on screen that the repository knows is
+	 *  gone. */
+	| { readonly kind: 'vanished' };
+
+/** A highlight the reader has, and where it stands. */
+interface HighlightRow {
+	readonly row: Highlight;
+	readonly state: HighlightState;
+}
+
+/** A shared empty list, so a page with no highlights keeps the same
+ *  prop identity across re-renders. */
+const NO_HIGHLIGHTS: readonly HighlightRow[] = [];
+
+/** The paintable rows per page, in one pass.
+ *
+ *  Grouped rather than filtered per page view, and memoised by the
+ *  caller, because a fresh array per render is a fresh *identity* per
+ *  render — and a page view's paint effect depends on its rows. A new
+ *  identity re-runs that effect on every commit of the reader, which is
+ *  how a paint ended up racing a render.
+ */
+function highlightsByPage(
+	rows: readonly HighlightRow[],
+): ReadonlyMap<PageIndex, readonly HighlightRow[]> {
+	const byPage = new Map<PageIndex, HighlightRow[]>();
+	for (const row of rows) {
+		if (row.state.kind !== 'paintable') continue;
+		const page = row.state.resolved.page;
+		const existing = byPage.get(page);
+		if (existing === undefined) byPage.set(page, [row]);
+		else existing.push(row);
+	}
+	return byPage;
+}
+
 interface PdfPageViewProps {
 	readonly handle: ReaderHandle<'pdf'>;
 	readonly index: PageIndex;
 	readonly options: RenderOptions;
 	/** Reserved size until this page has been rendered for real. */
 	readonly reserved: PageFootprint;
+	/** The paintable highlights for this page. Empty for a page nobody
+	 *  highlighted; the render effect does not care either way. */
+	readonly highlights: readonly HighlightRow[];
 	readonly onMeasured: (index: PageIndex, footprint: PageFootprint) => void;
 	readonly onError: (error: unknown) => void;
 }
 
-function PdfPageView({ handle, index, options, reserved, onMeasured, onError }: PdfPageViewProps) {
+/** What this view has painted for one row, and what it would take to
+ *  leave it alone. */
+interface PaintEntry {
+	readonly resolved: ResolvedAnchor;
+	/** The render the overlay was positioned against. A different one
+	 *  means the canvas underneath is different, so the overlay is too. */
+	readonly epoch: number;
+	readonly token: HighlightColorToken;
+	readonly painted: PaintedAnchor;
+}
+
+function PdfPageView({
+	handle,
+	index,
+	options,
+	reserved,
+	highlights,
+	onMeasured,
+	onError,
+}: PdfPageViewProps) {
 	const hostRef = useRef<HTMLDivElement | null>(null);
 	// Latched: once a page is materialized it stays rendered, so
 	// scrolling back up re-attaches existing pixels. Page 1 starts
@@ -179,6 +280,27 @@ function PdfPageView({ handle, index, options, reserved, onMeasured, onError }: 
 		return () => observer.disconnect();
 	}, [materialized]);
 
+	// Bumped by every render that completed, and the only thing the paint
+	// effect watches for "the canvas underneath has changed". A highlight
+	// appearing, changing or being deleted does not bump it: those are
+	// reasons to reconcile overlays, never to redraw a page.
+	const [renderEpoch, setRenderEpoch] = useState(0);
+	// Whether a render is in flight, set synchronously when the effect
+	// below starts and cleared when it settles.
+	//
+	// This is the gate that keeps paint and render in order. A zoom
+	// changes `options`, and in one React commit both effects re-run: the
+	// render effect starts a render — which drops the page handle's
+	// remembered transform immediately, since the target is about to be
+	// rebuilt — and the paint effect would then ask that same handle to
+	// paint against a transform it no longer has. It answered that with a
+	// programming error, so an ordinary zoom could raise a render alert.
+	//
+	// A ref rather than state because it has to be true *before* the paint
+	// effect runs, and re-running the paint effect is not the answer: the
+	// completed render bumps the epoch, which brings it back for a repaint.
+	const renderingRef = useRef(false);
+
 	useEffect(() => {
 		if (!materialized) return;
 		const host = hostRef.current;
@@ -187,6 +309,9 @@ function PdfPageView({ handle, index, options, reserved, onMeasured, onError }: 
 		// counter); `cancelled` only stops this component from reading
 		// the DOM of a page it no longer owns.
 		let cancelled = false;
+		// Before the async body, so the gate is closed by the time the
+		// paint effect below runs in this same commit.
+		renderingRef.current = true;
 		void (async () => {
 			try {
 				const page = await handle.page(index);
@@ -198,14 +323,105 @@ function PdfPageView({ handle, index, options, reserved, onMeasured, onError }: 
 					width: rendered.offsetWidth || Number.parseFloat(rendered.style.width) || 0,
 					height: rendered.offsetHeight || Number.parseFloat(rendered.style.height) || 0,
 				});
+				setRenderEpoch((previous) => previous + 1);
 			} catch (error: unknown) {
 				if (!cancelled) onError(error);
+			} finally {
+				// Opened again by the completed render's epoch bump, which
+				// is what brings the paint effect back for a repaint.
+				if (!cancelled) renderingRef.current = false;
 			}
 		})();
 		return () => {
 			cancelled = true;
 		};
 	}, [handle, index, materialized, onError, onMeasured, options]);
+
+	// What has been painted, and this view's ownership of it. A ref, not
+	// state: reconciliation is a side effect on the DOM, and putting the
+	// map in state would redraw the page on every reconcile.
+	const paintedRef = useRef(new Map<string, PaintEntry>());
+	// Painting is async, so a run can be superseded mid-flight by a zoom,
+	// a delete, or an unmount. The generation guard is what keeps a stale
+	// run from committing handles it made after losing its turn.
+	const paintRunRef = useRef(0);
+
+	useEffect(() => {
+		if (!materialized || renderEpoch === 0) return;
+		// A render in flight means the target is being rebuilt and the
+		// page handle has no transform to convert through. The completed
+		// render bumps the epoch, which re-runs this effect; skipping here
+		// is what keeps an ordinary zoom from asking a page to paint
+		// against a canvas that does not exist yet.
+		if (renderingRef.current) return;
+		const host = hostRef.current;
+		if (host === null) return;
+		const painted = paintedRef.current;
+		const run = ++paintRunRef.current;
+
+		void (async () => {
+			const page = await handle.page(index);
+			if (run !== paintRunRef.current) return;
+			for (const row of highlights) {
+				if (row.state.kind !== 'paintable') continue;
+				const resolved = row.state.resolved;
+				const token = highlightColorToken(row.row.color);
+				const existing = painted.get(row.row.id);
+				// Nothing to do: the same resolved anchor against the same
+				// render is the same overlay. Repainting it would stack a
+				// second translucent fill over the first, which reads as a
+				// darker highlight rather than as work.
+				if (
+					existing !== undefined &&
+					existing.resolved === resolved &&
+					existing.epoch === renderEpoch &&
+					existing.token === token
+				) {
+					continue;
+				}
+				const result = await page.paintResolvedAnchor(resolved, host);
+				if (run !== paintRunRef.current) {
+					// Superseded while this row was being painted. The
+					// overlay exists in the DOM, so it has to go — leaving
+					// it would be a highlight nobody owns.
+					result?.remove();
+					return;
+				}
+				if (result === null) {
+					// The reader could not paint this one. Take down
+					// anything we drew for it earlier rather than leaving
+					// a stale overlay beside the truth.
+					existing?.painted.remove();
+					painted.delete(row.row.id);
+					continue;
+				}
+				// The colour goes on this overlay and not on the page
+				// host, so two highlights on one page can differ.
+				result.element.dataset.highlightColor = token;
+				existing?.painted.remove();
+				painted.set(row.row.id, { resolved, epoch: renderEpoch, token, painted: result });
+			}
+			// Whatever is left is a row that disappeared. The handle makes
+			// this safe even if a re-render already detached the element.
+			for (const [id, entry] of painted) {
+				if (highlights.some((row) => row.row.id === id)) continue;
+				entry.painted.remove();
+				painted.delete(id);
+			}
+		})().catch((error: unknown) => {
+			if (run === paintRunRef.current) onError(error);
+		});
+	}, [handle, highlights, index, materialized, onError, renderEpoch]);
+
+	// Every overlay this view made goes away with it.
+	useEffect(
+		() => () => {
+			paintRunRef.current++;
+			for (const entry of paintedRef.current.values()) entry.painted.remove();
+			paintedRef.current.clear();
+		},
+		[],
+	);
 
 	return (
 		<div
@@ -249,6 +465,7 @@ export function ReaderView({
 	const [renderError, setRenderError] = useState<string | null>(null);
 	const [currentPage, setCurrentPage] = useState<PageIndex | null>(null);
 	const [bookmarks, setBookmarks] = useState<readonly Bookmark[]>([]);
+	const [highlights, setHighlights] = useState<readonly HighlightRow[]>([]);
 	const [pendingAdd, setPendingAdd] = useState<{
 		readonly pageIndex: PageIndex;
 		readonly pageOffsetRatio: number;
@@ -514,6 +731,85 @@ export function ReaderView({
 		// biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the measured sizes, which is the condition the restore waits for
 	}, [footprints, initialPosition, pageCount]);
 
+	// Grouped once per resolution, not once per render, so each page view
+	// gets a stable prop identity.
+	const byPage = useMemo(() => highlightsByPage(highlights), [highlights]);
+
+	// Highlight resolution is a *source* lifecycle, not a render one.
+	//
+	// Recovery answers "is this anchor still where it was in this file",
+	// and the file does not change when the reader zooms. Re-running it
+	// on every render would mean a quote search and a re-measurement per
+	// page per zoom step, for an answer that cannot have changed. So it
+	// runs once per open — keyed on the handle and the two identity keys —
+	// and painting, which *is* per viewport, is a separate effect in the
+	// page view.
+	useEffect(() => {
+		let cancelled = false;
+		void (async () => {
+			let stored: readonly Highlight[];
+			try {
+				stored = await listHighlights({ documentId, sourceFingerprint });
+			} catch (error: unknown) {
+				if (!cancelled) console.error('readmark: could not read highlights', error);
+				return;
+			}
+			if (cancelled) return;
+
+			const rows: HighlightRow[] = [];
+			for (const row of stored) {
+				if (cancelled) return;
+				// A malformed or unresolvable anchor resolves to null. The
+				// row is kept and simply not painted: this reader cannot
+				// resolve it against this source, which says nothing about
+				// whether the highlight exists, and deleting it would throw
+				// away a reader's work over a file they may not have the
+				// whole of.
+				const resolved = await handle.resolveAnchor(row.anchor).catch((error: unknown) => {
+					console.error('readmark: could not resolve a highlight anchor', error);
+					return null;
+				});
+				if (resolved === null) {
+					rows.push({ row, state: { kind: 'unresolved' } });
+					continue;
+				}
+				// Both are generic fields, so this is detectable without
+				// reading the payload. Disagreement means the row and the
+				// resolution are about different places, which is an
+				// integrity failure: nothing is painted, nothing is
+				// written, and the stored row is left as it is.
+				if (resolved.page !== row.pageIndex) {
+					console.error('readmark: highlight page mismatch', {
+						id: row.id,
+						storedPage: row.pageIndex,
+						resolvedPage: resolved.page,
+					});
+					rows.push({ row, state: { kind: 'mismatch' } });
+					continue;
+				}
+				if (resolved.updatedAnchor !== null) {
+					const wasStored = await replaceHighlightAnchor(row.id, resolved.updatedAnchor);
+					// The write-back is the only persistence this flow
+					// causes, and its boolean is why it is safe: false
+					// means the repository knows the row is gone — another
+					// tab, or the reader themselves. Painting it anyway
+					// would resurrect a deleted highlight on screen from a
+					// list that is already out of date.
+					if (!wasStored) {
+						rows.push({ row, state: { kind: 'vanished' } });
+						continue;
+					}
+				}
+				rows.push({ row, state: { kind: 'paintable', resolved } });
+			}
+			if (cancelled) return;
+			setHighlights(rows);
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [documentId, handle, sourceFingerprint]);
+
 	// The bookmark list is read once per open and reconciled locally
 	// after every add or delete, so opening the panel is instant and a
 	// second tab's changes are picked up the next time the document is
@@ -743,6 +1039,7 @@ export function ReaderView({
 								index={index}
 								options={options}
 								reserved={footprint ?? provisional}
+								highlights={byPage.get(index) ?? NO_HIGHLIGHTS}
 								onMeasured={handleMeasured}
 								onError={handleError}
 							/>

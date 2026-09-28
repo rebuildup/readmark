@@ -95,7 +95,7 @@ The two types are NOT interchangeable:
 ```ts
 interface PdfAnchor {
   readonly page: PageIndex;                // 1-based
-  readonly rects: readonly PdfRect[];      // PDF user-space, one per visual line
+  readonly rects: readonly PdfRect[];      // PDF user-space, one or more fragments per selection
   readonly quote: TextQuote;               // exact + prefix + suffix context
 }
 
@@ -120,8 +120,9 @@ For PDF, both are stored, and they have distinct roles:
   font substitution, and renderer changes — none of these alter
   the underlying glyphs in the PDF's text layer.
 - **`rects` is the display position.** Drawn over the rendered
-  page. One entry per visual line of the selection (multi-rect
-  for cross-line selections).
+  page. **One or more visual fragments covering the selection** —
+  see "What a rect is" below for why this is not "one rect per
+  visual line".
 
 Rects alone are not a sufficient canonical key. They break under
 any layout change that re-flows the page (uncommon for PDFs but
@@ -173,16 +174,97 @@ adding rotation-specific code to the anchor recovery algorithm.
 
 ### Recovery algorithm
 
+### What a rect is
+
+`rects` is a list of **visual fragments covering the selection**,
+in raw PDF user-space. Earlier drafts of this ADR said "one rect per
+visual line of the selection", and that wording is withdrawn: it
+promised a merge the geometry cannot honestly perform.
+
+A PDF text layer splits a visual line into runs for reasons that have
+nothing to do with the reader — a font change, a kerning pair, a
+marked-content boundary. The runs on one baseline are therefore not
+one rectangle, and forcing them into one means either a rect that
+covers the gap between them or a rect built from whichever run had the
+widest box. Both are wrong in a way the reader can see: a highlight
+with a notch in it, or one that runs past the text.
+
+So the contract is the weaker, achievable one:
+
+- A fragment is an axis-aligned rect that some contiguous piece of
+  the selection occupies.
+- The fragments together **cover** the selection. They need not be
+  disjoint, minimal, or one-per-line.
+- The number of fragments is not part of the contract. A one-word
+  selection usually yields one; a selection crossing three lines
+  yields three or more; a line split into five runs may yield five
+  fragments for that one line.
+
+This keeps the property the display half actually needs — the
+fragments are where to paint — and drops the one it cannot deliver
+without lying about geometry. Readers paint the fragments as given.
+
+### Where fragment geometry comes from
+
+Not from the text layer's stored rectangles. `PageTextItem` exposes a
+run's bounding box and its text, with no per-character geometry, and
+a run's box is the box of the *whole run*: recovering the word `cat`
+from a run holding `alpha beta gamma` and painting the run's rect
+highlights three words to mark one.
+
+A proportional split along the run's width is the available
+approximation and it is **not used**: it is visibly wrong for a
+justified line or a run of mixed-width glyphs, and a highlight that
+drifts off its text is worse than one that is coarse.
+
+Geometry therefore comes from the one source that has already solved
+this problem: **the text layer DOM, measured by the browser.**
+`Range.getClientRects()` over the characters of a match returns
+exactly the visual fragments those characters occupy, at whatever size
+and rotation the layer was built at. Those client rects are converted
+back to raw user-space with the inverse of the same viewport transform
+the layer was built with, so the stored rects are transform-free
+again and survive a later zoom or rotation.
+
+Two consequences worth stating:
+
+- **Recovery measures.** It builds the text layer offscreen at scale 1
+  and rotation 0, measures the matched characters, and converts. It
+  does not need the page to be on screen, and the conversion does not
+  depend on what the reader is currently looking at.
+- **A measurement that yields nothing is a failure, not an empty
+  anchor.** No rects means the path in the recovery algorithm above
+  takes its second branch: stored rects, `stale`, visible to the
+  reader.
+
+The same helper serves `createAnchorFromSelection`, so a mark made
+from a live selection and a mark recovered from the same text get
+their rects by the same route. Only the quote differs in origin, and
+for the same reason: the quote is built from the text layer's own
+items and offsets, not from `Selection.toString()`, which synthesises
+whitespace and line breaks from layout and would not agree with the
+layer it is searched against.
+
 On open, for each stored PDF anchor:
 
 1. **Try the text quote.** Search the page's text layer for
    `prefix + exact + suffix`. If found:
    - Compute new rects from the matched glyph geometry (PDF
-     user-space, one rect per visual line).
+     user-space; see "What a rect is").
+   - If that geometry step **fails**, stop here and take path 2. A
+     quote that matched but whose rects could not be rebuilt is
+     not evidence that the anchor is still where it was, so it is
+     `stale` with the stored rects — not `fresh` with no rects.
    - Update the stored anchor with the new rects in place. The
-     quote is left unchanged.
+     quote is left unchanged. **Mechanism:** the reader hands the
+     refreshed anchor back as `ResolvedAnchor.updatedAnchor` and the
+     caller persists it — the reader does not write to storage, and the
+     caller does not read the payload. See ADR-0004 §"Where the
+     refreshed anchor is written". It is `null` when the new rects
+     did not move, so an already-correct row is not rewritten.
    - Display the new rects. The anchor is considered fresh.
-2. **If the text quote fails (exact match not found):**
+2. **If the text quote fails (exact match not found), or the
+   matched quote's geometry could not be rebuilt:**
    - Use the stored rects as-is for display. They may now be
      off (the text was OCR-corrected, the PDF was re-encoded,
      a glyph subset was substituted), but they are still the

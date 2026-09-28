@@ -33,11 +33,15 @@
 
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 
-import type { Anchor } from '../../domain/annotation/index.ts';
+import { type Anchor, isAnchorOfFormat } from '../../domain/annotation/index.ts';
 import type { PageIndex } from '../../domain/reading-state.ts';
 import type { Reader, ReaderHandle, ReaderSource, ResolvedAnchor } from '../types.ts';
+import { isPdfAnchor } from './anchor.ts';
+import { fragmentsForRuns } from './anchor-geometry.ts';
+import { findQuote, freshAnchor, staleAnchor } from './anchor-recovery.ts';
 import { loadPdfDocument } from './pdf-document.ts';
 import { PdfPageHandle } from './pdf-page.ts';
+import { extractPageTextLayer } from './pdf-text-layer.ts';
 
 /** Wrap pdf.js's three "not a usable PDF" exceptions in the reader's
  *  own error, so callers above `src/reader/pdf/` switch on
@@ -91,9 +95,78 @@ export class PdfReaderHandle implements ReaderHandle<'pdf'> {
 		return handle;
 	}
 
-	/** #7 owns quote → rects recovery. See the file header. */
-	async resolveAnchor(_anchor: Anchor): Promise<ResolvedAnchor | null> {
-		return null;
+	/**
+	 * ADR-0007's recovery, wired up.
+	 *
+	 * The shape of the answer is the whole design, so it is worth
+	 * stating before the code: there are three outcomes and they are not
+	 * variations of each other.
+	 *
+	 *   - **`null`** — the anchor is not ours or not usable: a payload
+	 *     that fails the guards, or a page this file does not have. A
+	 *     re-encoded document can be shorter than the one the anchor was
+	 *     written against, and "page 40 of a 12-page file" is not a
+	 *     stale highlight, it is an anchor that describes nothing. There
+	 *     is no rects to fall back on either, so `null` is the honest
+	 *     answer and the caller drops the row.
+	 *   - **`stale`** — the quote is not where it was, or its geometry
+	 *     could not be rebuilt. The stored rects are the best available
+	 *     hint and are returned as `display` unchanged, and
+	 *     `updatedAnchor` is `null`: ADR-0007 refuses to rewrite a
+	 *     stale anchor, because the original is what lets it recover if
+	 *     the change that broke it is undone.
+	 *   - **`fresh`** — the quote matched and the fragments were
+	 *     measured. `display` is what was measured, not what was
+	 *     stored, because a measurement against this copy of the file
+	 *     beats a measurement against another one.
+	 *
+	 * The last two are decided by two different questions, and only
+	 * answering both is what makes a highlight trustworthy: "is the
+	 * text still here" is proven by the quote match, and "is it still
+	 * in the same place" is proven by the measurement. A match with a
+	 * failed measurement is `stale`, not fresh-with-nothing.
+	 */
+	async resolveAnchor(anchor: Anchor): Promise<ResolvedAnchor | null> {
+		// The same programming error as `page()`, and the same throw: a
+		// closed reader is a caller bug, not a recovery that missed. A
+		// recovery miss is a fact about the document and is answered with
+		// a value.
+		if (this.closed) {
+			throw new Error('readmark: reader handle is closed');
+		}
+		// Two guards, in this order, and the second one is not optional:
+		// `isAnchorOfFormat` only reads the discriminator, so narrowing
+		// through it alone would typecheck against a payload shape
+		// nothing has checked (ADR-0007 §Enforcement).
+		if (!isAnchorOfFormat(anchor, 'pdf') || !isPdfAnchor(anchor)) return null;
+		const payload = anchor.payload;
+
+		if (payload.page > this.document.numPages) return null;
+
+		const pdfPage = await this.document.getPage(payload.page);
+		// The handle may have been closed while the page was being
+		// parsed, exactly as in `page()`.
+		if (this.closed) {
+			pdfPage.cleanup();
+			throw new Error('readmark: reader handle is closed');
+		}
+		const layer = await extractPageTextLayer(pdfPage, payload.page);
+
+		// No text on the page at all: a scan, a page of figures, an empty
+		// page. `findQuote` would say no as well, and being explicit
+		// keeps the reason apart from "the text changed" — a page with no
+		// text layer can never resolve, however the reader opens it.
+		if (layer.items.length === 0) return staleAnchor(payload);
+
+		const match = findQuote(layer, payload.quote);
+		if (match === null) return staleAnchor(payload);
+		const fragments = await fragmentsForRuns(pdfPage, layer, match.runs);
+		// Matched but unmeasurable. The quote proves the text is still on
+		// the page; it does not prove the highlight is still over it, and
+		// a `fresh` answer with no rects would claim both.
+		if (fragments === null) return staleAnchor(payload);
+
+		return freshAnchor(payload, fragments);
 	}
 
 	/** Release the document, its pages and its worker transport.

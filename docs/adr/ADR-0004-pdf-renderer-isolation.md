@@ -190,6 +190,27 @@ export interface PageHandle<F extends DocumentFormat> {
   createAnchorFromSelection(
     selection: ReaderSelection,
   ): Promise<Anchor | null>;
+
+  /** Paint a resolved anchor's highlight overlay into `target`.
+   *  Reads `anchor.display` (opaque to generic UI) and converts it
+   *  through the transform of the last render that completed into
+   *  `target`. There is no options parameter: see §"What the painter
+   *  may refuse, and where it draws".
+   *
+   *  Returns a handle to what was painted, or null when the display was
+   *  not one this reader recognises and nothing was drawn. */
+  paintResolvedAnchor(
+    anchor: ResolvedAnchor,
+    target: HTMLElement,
+  ): Promise<PaintedAnchor | null>;
+}
+
+/** A painted highlight, and the only way to take it off. */
+export interface PaintedAnchor {
+  /** The overlay element. The UI applies `Highlight.color` to it. */
+  readonly element: HTMLElement;
+  /** Idempotent. Safe on a node a re-render already detached. */
+  remove(): void;
 }
 ```
 
@@ -278,6 +299,180 @@ wrong on two counts:
 
 The new contract reflects both corrections.
 
+### Where `ResolvedAnchor.display` goes
+
+`display` is `unknown`, so this is the one place the boundary is worth
+drawing down. The rule: **generic UI never reads `display`; it hands
+the whole `ResolvedAnchor` to the page that produced it.**
+
+```
+  selection (DOM)
+        │  PageHandle.createAnchorFromSelection(selection)
+        ▼
+  Anchor<unknown>                        ← persisted (IndexedDB)
+  { format: 'pdf', payload: PdfAnchor }
+        │  ReaderHandle.resolveAnchor(anchor)
+        │  → ADR-0007 recovery: quote search in the text layer,
+        │    rects refreshed from glyph geometry, or kept + stale
+        ▼
+  ResolvedAnchor                         ← in memory, per session
+  { format, page, freshness, selectedText,
+    display: PdfRect[], updatedAnchor }
+        │
+        │   generic UI reads: page, freshness, selectedText
+        │   generic UI must NOT read: display
+        ▼
+  PageHandle.paintResolvedAnchor(anchor, target)
+        │  anchor.format === 'pdf'   ← different gate from recovery
+        │  isPdfResolvedDisplay(display)  ← PDF-side, guards `display`
+        │  target must be the element this page was rendered into
+        │  PdfRect[] (raw user-space) + the last completed viewport
+        │    → pdf.js viewport transform
+        ▼
+  overlay inside the page box `render` created (viewport CSS px)
+
+  updatedAnchor                          ← only when it is not null
+        │   generic caller persists it, payload unread
+        ▼
+  storage (repositories own the write)
+```
+
+### What the painter may refuse, and where it draws
+
+`paintResolvedAnchor` draws inside the page box `render` created, not
+into whatever element it was handed. The canvas and the text layer are
+children of that box, so an overlay appended beside it would be
+positioned in a different coordinate system — and outside whatever the
+caller set on the host. The target is therefore part of the contract
+rather than a convenience: an element holding no rendered page is a
+caller that passed the wrong one.
+
+It converts through the transform of the last render that *completed*,
+and there is no parameter to override that. An earlier version of the
+contract took `RenderOptions` and re-derived a viewport from them; that
+is the exact mistake the method exists to prevent, because the transform
+that puts a highlight on its glyphs is the one the canvas was drawn
+with. The remembered render is also dropped when a render *starts*, so a
+paint during a re-render cannot convert through a transform that no
+longer describes what is on screen.
+
+**Ownership is by identity, not by structure.** "The target contains a
+`.rm-page`" is not evidence that this page painted it: every rendered
+page contains one, so a host another `PageHandle` painted would pass
+that check and this page's fragments would then be laid over someone
+else's canvas, converted through an unrelated transform. The handle
+therefore remembers the target element alongside the transform and
+compares identity, and draws into the page box it created rather than
+querying for one.
+
+Refusals are two kinds, and the difference is worth a stack trace:
+
+- **Programming errors reject** — an anchor for another page, a target
+  with no rendered page, no completed render.
+- **Unrecognised `display` is a no-op** — it came out of storage, and a
+  row from a version this build has not seen has to paint as nothing
+  rather than take the reader down.
+
+The painter decides geometry and freshness and nothing else. Colour is a
+semantic name on a generic domain type, resolved to a token by the UI's
+own stylesheet; a painter that chose a colour would freeze one theme's
+decision into persisted data. The UI applies it to the element the paint
+call hands back, which is also what makes that name reachable at all.
+
+**Paint returns a handle, because the caller has to reconcile.** A
+`Promise<void>` leaves the UI unable to say which overlay belongs to
+which row, and every one of those needs to: re-painting after a
+recovery or a zoom would stack a second overlay over the first, deleting
+a row has to know what to remove, and the colour needs an element to
+land on. The handle carries the element and an idempotent `remove()`,
+which is safe on a node a re-render already detached — a case the UI
+cannot distinguish from a live one, and must not have to.
+
+Two properties the diagram is asserting, not just describing:
+
+- **The narrowing happens on the format side.** `display` is read
+  through a format-specific validator inside `reader/pdf/`, never
+  by a cast in `src/ui/`. `unknown` is what forces that: a UI that
+  tried to read it would not typecheck.
+- **The transform is applied once, at paint time.** Stored rects are
+  raw user-space (ADR-0007), so a zoom or rotation change never
+  invalidates them; the page applies the transform of the render the
+  canvas in the target was actually drawn with. A generic UI that
+  positioned rects itself would have to re-derive that transform on
+  every zoom, and would diverge from the canvas the first time it did.
+
+`freshness` travels with the anchor for the same reason: whether an
+overlay is drawn as a resolved highlight or as the "this position is a
+guess" marker is a format decision about how the rects were derived,
+so the page needs it, not the UI.
+
+### Where the refreshed anchor is written
+
+Recovery rebuilds the display half of an anchor from the source, and
+the rebuilt rects are better than the ones in storage — they were
+measured against the copy of the file in front of the reader. ADR-0007
+assumes they are written back. That assumption needs a path, and this
+layer is the only place one can be added without breaking the
+isolation this ADR exists for:
+
+- **Not the reader.** `src/reader/` does not import the storage layer.
+  A reader that wrote to IndexedDB would be a second, invisible writer:
+  no screen would see its failures, and the same document opened in two
+  tabs would have two writers with no order between them.
+- **Not generic UI reading the payload.** The refreshed anchor is
+  `Anchor<unknown>` to anything outside `reader/<format>/`, and the
+  boundary rule is that payload is never read there.
+
+So `resolveAnchor` returns it on `ResolvedAnchor.updatedAnchor` and the
+caller decides what to do with it. `null` means *do not write*: either
+the anchor was fresh and its rects had not moved (the stored row is
+already right, and rewriting it churns a correct row — the comparison
+is a tolerance, because the two measurements are floats from two
+sessions), or it was stale, which ADR-0007 forbids rewriting. The
+distinction matters: a caller that cannot tell "nothing changed" from
+"stale, keep the old rects" will eventually write over the one hint a
+stale anchor has.
+
+Persisting it is the same operation as storing it in the first place —
+hand an `Anchor` to a repository, payload unread — so the opacity that
+protects the boundary on the way out of storage protects it on the way
+back in.
+
+**And that write-back is the only persistence a resolver may cause.**
+`resolveAnchor` answering `null` is not a deletion instruction: it says
+this reader cannot resolve this anchor against *this* source, which is a
+fact about a file the reader may not even hold the whole of. A caller
+that treats `null` as "the annotation is gone" would delete a reader's
+highlight because they opened a shorter copy of the book, or a
+different file. Deleting persisted state belongs to a user action; the
+resolver's whole vocabulary is `updatedAnchor`, and it only speaks when
+it is non-null.
+
+### Two gates, not one
+
+`isPdfAnchor` validates a **persisted `Anchor.payload`**. `display` is
+not that field — `ResolvedAnchor` has no `payload` at all — so the two
+`unknown`-typed values on either side of recovery are gated
+separately:
+
+| entry point | value being read | gate | lives in |
+| --- | --- | --- | --- |
+| `resolveAnchor(anchor)` | `Anchor.payload` | `isAnchorOfFormat(anchor, 'pdf') && isPdfAnchor(anchor)` | `domain/annotation/` + `reader/pdf/anchor.ts` |
+| `paintResolvedAnchor(anchor, target)` | `ResolvedAnchor.display` | `anchor.format === 'pdf' && isPdfResolvedDisplay(anchor.display)` | `reader/pdf/anchor.ts` |
+
+`isPdfResolvedDisplay(value): value is readonly PdfRect[]` is a
+separate validator because the thing it checks is a different thing:
+not "is this a well-formed anchor" but "is this a `PdfRect[]` that
+came out of our own recovery pass". It is deliberately not a reuse of
+`isPdfAnchor` — a single guard covering both would have to claim to
+validate a field that the other type does not have, which is the same
+kind of lie as the rejected single-guard
+`isAnchorOfFormat<PdfAnchor>` (ADR-0007 §Enforcement).
+
+Both gates return `false` rather than throwing on a shape they do not
+recognise, so a row written by a future version is painted as nothing
+instead of taking the reader down.
+
 ### Why `page()` is async
 
 PDF's `pdfDocument.getPage(n)` returns `Promise<PDFPageProxy>`.
@@ -310,9 +505,9 @@ Negative / explicit costs:
 
 - One more layer of indirection. Cheap.
 - `ResolvedAnchor.display` is opaque to generic UI (`unknown`).
-  Generic code that wants to render highlights must hand the
-  display data back to the format-specific reader (e.g.
-  `pageHandle.paint(target, resolved.display)`). The reader
+  Generic code that wants to render highlights must hand the whole
+  `ResolvedAnchor` back to the format-specific reader
+  (`pageHandle.paintResolvedAnchor(resolved, target)`). The reader
   control flow stays on the format-specific side.
 - `Promise<PageHandle<F>>` adds an `await` at every page access.
   Unavoidable: PDF's getPage is async.
@@ -337,7 +532,8 @@ Negative / explicit costs:
 
 Issue **#1** implements this contract. #2 (worker setup) and #11
 (reader screen) implement against it. #7 (text selection + highlight)
-implements `createAnchorFromSelection` and `paintAnchor` against it.
+implements `createAnchorFromSelection` and `paintResolvedAnchor`
+against it.
 
 ## References
 
