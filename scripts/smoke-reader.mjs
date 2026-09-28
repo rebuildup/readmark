@@ -28,12 +28,14 @@
  *      reopening the document restores the scroll position — asserted
  *      against IndexedDB, because a row can be missing while the list
  *      still looks right.
- *   9. Bookmarks: the toolbar writes a `bookmarks` row pinned to the
- *      page being read, the panel lists it, clicking it brings the
- *      reader back to that page from somewhere else in the document,
- *      and the confirmed delete removes the row. A row can be missing
- *      while the list still looks right, so each step is read back out
- *      of IndexedDB.
+ *   9. Bookmarks: the toolbar asks for a name and writes a `bookmarks`
+ *      row pinned to the page being read, the panel shows the name and
+ *      the page, clicking the row brings the reader back to that page
+ *      from somewhere else in the document — including after a real
+ *      wheel scroll, which must not disable later jumps — and the
+ *      confirmed delete removes the row. A row can be missing while the
+ *      list still looks right, so each step is read back out of
+ *      IndexedDB.
  *  10. The same reader on a 2× display: the backing store is scaled,
  *      and the painted ink covers the whole canvas rather than its
  *      top-left quarter.
@@ -77,6 +79,11 @@ const PAGE_HEIGHTS = [900, 560, 1180, 720];
  *  page's text layer; one that selects `125%` or `栞` selected the
  *  toolbar, which is a non-empty selection and a broken claim. */
 const PAGE_TEXT = 'readmark page';
+
+/** The name the reader types for the first mark. Japanese, because a
+ *  label in the reader's own script is the case that matters: it has to
+ *  survive the round trip through IndexedDB and the panel unchanged. */
+const BOOKMARK_TITLE = '第三の章 まとめ';
 
 /** A multi-page PDF with real text on every page, so the text layer
  *  has something to select. The words are unique per page so a
@@ -610,6 +617,15 @@ async function main() {
 		const atMark = await lookingAt(page);
 		if (atMark === null) fail('could not read the current position before bookmarking');
 		await page.click('[data-testid="rm-add-bookmark"]');
+		// The name is asked for at the moment the mark is made, and
+		// focus starts in the field: the reader's next move is to type.
+		await page.locator('[data-testid="rm-bookmark-title"]').waitFor({ state: 'visible' });
+		const titleFocused = await page.evaluate(
+			() => document.activeElement?.getAttribute('data-testid') === 'rm-bookmark-title',
+		);
+		if (!titleFocused) fail('the add dialog did not put focus in the name field');
+		await page.fill('[data-testid="rm-bookmark-title"]', BOOKMARK_TITLE);
+		await page.click('[data-testid="rm-dialog-confirm"]');
 		let marked = [];
 		for (let attempt = 0; attempt < 40; attempt++) {
 			marked = await readBookmarkRows(page);
@@ -638,8 +654,13 @@ async function main() {
 		if (typeof row.position?.pageOffsetRatio !== 'number') {
 			fail(`the bookmark row has no usable position: ${JSON.stringify(row.position)}`);
 		}
+		// The name the reader typed has to reach the row, or the field
+		// is decoration and two marks on one page are the same row.
+		if (row.title !== BOOKMARK_TITLE) {
+			fail(`the name was not stored: ${JSON.stringify(row.title)}`);
+		}
 		log(
-			`bookmark written: page ${row.pageIndex} at ` +
+			`bookmark written: "${row.title}" on page ${row.pageIndex} at ` +
 				`${Number(row.position.pageOffsetRatio).toFixed(3)} (anchor ${row.anchor}), ` +
 				`fingerprint ${row.sourceFingerprint.slice(0, 8)}…`,
 		);
@@ -696,11 +717,16 @@ async function main() {
 		await panel.waitFor({ state: 'visible' });
 		log('the panel toggle closes and reopens the panel');
 
-		// The panel lists it, with the page a human would say.
+		// The panel lists it under the reader's own words, with the
+		// page kept underneath: a name can describe a place without
+		// saying where it is.
 		const listLabel = await panel.locator('[data-testid="rm-bookmark-jump"]').first().textContent();
-		if (listLabel === null || !listLabel.includes(String(row.pageIndex))) {
+		if (listLabel === null || !listLabel.includes(BOOKMARK_TITLE)) {
+			fail(`the panel does not show the name it was given: ${JSON.stringify(listLabel)}`);
+		}
+		if (!listLabel.includes(`${row.pageIndex} ページ`)) {
 			fail(
-				`the panel does not name the bookmarked page ${row.pageIndex}: ` +
+				`the row named "${BOOKMARK_TITLE}" no longer says which page it is on: ` +
 					`${JSON.stringify(listLabel)}`,
 			);
 		}
@@ -711,6 +737,37 @@ async function main() {
 		const empty = await page.locator('[data-testid="rm-bookmarks-empty-panel"]').count();
 		if (empty !== 0) fail('the panel shows its empty state while a bookmark exists');
 		log(`panel lists the bookmark as "${listLabel.trim()}"`);
+
+		// The reader's own hand, on the wheel. A jump must survive one:
+		// a takeover that latched would leave every later jump aborted
+		// for the rest of the session, and a smoke that only ever jumped
+		// with a programmatic scroll would not have seen it. The wheel
+		// has to actually move the scroller, or the event never reached
+		// the reader at all and the claim is empty.
+		const beforeWheel = await lookingAt(page);
+		await page.locator('[data-testid="rm-reader-scroll"]').hover();
+		const scrollerBox = await page.locator('[data-testid="rm-reader-scroll"]').boundingBox();
+		if (scrollerBox === null) fail('the reader has no scroller box to wheel over');
+		await page.mouse.move(
+			scrollerBox.x + scrollerBox.width / 2,
+			scrollerBox.y + scrollerBox.height / 2,
+		);
+		await page.mouse.wheel(0, 600);
+		const wheeled = await page
+			.waitForFunction(
+				() => (document.querySelector('[data-testid="rm-reader-scroll"]')?.scrollTop ?? 0) > 40,
+				undefined,
+				{ timeout: 5_000 },
+			)
+			.then(() => true)
+			.catch(() => false);
+		if (!wheeled) {
+			fail(
+				`the wheel did not move the scroller from ${JSON.stringify(beforeWheel)}: the ` +
+					'event never reached the reader, so the takeover below proves nothing',
+			);
+		}
+		log('the reader scrolled with the wheel; the next jump has to work anyway');
 
 		// Jump back: leave the page entirely, then click the row. A jump
 		// that only works from where the bookmark was taken would prove
@@ -758,10 +815,14 @@ async function main() {
 				`${Number(row.position.pageOffsetRatio).toFixed(3)})`,
 		);
 
-		// A second bookmark on the same page must not overwrite the
-		// first: two marks on one page are two marks, and the panel
-		// has to be able to tell them apart.
+		// A second mark on the same page must not overwrite the first:
+		// two marks on one page are two marks. This one is left unnamed
+		// on purpose, so both label paths are in the list at once — the
+		// first under the reader's own words, the second falling back to
+		// the page with its ordinal.
 		await page.click('[data-testid="rm-add-bookmark"]');
+		await page.locator('[data-testid="rm-bookmark-title"]').waitFor({ state: 'visible' });
+		await page.click('[data-testid="rm-dialog-confirm"]');
 		for (let attempt = 0; attempt < 40; attempt++) {
 			marked = await readBookmarkRows(page);
 			if (marked.length === 2) break;
@@ -771,6 +832,9 @@ async function main() {
 			fail(`a second bookmark on the same page replaced the first: ${JSON.stringify(marked)}`);
 		}
 		if (marked[0].id === marked[1].id) fail('two bookmarks on one page share an id');
+		if (marked[1].title !== '') {
+			fail(`an unnamed mark stored a name: ${JSON.stringify(marked[1].title)}`);
+		}
 		const jumps = await page.locator('[data-testid="rm-bookmark-jump"]').allTextContents();
 		if (jumps.length !== 2 || jumps[0] === jumps[1]) {
 			fail(
