@@ -41,7 +41,7 @@ import type { ReaderHandle, RenderOptions } from '../reader/types.ts';
 import { addBookmark, deleteBookmark, listBookmarks } from '../storage/bookmarks-repo.ts';
 import { saveReadingPosition } from '../storage/reading-state-repo.ts';
 import { useUiStore } from '../stores/ui-store.ts';
-import { BookmarkDeleteDialog, BookmarksPanel } from './bookmarks-panel.tsx';
+import { AddBookmarkDialog, BookmarkDeleteDialog, BookmarksPanel } from './bookmarks-panel.tsx';
 import { Button } from './primitives/button.tsx';
 import { LibraryLink } from './primitives/library-link.tsx';
 import { jumpToPage } from './scroll-to-page.ts';
@@ -249,6 +249,10 @@ export function ReaderView({
 	const [renderError, setRenderError] = useState<string | null>(null);
 	const [currentPage, setCurrentPage] = useState<PageIndex | null>(null);
 	const [bookmarks, setBookmarks] = useState<readonly Bookmark[]>([]);
+	const [pendingAdd, setPendingAdd] = useState<{
+		readonly pageIndex: PageIndex;
+		readonly pageOffsetRatio: number;
+	} | null>(null);
 	const [pendingDelete, setPendingDelete] = useState<Bookmark | null>(null);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
 	const sidePanel = useUiStore((state) => state.sidePanel);
@@ -275,9 +279,15 @@ export function ReaderView({
 	// event (and does not in every test environment), and the header
 	// label has to agree with where the reader actually is.
 	const updatePositionRef = useRef<(() => void) | null>(null);
-	// Set when the reader drives the scroller themselves, so a restore
-	// still in progress steps aside instead of yanking them back.
-	const readerMovedRef = useRef(false);
+	// How many times the reader has taken over from the app: once per
+	// wheel, touch, drag or scroll key, and once per jump the reader
+	// asks for. A *count*, not a flag, and that is the whole point: an
+	// app-initiated scroll captures the number when it starts and gives
+	// up when it changes, so retiring one jump retires that jump only.
+	// A flag would latch for the rest of the session, and a reader who
+	// scrolled once could never use a bookmark again — every jump would
+	// see the flag still set and abort before it moved anything.
+	const takeoverCountRef = useRef(0);
 	// Read by the jump through a callback, so the effect that starts it
 	// does not have to be re-created on every measurement.
 	const footprintsRef = useRef(footprints);
@@ -398,7 +408,7 @@ export function ReaderView({
 		// programmatic scroll raises `scroll` but none of these, so the
 		// two are not confused.
 		const markReaderMoved = () => {
-			readerMovedRef.current = true;
+			takeoverCountRef.current += 1;
 			// The restore is over — the reader has taken over. Leaving
 			// the gate closed here would be worse than losing one write:
 			// the effect that closes it only runs when the page
@@ -467,13 +477,18 @@ export function ReaderView({
 		if (scroller === null) return;
 
 		let cancelled = false;
+		// What the reader had taken over by the time this restore began.
+		// Any later takeover — their own scroll, or a jump they asked
+		// for — retires this one, and the `.then` below still opens the
+		// save gate.
+		const takeover = takeoverCountRef.current;
 		void jumpToPage({
 			scroller,
 			pageIndex: initialPosition.currentPage,
 			position: initialPosition.position,
 			pageCount,
 			measuredHeight: (pageIndex) => footprintsRef.current.get(pageIndex)?.height,
-			shouldAbort: () => cancelled || readerMovedRef.current,
+			shouldAbort: () => cancelled || takeoverCountRef.current !== takeover,
 		}).then((outcome) => {
 			if (cancelled) return;
 			// Whatever the outcome — applied, coarse, out of range, or
@@ -519,36 +534,60 @@ export function ReaderView({
 		};
 	}, [documentId, sourceFingerprint]);
 
-	/** Mark the page the reader is on, at the offset they are at. */
-	const handleAddBookmark = useCallback(async () => {
+	/**
+	 * Open the add dialog for the page the reader is on.
+	 *
+	 * The position is read here, at the moment of the press, and the
+	 * dialog is modal, so the background cannot move while it is open:
+	 * the mark points at where the reader was when they asked for it.
+	 * The value is the one the progress row stores, computed the same
+	 * way, so jumping back to the mark lands where they actually were.
+	 */
+	const handleRequestAdd = useCallback(() => {
 		const scroller = scrollRef.current;
 		if (scroller === null) return;
-		// Read at the moment of the click rather than from the last
-		// scroll event: pages finish measuring in between, and a mark
-		// should point at where the reader is now. It is the position
-		// the progress row stores, computed the same way, so jumping
-		// back to the mark lands where the reader actually was.
 		const position = readPosition(scroller);
 		if (position === null) return;
-		try {
-			const added = await addBookmark({
-				documentId,
-				sourceFingerprint,
-				pageIndex: position.pageIndex,
-				anchor: null,
-				position: { pageOffsetRatio: position.pageOffsetRatio },
-			});
-			setBookmarks((previous) => [...previous, added]);
-			setSidePanel('bookmarks');
-		} catch (error: unknown) {
-			console.error('readmark: could not add a bookmark', error);
-		}
-	}, [documentId, setSidePanel, sourceFingerprint]);
+		setPendingAdd(position);
+	}, []);
+
+	/** Write the mark the dialog was opened for. */
+	const handleConfirmAdd = useCallback(
+		async (title: string) => {
+			const target = pendingAdd;
+			if (target === null) return;
+			setPendingAdd(null);
+			try {
+				const added = await addBookmark({
+					documentId,
+					sourceFingerprint,
+					pageIndex: target.pageIndex,
+					anchor: null,
+					position: { pageOffsetRatio: target.pageOffsetRatio },
+					title,
+				});
+				setBookmarks((previous) => [...previous, added]);
+				// The point of marking a page is seeing that it took, so
+				// the list is revealed — with the name that was just
+				// given, where the reader can still read it and change
+				// their mind.
+				setSidePanel('bookmarks');
+			} catch (error: unknown) {
+				console.error('readmark: could not add a bookmark', error);
+			}
+		},
+		[documentId, pendingAdd, setSidePanel, sourceFingerprint],
+	);
 
 	const handleJump = useCallback(
 		(bookmark: Bookmark) => {
 			const scroller = scrollRef.current;
 			if (scroller === null) return;
+			// Starting a jump retires the one in flight, if any: the
+			// reader has asked to be somewhere else, and the previous
+			// jump is not theirs to finish. It also retires a restore
+			// still settling, which is the same decision.
+			const takeover = ++takeoverCountRef.current;
 			void jumpToPage({
 				scroller,
 				pageIndex: bookmark.pageIndex,
@@ -558,9 +597,7 @@ export function ReaderView({
 				position: storedOffset(bookmark.position),
 				pageCount,
 				measuredHeight: (pageIndex) => footprintsRef.current.get(pageIndex)?.height,
-				// The reader has asked to be somewhere else; a jump
-				// already in progress is not theirs to finish.
-				shouldAbort: () => readerMovedRef.current,
+				shouldAbort: () => takeoverCountRef.current !== takeover,
 			});
 		},
 		[pageCount],
@@ -639,7 +676,7 @@ export function ReaderView({
 					</Button>
 					<Button
 						variant="ghost"
-						onClick={() => void handleAddBookmark()}
+						onClick={handleRequestAdd}
 						disabled={currentPage === null}
 						data-testid="rm-add-bookmark"
 						aria-label="栞を追加"
@@ -666,6 +703,13 @@ export function ReaderView({
 					documentTitle={title}
 					onJump={handleJump}
 					onDelete={(bookmark) => setPendingDelete(bookmark)}
+				/>
+			)}
+			{pendingAdd !== null && (
+				<AddBookmarkDialog
+					pageIndex={pendingAdd.pageIndex}
+					onConfirm={(title) => void handleConfirmAdd(title)}
+					onCancel={() => setPendingAdd(null)}
 				/>
 			)}
 			{pendingDelete !== null && (
