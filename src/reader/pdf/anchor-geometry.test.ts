@@ -27,10 +27,13 @@ import { describe, expect, it } from 'vitest';
 
 import { asPageIndex } from '../../domain/reading-state.ts';
 import type { PageTextItem, PageTextLayer } from '../types.ts';
+import type { PdfRect } from './anchor.ts';
 import {
 	fragmentsForRuns,
 	fragmentsFromLayerRects,
 	layerRectsFromClientRects,
+	RECT_TOLERANCE_PT,
+	rectsMatch,
 } from './anchor-geometry.ts';
 import type { QuoteRunMatch } from './anchor-recovery.ts';
 import type { ViewportLike } from './pdf-coords.ts';
@@ -218,5 +221,49 @@ describe('fragmentsForRuns', () => {
 		const run: QuoteRunMatch = { runIndex: 0, item: ITEM, start: 6, end: 10 };
 
 		return expect(fragmentsForRuns(fakePage([]), LAYER, [run])).resolves.not.toEqual([]);
+	});
+});
+
+describe('rectsMatch', () => {
+	const LEFT: readonly PdfRect[] = [{ x: 10, y: 20, width: 30, height: 12 }];
+
+	it('says a fragment count difference is a difference', () => {
+		// Even with coordinates that line up, one fragment is not three.
+		expect(rectsMatch(LEFT, [...LEFT, { x: 10, y: 40, width: 30, height: 12 }])).toBe(false);
+		expect(rectsMatch(LEFT, [])).toBe(false);
+	});
+
+	it('accepts a drift inside the tolerance', () => {
+		const drifted: readonly PdfRect[] = [{ x: 10.1, y: 20.1, width: 30.1, height: 12.1 }];
+
+		expect(rectsMatch(LEFT, drifted)).toBe(true);
+	});
+
+	it('rejects a drift outside it, on every coordinate in turn', () => {
+		// One coordinate over the line is a changed highlight: it will be
+		// painted somewhere else, and a write-back that says "unchanged"
+		// would leave the stored one there.
+		for (const over of [
+			{ x: 10.3, y: 20, width: 30, height: 12 },
+			{ x: 10, y: 20.3, width: 30, height: 12 },
+			{ x: 10, y: 20, width: 30.3, height: 12 },
+			{ x: 10, y: 20, width: 30, height: 12.3 },
+		]) {
+			expect(rectsMatch(LEFT, [over])).toBe(false);
+		}
+	});
+
+	it('compares at the threshold itself, on both sides', () => {
+		const at = (delta: number): readonly PdfRect[] => [
+			{ x: 10 + delta, y: 20, width: 30, height: 12 },
+		];
+
+		// The boundary is where the default has to mean something: just
+		// inside compares equal, just outside does not. A tolerance
+		// nobody has tested either side of is a number nobody chose.
+		expect(rectsMatch(LEFT, at(RECT_TOLERANCE_PT))).toBe(true);
+		expect(rectsMatch(LEFT, at(RECT_TOLERANCE_PT + 0.01))).toBe(false);
+		expect(rectsMatch(LEFT, at(-RECT_TOLERANCE_PT))).toBe(true);
+		expect(rectsMatch(LEFT, at(-RECT_TOLERANCE_PT - 0.01))).toBe(false);
 	});
 });

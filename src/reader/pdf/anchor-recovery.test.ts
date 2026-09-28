@@ -27,10 +27,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-
+import { isAnchorOfFormat } from '../../domain/annotation/index.ts';
 import { asPageIndex } from '../../domain/reading-state.ts';
 import type { PageTextItem, PageTextLayer } from '../types.ts';
-import { findQuote, pageText } from './anchor-recovery.ts';
+import { isPdfAnchor, type PdfAnchor, type PdfRect } from './anchor.ts';
+import { findQuote, freshAnchor, pageText, staleAnchor } from './anchor-recovery.ts';
 
 /**
  * A layer whose runs are `["alpha ", "beta ", "gamma."]` unless the
@@ -201,5 +202,103 @@ describe('findQuote', () => {
 			[0, 6],
 			[0, 4],
 		]);
+	});
+});
+
+describe('the recovery answer', () => {
+	const STORED: readonly PdfRect[] = [
+		{ x: 10, y: 20, width: 30, height: 12 },
+		{ x: 10, y: 40, width: 30, height: 12 },
+	];
+
+	function payload(rects: readonly PdfRect[] = STORED): PdfAnchor {
+		return {
+			page: asPageIndex(3),
+			rects,
+			quote: { exact: 'the cat', prefix: 'saw the ', suffix: ' sat down' },
+		};
+	}
+
+	describe('fresh', () => {
+		it('reports what was measured, not what was stored', () => {
+			// A measurement against this copy of the file beats one taken
+			// against another copy, which is the whole reason recovery
+			// exists.
+			const measured: readonly PdfRect[] = [{ x: 11, y: 21, width: 31, height: 12 }];
+
+			const resolved = freshAnchor(payload(), measured);
+
+			expect(resolved.freshness).toBe('fresh');
+			expect(resolved.display).toBe(measured);
+			expect(resolved.selectedText).toBe('the cat');
+			expect(resolved.page).toBe(3);
+		});
+
+		it('hands back a write-back that moves the rects and nothing else', () => {
+			const measured: readonly PdfRect[] = [{ x: 90, y: 21, width: 31, height: 12 }];
+
+			const updated = freshAnchor(payload(), measured).updatedAnchor;
+
+			expect(updated).not.toBeNull();
+			expect(updated?.format).toBe('pdf');
+			// `updatedAnchor` is `Anchor<unknown>` to anything outside
+			// `reader/pdf/`, so this assertion has to go through the same
+			// two guards a format-aware caller would. It cannot be a cast,
+			// which is the point of the field being `unknown`.
+			if (updated === null || !isAnchorOfFormat(updated, 'pdf') || !isPdfAnchor(updated)) {
+				throw new Error('the write-back is not a well-formed PDF anchor');
+			}
+			// The page and the quote are what identify the annotation. A
+			// write-back that changed either would be a second claim
+			// about what this highlight is.
+			expect(updated.payload.page).toBe(3);
+			expect(updated.payload.quote).toEqual({
+				exact: 'the cat',
+				prefix: 'saw the ',
+				suffix: ' sat down',
+			});
+			expect(updated.payload.rects).toBe(measured);
+		});
+
+		it('asks for no write when the measured rects are already the stored ones', () => {
+			expect(freshAnchor(payload(), STORED).updatedAnchor).toBeNull();
+		});
+
+		it('judges "unchanged" by a tolerance, not by equality', () => {
+			// The two measurements are floats from two sessions, so
+			// `===` would report a difference where the document has not
+			// moved at all, and rewrite a correct row on every open.
+			const drifted: readonly PdfRect[] = [
+				{ x: 10.2, y: 20.2, width: 30.2, height: 12.2 },
+				{ x: 10.2, y: 40.2, width: 30.2, height: 12.2 },
+			];
+
+			expect(freshAnchor(payload(), drifted).updatedAnchor).toBeNull();
+		});
+
+		it('asks for a write when a fragment count changed', () => {
+			// One fragment against three is a different shape however close
+			// the numbers are — a recovery that merged or split a line must
+			// not be able to report "unchanged" by lining up a prefix.
+			const merged: readonly PdfRect[] = [{ x: 10, y: 20, width: 30, height: 32 }];
+
+			expect(freshAnchor(payload(), merged).updatedAnchor).not.toBeNull();
+		});
+	});
+
+	describe('stale', () => {
+		it('keeps the stored rects and asks for no write', () => {
+			// ADR-0007: a stale anchor's stored rects are not rewritten.
+			// They may be off, and they are still the best available hint —
+			// and keeping the original is what lets the anchor recover if
+			// the change that broke it is undone.
+			const resolved = staleAnchor(payload());
+
+			expect(resolved.freshness).toBe('stale');
+			expect(resolved.display).toBe(STORED);
+			expect(resolved.updatedAnchor).toBeNull();
+			expect(resolved.selectedText).toBe('the cat');
+			expect(resolved.page).toBe(3);
+		});
 	});
 });

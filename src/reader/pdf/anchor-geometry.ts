@@ -236,6 +236,49 @@ export async function fragmentsForRuns(
 }
 
 /**
+ * The tolerance two measurements of the same thing may differ by and
+ * still count as the same, in raw PDF points.
+ *
+ * 0.25pt is about 0.09mm — a third of the width of a hairline at 100%
+ * zoom, and a fiftieth of a character. It is not "small enough to
+ * ignore": it is smaller than the difference two measurements of the
+ * *same* geometry can produce. A text layer measured at a different
+ * device pixel ratio, or through a different font stack, lands a
+ * fraction of a point away from the last one, and rewriting the stored
+ * anchor every time a document is opened would be a row churning for
+ * no reason.
+ */
+export const RECT_TOLERANCE_PT = 0.25;
+
+/**
+ * Whether two sets of fragments are the same display geometry.
+ *
+ * Count first: one fragment against three is a different shape however
+ * close the numbers are, and a recovery that merged or split a line
+ * would otherwise be able to report "unchanged" by lining up a prefix.
+ * Then every coordinate, as an absolute difference, because the two
+ * measurements are floats from two sessions and `===` would say they
+ * differ when the document did not.
+ */
+export function rectsMatch(
+	left: readonly PdfRect[],
+	right: readonly PdfRect[],
+	tolerance: number = RECT_TOLERANCE_PT,
+): boolean {
+	if (left.length !== right.length) return false;
+	return left.every((rect, index) => {
+		const other = right[index];
+		if (other === undefined) return false;
+		return (
+			Math.abs(rect.x - other.x) <= tolerance &&
+			Math.abs(rect.y - other.y) <= tolerance &&
+			Math.abs(rect.width - other.width) <= tolerance &&
+			Math.abs(rect.height - other.height) <= tolerance
+		);
+	});
+}
+
+/**
  * A laid-out, invisible container the size of the page.
  *
  * `position: fixed` far off the left edge rather than `display: none`:

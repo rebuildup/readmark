@@ -79,8 +79,9 @@
  * the path that decides whether an anchor is trusted.
  */
 
-import type { PageTextItem, PageTextLayer } from '../types.ts';
-import type { TextQuote } from './anchor.ts';
+import type { PageTextItem, PageTextLayer, ResolvedAnchor } from '../types.ts';
+import type { PdfAnchor, PdfRect, TextQuote } from './anchor.ts';
+import { rectsMatch } from './anchor-geometry.ts';
 
 /** One run the quote covers, and how much of it the quote actually is. */
 export interface QuoteRunMatch {
@@ -201,4 +202,63 @@ function matchAt(layer: PageTextLayer, start: number, length: number): QuoteMatc
 		});
 	}
 	return { runs, start };
+}
+
+/**
+ * The `fresh` answer: measured fragments, and a write-back only if they
+ * are not already what is stored.
+ *
+ * Pure on purpose — the whole outcome of a recovery is decided by
+ * (stored anchor, measured fragments), and the reader only supplies
+ * those two. Keeping the decision here means the freshness rule, the
+ * write-back rule and the "only the rects move" rule are all testable
+ * without a pdf.js document, and the reader is left with the I/O it is
+ * the only thing that can do.
+ *
+ * `updatedAnchor` carries the same `page` and the same `quote`. Those
+ * two are what identify the annotation, and a write-back that changed
+ * either would be a second, competing claim about what it is. Only the
+ * display half moves — and it moves because it was measured against
+ * this copy of the file, which is the only measurement there is.
+ */
+export function freshAnchor(payload: PdfAnchor, fragments: readonly PdfRect[]): ResolvedAnchor {
+	return {
+		format: 'pdf',
+		page: payload.page,
+		freshness: 'fresh',
+		selectedText: payload.quote.exact,
+		display: fragments,
+		updatedAnchor: rectsMatch(fragments, payload.rects)
+			? null
+			: {
+					format: 'pdf',
+					payload: { page: payload.page, rects: fragments, quote: payload.quote },
+				},
+	};
+}
+
+/**
+ * The `stale` answer: the stored rects, unchanged, and nothing to write
+ * back.
+ *
+ * `display` is the *stored* rects on purpose. They may be off — the
+ * text was re-encoded, a glyph subset substituted — and they are still
+ * the best available hint, which is why the anchor is `stale` rather
+ * than gone.
+ *
+ * `updatedAnchor` is `null`, and that is ADR-0007's rule rather than an
+ * omission: a stale anchor's stored rects are not rewritten, because
+ * keeping the original is what lets the anchor recover if the change
+ * that broke it is undone. A caller that wrote back here would
+ * overwrite the only hint it has.
+ */
+export function staleAnchor(payload: PdfAnchor): ResolvedAnchor {
+	return {
+		format: 'pdf',
+		page: payload.page,
+		freshness: 'stale',
+		selectedText: payload.quote.exact,
+		display: payload.rects,
+		updatedAnchor: null,
+	};
 }
