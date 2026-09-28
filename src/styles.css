@@ -37,6 +37,11 @@
 
 	--rm-shadow-sm: 0 1px 2px rgba(11, 16, 32, 0.06);
 	--rm-shadow-md: 0 4px 12px rgba(11, 16, 32, 0.08);
+
+	/* Highlight palette. A row stores the *name*; this is where the name
+	 * becomes a colour, so changing the palette here changes what every
+	 * stored highlight looks like without touching a row. */
+	--rm-highlight-yellow: #ffd54a;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -524,6 +529,39 @@ pre {
 	white-space: pre;
 	cursor: text;
 	color: transparent;
+}
+
+/* --- highlights --------------------------------------------------------- */
+
+/* The PDF painter emits geometry and freshness and nothing else. The
+ * colour is a semantic name on the row (`Highlight.color`) and it is
+ * resolved here, from a token, keyed off an attribute the *UI* sets on
+ * an ancestor — so a stored row is never pinned to one theme's palette,
+ * and a reader in dark mode gets the colour the theme chose rather
+ * than the one the file was written under.
+ *
+ * Unlabelled means invisible. A default here would be the painter
+ * quietly choosing a colour it was told not to choose. */
+.rm-highlight {
+	--rm-highlight-fill: transparent;
+	/* A stale anchor is one the document moved out from under. It is
+	 * shown, not hidden — the reader chose it — and marked, so it does
+	 * not read as a highlight in the right place. */
+	--rm-highlight-stale-fill: transparent;
+}
+
+.rm-page[data-highlight-color="yellow"] {
+	--rm-highlight-fill: color-mix(in srgb, var(--rm-highlight-yellow) 45%, transparent);
+	--rm-highlight-stale-fill: color-mix(in srgb, var(--rm-highlight-yellow) 20%, transparent);
+}
+
+.rm-highlight__fragment {
+	background: var(--rm-highlight-fill);
+}
+
+.rm-highlight[data-freshness="stale"] .rm-highlight__fragment {
+	background: var(--rm-highlight-stale-fill);
+	outline: 1px dashed var(--rm-fg-muted);
 }
 
 .rm-text-layer span::selection {

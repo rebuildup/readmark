@@ -19,7 +19,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Anchor } from '../../domain/annotation/index.ts';
 import { asPageIndex } from '../../domain/reading-state.ts';
-import { isPdfAnchor, type PdfAnchor } from './anchor.ts';
+import { isPdfAnchor, isPdfResolvedDisplay, type PdfAnchor, type PdfRect } from './anchor.ts';
 
 const RECT = { x: 10, y: 20, width: 30, height: 12 };
 
@@ -99,5 +99,42 @@ describe('isPdfAnchor', () => {
 		expect(isPdfAnchor(anchorWith(null))).toBe(false);
 		expect(isPdfAnchor(anchorWith('pdf'))).toBe(false);
 		expect(isPdfAnchor({ format: 'epub', payload: VALID })).toBe(false);
+	});
+});
+
+describe('isPdfResolvedDisplay', () => {
+	const RECT: PdfRect = { x: 1, y: 2, width: 3, height: 4 };
+
+	it('accepts what a recovery produces', () => {
+		expect(isPdfResolvedDisplay([RECT])).toBe(true);
+		expect(isPdfResolvedDisplay([RECT, { ...RECT, x: 9 }])).toBe(true);
+	});
+
+	it('rejects an empty list, which recovery never produces', () => {
+		// Recovery reports `null` rather than an empty measurement, so an
+		// empty list here is as likely to be a shape from another version
+		// as it is to be an empty highlight — and a painter that drew
+		// nothing for it would look like a highlight that lost its
+		// colour.
+		expect(isPdfResolvedDisplay([])).toBe(false);
+	});
+
+	it('rejects a shape from a version this one has not heard of', () => {
+		// `display` came out of storage. A row written by a future version
+		// has to paint as nothing rather than take the reader down, and it
+		// cannot throw from a guard on a data value.
+		expect(isPdfResolvedDisplay('rects')).toBe(false);
+		expect(isPdfResolvedDisplay({ rects: [RECT] })).toBe(false);
+		expect(isPdfResolvedDisplay(null)).toBe(false);
+		expect(isPdfResolvedDisplay(undefined)).toBe(false);
+		expect(isPdfResolvedDisplay([null])).toBe(false);
+		expect(isPdfResolvedDisplay([{ ...RECT, width: '3' }])).toBe(false);
+	});
+
+	it('rejects numbers that cannot be a position', () => {
+		// `NaN` passes `typeof === 'number'` and would put a fragment at
+		// a coordinate no box can be drawn at.
+		expect(isPdfResolvedDisplay([{ ...RECT, x: Number.NaN }])).toBe(false);
+		expect(isPdfResolvedDisplay([{ ...RECT, y: Number.POSITIVE_INFINITY }])).toBe(false);
 	});
 });

@@ -36,7 +36,8 @@ import type {
 	RenderOptions,
 	ResolvedAnchor,
 } from '../types.ts';
-import { fragmentsForRuns } from './anchor-geometry.ts';
+import { isPdfResolvedDisplay } from './anchor.ts';
+import { cssRectsFor, fragmentsForRuns } from './anchor-geometry.ts';
 import { quoteForRange, runsForRange, selectionRangeInLayer } from './anchor-recovery.ts';
 import type { ViewportLike } from './pdf-coords.ts';
 import { buildTextLayer, extractPageTextLayer } from './pdf-text-layer.ts';
@@ -52,6 +53,14 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 	private pending: RenderTask | null = null;
 	private generation = 0;
 	private closed = false;
+
+	/**
+	 * The viewport of the last render that completed, or `null` before
+	 * the first one. Held as the object, not as `RenderOptions`, so the
+	 * painter converts through the same transform the canvas was drawn
+	 * with rather than a re-derivation of it.
+	 */
+	private lastViewport: ViewportLike | null = null;
 
 	constructor(
 		readonly index: PageIndex,
@@ -142,6 +151,14 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 				console.error('readmark: text layer build failed', cause);
 			}
 		}
+
+		// Remembered only once the page has actually been painted, and
+		// the object is kept rather than the options: `paintResolvedAnchor`
+		// has to convert through *this* transform, and re-deriving one
+		// from options is how a highlight ends up beside its text.
+		if (this.generation === generation && !this.closed) {
+			this.lastViewport = viewport;
+		}
 	}
 
 	/** The page's glyph runs, in raw PDF user-space (ADR-0007). */
@@ -195,25 +212,81 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 	}
 
 	/**
-	 * Painting a resolved anchor is #7's work, and the anchor it would
-	 * paint does not exist yet: `PdfReaderHandle.resolveAnchor` returns
-	 * `null`, so nothing can produce a `ResolvedAnchor` with display
-	 * data to draw.
+	 * Paint a resolved anchor's highlight into `target`.
 	 *
-	 * This throws rather than returning quietly. The sibling stubs
-	 * return `null` because their signatures have an honest "nothing to
-	 * give" value; `void` does not, and a no-op paint is the one
-	 * failure shape a highlight cannot have — a stored highlight would
-	 * render as absent, and nothing would say why. The throw is
-	 * unreachable until the recovery pass lands, and it is removed in
-	 * the same ticket.
+	 * Geometry and nothing else: the fragments are converted through the
+	 * page's own viewport and turned into positioned elements. The
+	 * colour is not decided here — `Highlight.color` is a semantic name
+	 * and the palette belongs to the UI and its theme, so a PDF painter
+	 * that hard-coded a colour would freeze one theme's decision into
+	 * persisted data (ADR-0004 §"Where the refreshed anchor is
+	 * written").
+	 *
+	 * Three ways this can decline, and they are different in kind:
+	 *
+	 *   - **A page mismatch rejects.** An anchor for page 7 offered to
+	 *     page 7's handle is a caller that lost track of which page it
+	 *     was talking to, and painting it here would put a highlight on
+	 *     the wrong page. That is a bug in the call, not a fact about
+	 *     the document, and it is worth a throw.
+	 *   - **Display data it does not recognise is a no-op.** `display`
+	 *     came out of storage, and a row written by a version this one
+	 *     has never heard of must paint as nothing rather than take the
+	 *     reader down.
+	 *   - **A page with no completed render paints nothing.** There is
+	 *     no transform to convert through, and inventing one would place
+	 *     every fragment in the wrong place while looking like it
+	 *     worked — the same reasoning as the contract's rejection of a
+	 *     paint before the first render.
 	 */
 	async paintResolvedAnchor(
-		_anchor: ResolvedAnchor,
-		_target: HTMLElement,
-		_options?: RenderOptions,
+		anchor: ResolvedAnchor,
+		target: HTMLElement,
+		options?: RenderOptions,
 	): Promise<void> {
-		throw new Error('readmark: paintResolvedAnchor is #7 work, not yet implemented');
+		if (anchor.format !== 'pdf') return;
+		if (anchor.page !== this.index) {
+			throw new Error(
+				`readmark: paintResolvedAnchor called on page ${this.index} with an anchor for ` +
+					`page ${anchor.page}`,
+			);
+		}
+		if (!isPdfResolvedDisplay(anchor.display)) return;
+		const viewport =
+			options === undefined
+				? this.lastViewport
+				: this.pdfPage.getViewport({
+						scale: options.scale ?? 1,
+						rotation: options.rotation ?? 0,
+					});
+		if (viewport === null) return;
+
+		const layer = document.createElement('div');
+		layer.className = 'rm-highlight';
+		// `stale` is a fact about how the rects were derived, and the UI
+		// needs to show it as such. It is data rather than a class because
+		// the stylesheet is not the only thing that will read it.
+		layer.dataset.freshness = anchor.freshness;
+		// A highlight is under the text, never over it: `pointer-events:
+		// none` is what keeps a drag across a highlighted sentence a
+		// selection rather than a click.
+		layer.style.pointerEvents = 'none';
+		layer.style.position = 'absolute';
+		layer.style.inset = '0px';
+
+		for (const rect of cssRectsFor(anchor.display, viewport)) {
+			const fragment = document.createElement('div');
+			fragment.className = 'rm-highlight__fragment';
+			fragment.style.position = 'absolute';
+			fragment.style.left = `${rect.left}px`;
+			fragment.style.top = `${rect.top}px`;
+			fragment.style.width = `${rect.width}px`;
+			fragment.style.height = `${rect.height}px`;
+			layer.appendChild(fragment);
+		}
+		// An empty layer would be a `div` covering the page for nothing.
+		if (layer.childElementCount === 0) return;
+		target.appendChild(layer);
 	}
 
 	/** Cancel any in-flight render and release the page. Idempotent:

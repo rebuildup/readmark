@@ -22,6 +22,8 @@
 import type { PDFPageProxy, RenderTask } from 'pdfjs-dist';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { asPageIndex, type PageIndex } from '../../domain/reading-state.ts';
+import type { ResolvedAnchor } from '../types.ts';
+import type { PdfRect } from './anchor.ts';
 import type { ViewportLike } from './pdf-coords.ts';
 import { PDF_PAGE_CLASS, PdfPageHandle } from './pdf-page.ts';
 
@@ -395,5 +397,142 @@ describe('canvas context', () => {
 		} finally {
 			vi.restoreAllMocks();
 		}
+	});
+});
+
+describe('PdfPageHandle.paintResolvedAnchor', () => {
+	/** A resolved anchor for page 1, as recovery would hand it over. */
+	function resolved(
+		over: Partial<ResolvedAnchor> = {},
+		fragments: readonly PdfRect[] = [{ x: 100, y: 600, width: 200, height: 40 }],
+	): ResolvedAnchor {
+		return {
+			format: 'pdf',
+			page: PAGE_ONE,
+			freshness: 'fresh',
+			selectedText: 'the cat',
+			display: fragments,
+			updatedAnchor: null,
+			...over,
+		};
+	}
+
+	function target(): HTMLElement {
+		const element = document.createElement('div');
+		document.body.appendChild(element);
+		return element;
+	}
+
+	async function renderedPage(proxy: PDFPageProxy): Promise<PdfPageHandle> {
+		const page = new PdfPageHandle(PAGE_ONE, proxy);
+		await page.render(target(), { scale: 1 });
+		return page;
+	}
+
+	it('draws one positioned element per fragment, in CSS pixels', async () => {
+		const page = await renderedPage(makeProxy().proxy);
+		const into = target();
+
+		await page.paintResolvedAnchor(resolved(), into);
+
+		const layer = into.querySelector('.rm-highlight');
+		expect(layer).not.toBeNull();
+		const fragments = into.querySelectorAll('.rm-highlight__fragment');
+		expect(fragments.length).toBe(1);
+		// Scale 1, y flipped: user-space y 600..640 is viewport y 160..200.
+		const style = (fragments[0] as HTMLElement).style;
+		expect(style.left).toBe('100px');
+		expect(style.top).toBe('160px');
+		expect(style.width).toBe('200px');
+		expect(style.height).toBe('40px');
+	});
+
+	it('keeps the highlight out of the way of a selection', async () => {
+		const page = await renderedPage(makeProxy().proxy);
+		const into = target();
+
+		await page.paintResolvedAnchor(resolved(), into);
+
+		// A highlight is under the text, never over it. Without this a drag
+		// across a highlighted sentence is a click on the highlight, and
+		// the reader cannot select text they just highlighted.
+		expect((into.querySelector('.rm-highlight') as HTMLElement).style.pointerEvents).toBe('none');
+	});
+
+	it('marks freshness, because the UI has to be able to show it', async () => {
+		const page = await renderedPage(makeProxy().proxy);
+		const into = target();
+
+		await page.paintResolvedAnchor(resolved({ freshness: 'fresh' }), into);
+		await page.paintResolvedAnchor(resolved({ freshness: 'stale' }), into);
+
+		const layers = into.querySelectorAll('.rm-highlight');
+		expect(layers[0]?.getAttribute('data-freshness')).toBe('fresh');
+		expect(layers[1]?.getAttribute('data-freshness')).toBe('stale');
+	});
+
+	it('reuses the viewport the page was actually rendered with', async () => {
+		// A highlight converted through a re-derived viewport is a
+		// highlight beside its text. The page is rendered at scale 2 and
+		// painted with no options: the fragments must come out doubled.
+		const page = await renderedPage(makeProxy().proxy);
+		const scaled = new PdfPageHandle(PAGE_ONE, makeProxy().proxy);
+		await scaled.render(target(), { scale: 2 });
+		const into = target();
+
+		await scaled.paintResolvedAnchor(resolved(), into);
+
+		const style = (into.querySelector('.rm-highlight__fragment') as HTMLElement).style;
+		expect(style.width).toBe('400px');
+		expect(style.top).toBe('320px');
+		expect(page.index).toBe(1);
+	});
+
+	it('declines display data it does not recognise', async () => {
+		const page = await renderedPage(makeProxy().proxy);
+		const into = target();
+
+		// `display` came out of storage. A row from a version this build
+		// has never heard of paints as nothing rather than taking the
+		// reader down.
+		await page.paintResolvedAnchor(resolved({}, 'rects' as never), into);
+		await page.paintResolvedAnchor(resolved({}, []), into);
+		await page.paintResolvedAnchor(resolved({}, [{ x: 1, y: 2, width: 3 }] as never), into);
+
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+	});
+
+	it('declines an anchor for a format it does not paint', async () => {
+		const page = await renderedPage(makeProxy().proxy);
+		const into = target();
+
+		await page.paintResolvedAnchor(resolved({ format: 'epub' as never }), into);
+
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+	});
+
+	it('rejects an anchor belonging to another page', async () => {
+		const page = await renderedPage(makeProxy().proxy);
+		const into = target();
+
+		// A caller that lost track of which page it was talking to. That is
+		// a bug in the call, not a fact about the document, and painting it
+		// here would put a highlight on the wrong page.
+		await expect(
+			page.paintResolvedAnchor(resolved({ page: asPageIndex(7) }), into),
+		).rejects.toThrow(/page 7/);
+		expect(into.querySelector('.rm-highlight')).toBeNull();
+	});
+
+	it('paints nothing before the page has been rendered', async () => {
+		const page = new PdfPageHandle(PAGE_ONE, makeProxy().proxy);
+		const into = target();
+
+		// There is no transform to convert through, and inventing one
+		// would place every fragment in the wrong place while looking like
+		// it worked.
+		await page.paintResolvedAnchor(resolved(), into);
+
+		expect(into.querySelector('.rm-highlight')).toBeNull();
 	});
 });

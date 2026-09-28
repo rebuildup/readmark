@@ -85,6 +85,15 @@ const RECOVERY_ROTATION = 0 as const;
 /** A client rect, structurally. `DOMRect` satisfies it, and so does a
  *  hand-written object in a test — which matters, because happy-dom
  *  has no layout and cannot produce a real one. */
+/** A rectangle in CSS pixels, origin top-left, `width` / `height`
+ *  always non-negative. The shape a painter can hand to a style. */
+export interface CssRect {
+	readonly left: number;
+	readonly top: number;
+	readonly width: number;
+	readonly height: number;
+}
+
 export interface ClientRectLike {
 	readonly left: number;
 	readonly top: number;
@@ -302,4 +311,42 @@ function offscreenHost(viewport: ViewportLike): HTMLElement {
 	host.style.visibility = 'hidden';
 	document.body.appendChild(host);
 	return host;
+}
+
+/**
+ * Raw user-space fragments, as CSS rectangles for a viewport.
+ *
+ * One conversion, by the viewport that produced the page's canvas, so
+ * the highlight lands on the glyphs it belongs to: a rect converted
+ * through a *different* viewport is a highlight beside its text rather
+ * than under it, which is the failure the text layer exists to prevent.
+ *
+ * The corners are normalised because a quarter turn swaps them — the
+ * same reason the y flip needs it — and a fragment with no area is
+ * dropped: a zero-height box is a hairline the reader cannot account
+ * for.
+ */
+export function cssRectsFor(
+	fragments: readonly PdfRect[],
+	viewport: ViewportLike,
+): readonly CssRect[] {
+	const rects: CssRect[] = [];
+	for (const rect of fragments) {
+		const converted = viewport.convertToViewportRectangle([
+			rect.x,
+			rect.y,
+			rect.x + rect.width,
+			rect.y + rect.height,
+		]);
+		const [x1, y1, x2, y2] = converted;
+		if (x1 === undefined || y1 === undefined || x2 === undefined || y2 === undefined) continue;
+		if (x1 === x2 || y1 === y2) continue;
+		rects.push({
+			left: Math.min(x1, x2),
+			top: Math.min(y1, y2),
+			width: Math.abs(x2 - x1),
+			height: Math.abs(y2 - y1),
+		});
+	}
+	return rects;
 }

@@ -162,3 +162,38 @@ export function isPdfAnchor(anchor: Anchor): anchor is Anchor<PdfAnchor> {
 function optionalText(value: unknown): boolean {
 	return value === undefined || typeof value === 'string';
 }
+
+/**
+ * Whether `value` is the `display` a PDF recovery produced: a
+ * non-empty array of `PdfRect` in raw user-space.
+ *
+ * A separate gate from `isPdfAnchor` because it guards a different
+ * field on a different type. `ResolvedAnchor` has no `payload`, so
+ * `isPdfAnchor` does not apply to `display`; reusing it would have to
+ * claim to validate a field the other type does not have, which is the
+ * same lie as the single-guard `isAnchorOfFormat<PdfAnchor>` that ADR-
+ * 0007 rejects (see ADR-0004 §Two gates).
+ *
+ * What it accepts is what `fragmentsForRuns` produces and nothing more.
+ * An empty array is rejected: recovery never yields one — it reports
+ * `null` instead — so an empty list here is as likely to be a shape
+ * from another version as it is to be an empty highlight, and a
+ * painter that drew nothing for it would look like a highlight that
+ * silently lost its colour.
+ *
+ * Returns `false` rather than throwing. `display` is data that came
+ * out of storage, and a row written by a future version must paint as
+ * nothing rather than take the reader down.
+ */
+export function isPdfResolvedDisplay(value: unknown): value is readonly PdfRect[] {
+	if (!Array.isArray(value) || value.length === 0) return false;
+	return value.every(
+		(rect) =>
+			rect !== null &&
+			typeof rect === 'object' &&
+			Number.isFinite((rect as PdfRect).x) &&
+			Number.isFinite((rect as PdfRect).y) &&
+			Number.isFinite((rect as PdfRect).width) &&
+			Number.isFinite((rect as PdfRect).height),
+	);
+}

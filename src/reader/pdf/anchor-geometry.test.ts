@@ -29,6 +29,7 @@ import { asPageIndex } from '../../domain/reading-state.ts';
 import type { PageTextItem, PageTextLayer } from '../types.ts';
 import type { PdfRect } from './anchor.ts';
 import {
+	cssRectsFor,
 	fragmentsForRuns,
 	fragmentsFromLayerRects,
 	layerRectsFromClientRects,
@@ -265,5 +266,70 @@ describe('rectsMatch', () => {
 		expect(rectsMatch(LEFT, at(RECT_TOLERANCE_PT + 0.01))).toBe(false);
 		expect(rectsMatch(LEFT, at(-RECT_TOLERANCE_PT))).toBe(true);
 		expect(rectsMatch(LEFT, at(-RECT_TOLERANCE_PT - 0.01))).toBe(false);
+	});
+});
+
+describe('cssRectsFor', () => {
+	/**
+	 * A viewport that actually transforms, because the function's whole
+	 * job is to hand the fragment to the viewport and normalise what
+	 * comes back. Asserted against the identity `viewport` above, a
+	 * change in the transform would be invisible.
+	 *
+	 * Scale 2, y flipped: user-space y 560..580 is viewport y 40..80.
+	 */
+	const PAINT: ViewportLike = {
+		...viewport,
+		convertToViewportRectangle: (rect) => {
+			const [x1 = 0, y1 = 0, x2 = 0, y2 = 0] = rect;
+			return [x1 * 2, (PAGE_HEIGHT - y2) * 2, x2 * 2, (PAGE_HEIGHT - y1) * 2];
+		},
+	};
+
+	it('converts a raw fragment through the page viewport, y flipped', () => {
+		const fragments: readonly PdfRect[] = [{ x: 50, y: 560, width: 100, height: 20 }];
+
+		expect(cssRectsFor(fragments, PAINT)).toEqual([{ left: 100, top: 40, width: 200, height: 40 }]);
+	});
+
+	it('normalises corners a quarter turn swapped', () => {
+		// After a rotation the two corners can come back in either order,
+		// and a rect with a negative width is a box nothing can draw.
+		const swapped: ViewportLike = {
+			...PAINT,
+			convertToViewportRectangle: () => [300, 80, 100, 40],
+		};
+
+		expect(cssRectsFor([{ x: 0, y: 0, width: 10, height: 10 }], swapped)).toEqual([
+			{ left: 100, top: 40, width: 200, height: 40 },
+		]);
+	});
+
+	it('drops a fragment with no area', () => {
+		// A zero-height box is a hairline the reader cannot account for.
+		expect(
+			cssRectsFor(
+				[
+					{ x: 0, y: 0, width: 0, height: 10 },
+					{ x: 0, y: 0, width: 10, height: 10 },
+				],
+				viewport,
+			),
+		).toHaveLength(1);
+	});
+
+	it('keeps one rect per fragment, in order', () => {
+		const fragments: readonly PdfRect[] = [
+			{ x: 0, y: 580, width: 10, height: 20 },
+			{ x: 0, y: 500, width: 10, height: 20 },
+		];
+
+		const rects = cssRectsFor(fragments, PAINT);
+
+		expect(rects).toHaveLength(2);
+		// Order is the order they were measured in, and a painter draws
+		// them in that order: a reordering would make overlapping
+		// fragments swap which is on top.
+		expect(rects[0]?.top).toBeLessThan(rects[1]?.top ?? 0);
 	});
 });
