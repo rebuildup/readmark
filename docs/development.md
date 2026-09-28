@@ -49,6 +49,15 @@ bun install --frozen-lockfile  # CI 用
 | `bun scripts/smoke-import.mjs` | import フロー（#3）のブラウザ smoke |
 | `bun scripts/smoke-library.mjs` | ライブラリ一覧（#4）のブラウザ smoke |
 | `bun scripts/smoke-reader.mjs` | Reader（#11）のブラウザ smoke |
+| `bun scripts/smoke-geometry.mjs` | highlight geometry（#7）のブラウザ smoke |
+| `bun scripts/smoke-pdf-assets.mjs` | pdf.js の support table（CMap / standard font / wasm）が `dist/` にあり HTTP で取得できることの smoke |
+| `bun scripts/smoke-schema-upgrade.mjs` | 旧スキーマの IndexedDB を app が回復できることの smoke |
+
+> `smoke-geometry` / `smoke-pdf-assets` / `smoke-schema-upgrade` は
+> **それぞれ 1 種類の環境依存を検出する**。他の smoke は毎回 Chromium
+> profile が新品なので、IndexedDB が壊れている状態と pdf.js の
+> support table が `dist/` に無い状態を再現できない。それぞれ
+> `docs/troubleshooting.md` §4 / §5 に対応する。
 
 ### ブラウザ smoke
 

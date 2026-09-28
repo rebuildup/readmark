@@ -7,6 +7,37 @@
 		<meta name="description" content="readmark — ローカルファーストの読書環境" />
 		<title>readmark</title>
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<!--
+			Noto Sans JP, from Google Fonts.
+
+			Why a webfont rather than a system font: readmark's entire UI
+			is Japanese, and a machine with no CJK font installed renders
+			every label as tofu (□) — the app looks broken while being
+			perfectly functional. `system-ui` cannot be relied on to have
+			a Japanese face; on a bare Linux container it does not.
+
+			Why these exact requests:
+			- `preconnect` to both hosts removes the DNS + TLS round trip
+			  from the critical path. Without it the first paint waits on
+			  two new connections and the tofu is visible for a moment.
+			- `display=swap` renders text in the fallback face immediately
+			  and swaps when the webfont arrives, so a slow or blocked
+			  font request degrades to a readable system font instead of
+			  a blank screen.
+			- The `crossorigin` attribute on `preconnect` is required for
+			  `gstatic` (the font binaries are fetched in CORS mode).
+			  Without it the connection is not reused.
+		-->
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link
+			rel="stylesheet"
+			href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap"
+		/>
+		<link
+			rel="stylesheet"
+			href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500;700&display=swap"
+		/>
 	</head>
 	<body>
 		<div id="app-root" data-app="readmark"></div>

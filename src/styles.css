@@ -30,10 +30,35 @@
 	--rm-radius-md: 8px;
 	--rm-radius-lg: 16px;
 
-	--rm-font-sans: "Noto Sans JP", "Hiragino Kaku Gothic ProN", system-ui, -apple-system, sans-serif;
+	/* Font stacks.
+	 *
+	 * Every stack must contain a face that can actually draw Japanese,
+	 * and the generic `system-ui` / `sans-serif` fallback cannot be
+	 * relied on for that: on a bare Linux container (CI images, slim
+	 * servers, sandboxes) no CJK font is installed at all, so the
+	 * generic resolves to something like DejaVu Sans, which has no
+	 * kana or kanji. The result is not a missing-font warning but
+	 * silent tofu — every label renders as □ and the app looks broken
+	 * while working perfectly.
+	 *
+	 * `Noto Sans JP` is loaded as a webfont from Google Fonts (see
+	 * `index.html`), so it is present regardless of what the host has
+	 * installed. It is repeated in the heading stack as a fallback so
+	 * that a failed or blocked webfont request degrades to *readable
+	 * Japanese* rather than to boxes.
+	 */
+	--rm-font-sans:
+		"Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, system-ui, -apple-system,
+		sans-serif;
 	--rm-font-heading:
-		"Zen Kaku Gothic New", "Hiragino Kaku Gothic ProN", system-ui, -apple-system, sans-serif;
-	--rm-font-mono: "JetBrains Mono", ui-monospace, monospace;
+		"Zen Kaku Gothic New", "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo,
+		system-ui, -apple-system, sans-serif;
+	/* `JetBrains Mono` is not loaded as a webfont: it is only ever used
+	 * for Latin/digit content (fingerprints, page counters), where a
+	 * system monospace is fine. If it is ever applied to Japanese text
+	 * the generic falls through to a CJK face, which is the correct
+	 * degradation. */
+	--rm-font-mono: "JetBrains Mono", ui-monospace, "Noto Sans JP", monospace;
 
 	--rm-shadow-sm: 0 1px 2px rgba(11, 16, 32, 0.06);
 	--rm-shadow-md: 0 4px 12px rgba(11, 16, 32, 0.08);

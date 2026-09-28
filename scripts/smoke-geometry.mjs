@@ -334,6 +334,48 @@ async function waitForOverlayFragments(page, pageIndex, count) {
 	);
 }
 
+/**
+ * Drive the reader to an exact zoom, using the toolbar buttons.
+ *
+ * The geometry scenarios below are stated at zoom=1 and zoom=1.25, and
+ * they are only meaningful there: a highlight's stored rects are
+ * compared after the runtime transform, so the numbers depend on it.
+ * The reader no longer opens at 100% (it opens at fit-width, Issue
+ * #35), so "wait until the label reads 100%" waits forever.
+ *
+ * Stepping with the buttons rather than assigning the label keeps the
+ * scenarios measuring what a reader would actually do.
+ */
+async function setZoomTo(page, target) {
+	const label = () =>
+		page.evaluate(() =>
+			(document.querySelector('[data-testid="rm-reader-zoom"]')?.textContent ?? '').replace(
+				'%',
+				'',
+			),
+		);
+	const wants = String(Math.round(target * 100));
+	for (let step = 0; step < 24; step++) {
+		const current = Number(await label());
+		if (String(current) === wants) {
+			await page.waitForFunction(
+				(want) =>
+					document.querySelector('[data-testid="rm-reader-zoom"]')?.textContent === `${want}%`,
+				wants,
+				{ timeout: 20000 },
+			);
+			return;
+		}
+		if (!Number.isFinite(current)) return;
+		await page.click(
+			current < target ? '[data-testid="rm-zoom-in"]' : '[data-testid="rm-zoom-out"]',
+		);
+		await page.waitForTimeout(400);
+	}
+	const now = await label();
+	fail(`could not reach zoom ${wants}% (stopped at ${now}%)`);
+}
+
 async function main() {
 	await withPreview(async () => {
 		log('preview server is up');
@@ -590,9 +632,7 @@ async function main() {
 		}
 
 		// --- Scenario A: zoom=1, rotation=0 ---
-		await page.waitForFunction(
-			() => document.querySelector('[data-testid="rm-reader-zoom"]')?.textContent === '100%',
-		);
+		await setZoomTo(page, 1);
 		const a1 = await verifyAtViewport('A zoom=1 rot=0', 1, SINGLE_QUOTE_P1, 1);
 		const a2 = await verifyAtViewport('A zoom=1 rot=0', 2, MULTI_QUOTE_P2, 2);
 		const a3 = await verifyAtViewport('A zoom=1 rot=0', 3, SINGLE_QUOTE_P3, 1);
@@ -629,9 +669,7 @@ async function main() {
 
 		// --- Scenario C: zoom=1, rotation=90° ---
 		await page.click('[data-testid="rm-zoom-out"]');
-		await page.waitForFunction(
-			() => document.querySelector('[data-testid="rm-reader-zoom"]')?.textContent === '100%',
-		);
+		await setZoomTo(page, 1);
 		await page.click('[data-testid="rm-rotate"]');
 		// Rotation re-renders; the canvas dimensions swap (portrait→landscape).
 		await page.waitForFunction(() => {
