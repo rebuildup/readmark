@@ -236,17 +236,21 @@ export async function fragmentsForRuns(
 }
 
 /**
- * The tolerance two measurements of the same thing may differ by and
- * still count as the same, in raw PDF points.
+ * The tolerance two measurements of the same geometry may differ by and
+ * still count as unchanged, in raw PDF points.
  *
- * 0.25pt is about 0.09mm — a third of the width of a hairline at 100%
- * zoom, and a fiftieth of a character. It is not "small enough to
- * ignore": it is smaller than the difference two measurements of the
- * *same* geometry can produce. A text layer measured at a different
- * device pixel ratio, or through a different font stack, lands a
- * fraction of a point away from the last one, and rewriting the stored
- * anchor every time a document is opened would be a row churning for
- * no reason.
+ * A tolerance exists to *absorb* a difference, so it has to be larger
+ * than the difference it absorbs. Re-measuring a text layer does not
+ * reproduce its last measurement exactly — a different device pixel
+ * ratio, a different font stack, a different layer position all land a
+ * fraction of a point away — and a tolerance below that floor would
+ * report every reopen as a change and rewrite a correct row each time,
+ * which is the opposite of what it is for.
+ *
+ * 0.25pt is about 0.09mm, a fiftieth of a character, and comfortably
+ * above that floor. It is also far below the differences that matter: a
+ * highlight that has moved by a quarter point is on the same glyphs,
+ * and one that has moved by a point is not.
  */
 export const RECT_TOLERANCE_PT = 0.25;
 

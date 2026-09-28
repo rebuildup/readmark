@@ -31,7 +31,16 @@ import { isAnchorOfFormat } from '../../domain/annotation/index.ts';
 import { asPageIndex } from '../../domain/reading-state.ts';
 import type { PageTextItem, PageTextLayer } from '../types.ts';
 import { isPdfAnchor, type PdfAnchor, type PdfRect } from './anchor.ts';
-import { findQuote, freshAnchor, pageText, staleAnchor } from './anchor-recovery.ts';
+import {
+	findQuote,
+	freshAnchor,
+	pageText,
+	QUOTE_CONTEXT_LIMIT,
+	quoteForRange,
+	runsForRange,
+	selectionRangeInLayer,
+	staleAnchor,
+} from './anchor-recovery.ts';
 
 /**
  * A layer whose runs are `["alpha ", "beta ", "gamma."]` unless the
@@ -300,5 +309,199 @@ describe('the recovery answer', () => {
 			expect(resolved.selectedText).toBe('the cat');
 			expect(resolved.page).toBe(3);
 		});
+	});
+});
+
+describe('quoteForRange', () => {
+	// One long run, so the context limit can be tested on a known
+	// alphabet: '.' is the 46th character, so counting is checkable by
+	// hand in the expectations below.
+	const filler = '.'.repeat(80);
+	const page = layerOf([filler]);
+
+	it('takes the selection as the exact text and the rest as context', () => {
+		const quote = quoteForRange(page, { start: 40, end: 44 });
+
+		expect(quote?.exact).toBe('....');
+		expect(quote?.prefix).toHaveLength(QUOTE_CONTEXT_LIMIT);
+		expect(quote?.suffix).toHaveLength(QUOTE_CONTEXT_LIMIT);
+	});
+
+	it('keeps 32 characters of context on each side, and not 33', () => {
+		// The boundary is the whole point of the constant, and both
+		// sides of it are pinned: a limit of 33 would store a row that
+		// `TextQuote` does not describe, and a limit of 31 would throw
+		// away context that disambiguates a short phrase.
+		const quote = quoteForRange(page, { start: 40, end: 44 });
+
+		expect(quote?.prefix).toBe('.'.repeat(32));
+		expect(quote?.prefix).not.toBe('.'.repeat(33));
+		expect(quote?.prefix).not.toBe('.'.repeat(31));
+		expect(quote?.suffix).toBe('.'.repeat(32));
+		expect(quote?.suffix).not.toBe('.'.repeat(33));
+	});
+
+	it('cuts the prefix from the far end, so what survives is adjacent', () => {
+		// The characters nearest the selection are the ones that say
+		// where it was; the far ones are the first to stop being useful.
+		const text = '0123456789ABCDEFGHIJ0123456789abcdefghijKLMNOP';
+		const quote = quoteForRange(layerOf([text]), { start: 40, end: 44 });
+
+		// The selection is `KLMN` at 40..44, so the 32 characters of
+		// context are 8..40: they end with the three characters
+		// immediately before the selection, and the eight before those
+		// are the ones dropped.
+		expect(quote?.exact).toBe('KLMN');
+		expect(quote?.prefix).toBe(text.slice(8, 40));
+		expect(quote?.prefix).toHaveLength(32);
+		expect(quote?.prefix?.endsWith('hij')).toBe(true);
+	});
+
+	it('omits a context it does not have rather than storing an empty one', () => {
+		// A selection at the very start has nothing before it. Storing
+		// `prefix: ''` would be a field the guard accepts and recovery
+		// compares against nothing.
+		const quote = quoteForRange(layerOf(['alpha beta']), { start: 0, end: 5 });
+
+		expect(quote?.exact).toBe('alpha');
+		expect(quote?.prefix).toBeUndefined();
+		expect(quote?.suffix).toBe(' beta');
+	});
+
+	it('refuses an empty selection and a range past the text', () => {
+		// An empty quote matches at the top of every page, so a highlight
+		// that stored one would resolve there on the next open.
+		expect(quoteForRange(page, { start: 20, end: 20 })).toBeNull();
+		expect(quoteForRange(page, { start: 20, end: 19 })).toBeNull();
+		expect(quoteForRange(page, { start: 0, end: pageText(page).length + 1 })).toBeNull();
+	});
+
+	it('builds a quote that findQuote can find again', () => {
+		// The round trip the two ends of the anchor depend on: a quote
+		// built from the layer must resolve against that same layer, or
+		// every anchor goes stale on a document nobody changed.
+		const quote = quoteForRange(ALPHA, { start: 6, end: 10 });
+		if (quote === null) throw new Error('a selection inside the text produced no quote');
+		// Rebuilt rather than spread: `exactOptionalPropertyTypes` will
+		// not take `prefix: undefined` for a field that is optional by
+		// omission, which is the same distinction `quoteForRange` makes.
+		const match = findQuote(ALPHA, {
+			exact: quote.exact,
+			...(quote.prefix === undefined ? {} : { prefix: quote.prefix }),
+			...(quote.suffix === undefined ? {} : { suffix: quote.suffix }),
+		});
+
+		expect(match?.start).toBe(6);
+	});
+});
+
+describe('selectionRangeInLayer', () => {
+	/** A text layer shaped like the DOM `buildTextLayer` produces: one
+	 *  span per run, in the same order, holding the same text. */
+	function domFor(layer: PageTextLayer): {
+		layer: HTMLElement;
+		spanAt: (index: number) => HTMLSpanElement;
+	} {
+		const host = document.createElement('div');
+		host.className = 'rm-text-layer';
+		for (const item of layer.items) {
+			const span = document.createElement('span');
+			span.textContent = item.text;
+			host.appendChild(span);
+		}
+		document.body.appendChild(host);
+		const spans = [...host.querySelectorAll('span')];
+		return { layer: host, spanAt: (index) => spans[index] as HTMLSpanElement };
+	}
+
+	function rangeIn(span: HTMLSpanElement, start: number, end: number): Range {
+		const range = document.createRange();
+		const text = span.firstChild as Text;
+		range.setStart(text, start);
+		range.setEnd(text, end);
+		return range;
+	}
+
+	/** A range whose endpoints are in two different runs — what a drag
+	 *  across a line break produces. */
+	function rangeAcross(
+		from: HTMLSpanElement,
+		fromOffset: number,
+		to: HTMLSpanElement,
+		toOffset: number,
+	): Range {
+		const range = document.createRange();
+		range.setStart(from.firstChild as Text, fromOffset);
+		range.setEnd(to.firstChild as Text, toOffset);
+		return range;
+	}
+
+	it('locates a selection inside one run', () => {
+		const dom = domFor(ALPHA);
+
+		// 'beta' is characters 6..10 of the page, and characters 0..4 of
+		// its own run.
+		const range = selectionRangeInLayer(rangeIn(dom.spanAt(1), 0, 4), ALPHA);
+
+		expect(range).toEqual({ start: 6, end: 10 });
+	});
+
+	it('locates a selection that starts and ends in different runs', () => {
+		const dom = domFor(ALPHA);
+
+		// From the start of 'beta ' to inside 'gamma.': the endpoints are
+		// in different spans, and the page offset has to account for the
+		// whole first run rather than restarting at the second.
+		const range = selectionRangeInLayer(rangeAcross(dom.spanAt(1), 0, dom.spanAt(2), 5), ALPHA);
+
+		expect(range).toEqual({ start: 6, end: 16 });
+	});
+
+	it('reads a caret at the end of a run without running into the next one', () => {
+		const dom = domFor(ALPHA);
+
+		// Dragging to the end of a line produces an offset equal to the
+		// text length. Addressing the next run's text with it would make
+		// the highlight start a word early.
+		const range = selectionRangeInLayer(rangeIn(dom.spanAt(0), 0, 6), ALPHA);
+
+		expect(range).toEqual({ start: 0, end: 6 });
+	});
+
+	it('refuses a selection this page cannot account for', () => {
+		domFor(ALPHA);
+		const elsewhere = document.createElement('span');
+		elsewhere.textContent = 'another page';
+		document.body.appendChild(elsewhere);
+		const outside = document.createRange();
+		const outsideText = elsewhere.firstChild as Text;
+		outside.setStart(outsideText, 0);
+		outside.setEnd(outsideText, 4);
+
+		// Cross-page selections are two anchors (ADR-0007), and a
+		// highlight that silently covered the wrong page is worse than one
+		// that was not offered.
+		expect(selectionRangeInLayer(outside, ALPHA)).toBeNull();
+		expect(selectionRangeInLayer(document.createRange(), ALPHA)).toBeNull();
+	});
+});
+
+describe('runsForRange', () => {
+	it('gives the page-global index and the run-local extent of each run', () => {
+		const runs = runsForRange(ALPHA, { start: 6, end: 16 });
+
+		expect(runs.map((run) => [run.runIndex, run.start, run.end])).toEqual([
+			[1, 0, 5],
+			[2, 0, 5],
+		]);
+	});
+
+	it('clamps a run the range only touches at an edge', () => {
+		const runs = runsForRange(ALPHA, { start: 3, end: 8 });
+
+		expect(runs.map((run) => [run.runIndex, run.start, run.end])).toEqual([
+			[0, 3, 6],
+			[1, 0, 2],
+		]);
 	});
 });

@@ -624,9 +624,24 @@ async function main() {
 					'subtracting the layer origin is required, and this proves it is sufficient',
 			);
 		}
+		// The same geometry, measured twice, has to land inside the
+		// tolerance `rectsMatch` uses or every reopen would look like a
+		// change and rewrite a correct row. The measurement layer is built
+		// at scale 1, so here a CSS pixel is a PDF point. This is
+		// *layout* drift — the same spans, moved — rather than a full
+		// re-measurement through a second text layer, which needs a
+		// caller and comes with the UI wiring.
+		const drift = Math.abs(measured.localBefore - measured.localAfter);
+		if (drift > 0.25) {
+			fail(
+				`re-measuring identical geometry drifted ${drift}pt, above the 0.25pt tolerance; ` +
+					'every reopen would be reported as a changed highlight',
+			);
+		}
 		log(
 			`off-screen origin: client x moved ${Math.round(shift)}px with the host, ` +
-				`layer-local x stayed at ${Math.round(measured.localBefore)}px`,
+				`layer-local x stayed at ${Math.round(measured.localBefore)}px ` +
+				`(re-measured ${Number(drift.toFixed(3))}pt away, inside the 0.25pt tolerance)`,
 		);
 
 		// --- Lazy: the far end of the document is still a placeholder ---

@@ -36,6 +36,8 @@ import type {
 	RenderOptions,
 	ResolvedAnchor,
 } from '../types.ts';
+import { fragmentsForRuns } from './anchor-geometry.ts';
+import { quoteForRange, runsForRange, selectionRangeInLayer } from './anchor-recovery.ts';
 import type { ViewportLike } from './pdf-coords.ts';
 import { buildTextLayer, extractPageTextLayer } from './pdf-text-layer.ts';
 
@@ -148,12 +150,48 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 	}
 
 	/**
-	 * #7 owns selection → `Anchor`. Returning `null` keeps the
-	 * contract honest until then: a rect produced without the quote
-	 * would be stored as a canonical recovery key it cannot honour.
+	 * The anchor for a live selection: what the reader highlighted, and
+	 * where on the page they highlighted it.
+	 *
+	 * Both halves come from the same place on purpose.
+	 *
+	 * The **quote** is built from the text layer's items and the
+	 * selection's offsets within them — never from
+	 * `Selection.toString()`. The browser synthesises whitespace and line
+	 * breaks from layout, so its answer disagrees with the layer the
+	 * quote is later searched against, and an anchor whose quote cannot
+	 * find its own text goes stale on a document nobody changed.
+	 *
+	 * The **rects** are measured, through the same helper recovery uses,
+	 * from a text layer built for measuring. A selection is a live thing
+	 * in the reader's own layer; the anchor outlives it, at a different
+	 * zoom, after a rotation, and possibly in a session that never
+	 * renders this page at all.
+	 *
+	 * `null` when there is no selection to store: an empty one, a
+	 * collapsed one, or one that does not start and end inside this
+	 * page's own text layer. Cross-page selections are two anchors
+	 * (ADR-0007), and a selection that reaches into another page has no
+	 * single page to belong to.
 	 */
-	async createAnchorFromSelection(_selection: ReaderSelection): Promise<Anchor | null> {
-		return null;
+	async createAnchorFromSelection(selection: ReaderSelection): Promise<Anchor | null> {
+		const layer = await this.text();
+		const range = selectionRangeInLayer(selection.range, layer);
+		// A collapsed range is a click, not a drag.
+		if (range === null) return null;
+		const quote = quoteForRange(layer, range);
+		if (quote === null) return null;
+		const runs = runsForRange(layer, range);
+		const fragments = await fragmentsForRuns(this.pdfPage, layer, runs);
+		// Rects the anchor could not be measured with. A rect produced
+		// without them would be a claim about where the text is that
+		// nothing checked, and the quote alone cannot answer it.
+		if (fragments === null) return null;
+
+		return {
+			format: 'pdf',
+			payload: { page: this.index, rects: fragments, quote },
+		};
 	}
 
 	/**

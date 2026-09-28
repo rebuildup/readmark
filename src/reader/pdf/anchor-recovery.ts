@@ -262,3 +262,154 @@ export function staleAnchor(payload: PdfAnchor): ResolvedAnchor {
 		updatedAnchor: null,
 	};
 }
+
+/**
+ * How much context a stored quote keeps on each side.
+ *
+ * 32 characters is what `TextQuote` documents, and the point of the
+ * limit is size, not discrimination: the context exists to tell two
+ * occurrences of a short phrase apart, and every extra character makes
+ * the quote less likely to match again after an edit nearby. More than
+ * this and a one-word highlight stores a paragraph of its neighbours.
+ */
+export const QUOTE_CONTEXT_LIMIT = 32;
+
+/**
+ * The quote for a selection: its own text, with the surrounding words
+ * as context.
+ *
+ * Built from the text layer's own items and offsets, never from
+ * `Selection.toString()`. The browser synthesises whitespace and line
+ * breaks from layout, so its answer disagrees with `pageText` at every
+ * line wrap — and the quote is the half of the anchor that has to match
+ * on the next open. A quote that disagrees with its own recovery is an
+ * anchor that goes stale on a document nobody changed.
+ *
+ * The context is truncated to `QUOTE_CONTEXT_LIMIT` on both sides, and
+ * truncated from the *end*: the characters nearest the selection are
+ * the ones that identify where it was, and the ones furthest away are
+ * the first to stop being useful.
+ */
+export function quoteForRange(
+	layer: PageTextLayer,
+	range: { readonly start: number; readonly end: number },
+): TextQuote | null {
+	if (range.end <= range.start) return null;
+	const text = pageText(layer);
+	// A range past the end of the text is a caller that measured
+	// something this layer does not have; there is no quote to store.
+	if (range.end > text.length) return null;
+	return {
+		exact: text.slice(range.start, range.end),
+		...(contextBefore(text, range.start) === ''
+			? {}
+			: { prefix: contextBefore(text, range.start) }),
+		...(contextAfter(text, range.end) === '' ? {} : { suffix: contextAfter(text, range.end) }),
+	};
+}
+
+/** Up to the limit of text immediately before `start`, cut from the
+ *  end so what survives is the part adjacent to the selection. */
+function contextBefore(text: string, start: number): string {
+	return text.slice(Math.max(0, start - QUOTE_CONTEXT_LIMIT), start);
+}
+
+/** Up to the limit of text immediately after `end`, cut from the end:
+ *  after the selection there is nothing nearer to lose, so the far end
+ *  is what gets dropped. */
+function contextAfter(text: string, end: number): string {
+	return text.slice(end, end + QUOTE_CONTEXT_LIMIT);
+}
+
+/** A run, and the characters of it that a range covers. */
+interface CoveredRun {
+	readonly runIndex: number;
+	readonly item: PageTextItem;
+	readonly start: number;
+	readonly end: number;
+}
+
+/**
+ * The page-level character range a DOM selection covers, or `null`.
+ *
+ * Character offsets come from the DOM, and the page's text is the
+ * layer's items joined — the same string `findQuote` searches and
+ * `quoteForRange` slices. So the selection has to be *located* in that
+ * string rather than measured: each endpoint's containing text node is
+ * matched against the layer's runs in order, and the offsets are
+ * counted from there.
+ *
+ * A caret inside a run carries no character of its own, so an endpoint
+ * is placed between the two runs it sits between, by which run contains
+ * it. That is why a selection can be resolved when the reader dragged
+ * to the very end of a line.
+ *
+ * `null` for a selection this page cannot account for: none, collapsed,
+ * or one whose endpoints are not both inside this page's text layer.
+ * The last case is the cross-page selection, and it is the one that must
+ * not be guessed at — a highlight that silently covered the wrong page
+ * is worse than one that was not offered.
+ */
+export function selectionRangeInLayer(
+	range: Range,
+	layer: PageTextLayer,
+): { readonly start: number; readonly end: number } | null {
+	const start = offsetOfNode(range.startContainer, range.startOffset, layer);
+	const end = offsetOfNode(range.endContainer, range.endOffset, layer);
+	if (start === null || end === null) return null;
+	// The DOM orders a range's endpoints, so this is a guard rather than
+	// a path: a range whose start sits after its end is a caller that
+	// built it by hand, and the anchor cares about the span covered, not
+	// about which end the reader pressed first.
+	return { start: Math.min(start, end), end: Math.max(start, end) };
+}
+
+/** Where a DOM endpoint lands in the layer's text, or `null` when the
+ *  endpoint is not part of this page's text layer. */
+function offsetOfNode(node: Node | null, offset: number, layer: PageTextLayer): number | null {
+	if (node === null) return null;
+	const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+	if (!(element instanceof HTMLElement)) return null;
+	const span = element.closest('span');
+	if (span === null) return null;
+	// The run's position is its position in the layer, which is the
+	// position of its span: same projection, same order.
+	const spans = span.parentElement?.querySelectorAll('span');
+	if (spans === undefined) return null;
+	const runIndex = Array.from(spans).indexOf(span);
+	if (runIndex === -1) return null;
+	const item = layer.items[runIndex];
+	if (item === undefined) return null;
+
+	let base = 0;
+	for (let index = 0; index < runIndex; index++) {
+		base += layer.items[index]?.text.length ?? 0;
+	}
+	// A caret is a position, not a character. Clamping to the run's own
+	// length keeps an offset past the end — which the DOM allows at the
+	// end of a text node and which a drag to the line end produces —
+	// from addressing the next run's text.
+	return base + Math.min(offset, item.text.length);
+}
+
+/** The runs a range covers, as `fragmentsForRuns` addresses them. */
+export function runsForRange(
+	layer: PageTextLayer,
+	range: { readonly start: number; readonly end: number },
+): readonly CoveredRun[] {
+	const runs: CoveredRun[] = [];
+	let offset = 0;
+	for (const [runIndex, item] of layer.items.entries()) {
+		const itemStart = offset;
+		const itemEnd = offset + item.text.length;
+		offset = itemEnd;
+		if (itemEnd <= range.start || itemStart >= range.end) continue;
+		runs.push({
+			runIndex,
+			item,
+			start: Math.max(0, range.start - itemStart),
+			end: Math.min(item.text.length, range.end - itemStart),
+		});
+	}
+	return runs;
+}

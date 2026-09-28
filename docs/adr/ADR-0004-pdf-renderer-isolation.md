@@ -374,6 +374,16 @@ hand an `Anchor` to a repository, payload unread — so the opacity that
 protects the boundary on the way out of storage protects it on the way
 back in.
 
+**And that write-back is the only persistence a resolver may cause.**
+`resolveAnchor` answering `null` is not a deletion instruction: it says
+this reader cannot resolve this anchor against *this* source, which is a
+fact about a file the reader may not even hold the whole of. A caller
+that treats `null` as "the annotation is gone" would delete a reader's
+highlight because they opened a shorter copy of the book, or a
+different file. Deleting persisted state belongs to a user action; the
+resolver's whole vocabulary is `updatedAnchor`, and it only speaks when
+it is non-null.
+
 ### Two gates, not one
 
 `isPdfAnchor` validates a **persisted `Anchor.payload`**. `display` is

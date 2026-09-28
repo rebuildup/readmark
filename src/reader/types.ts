@@ -113,6 +113,15 @@ export interface ReaderHandle<F extends DocumentFormat> {
 	 *  Returns `null` only if the anchor cannot be resolved at
 	 *  all (e.g. its page no longer exists in this source).
 	 *
+	 *  **`null` is not permission to delete the row.** It says this
+	 *  reader cannot resolve this anchor *against this source*, which
+	 *  is a fact about a file the reader may not even hold the whole
+	 *  of. A caller that reads it as "the annotation is gone" would
+	 *  delete a reader's highlight because they opened a shorter copy
+	 *  of the book, or a different file. Deleting persisted state is a
+	 *  user action; the only mutation a resolver may cause is the
+	 *  `updatedAnchor` write-back, and only when it is not `null`.
+	 *
 	 *  Format-specific display data is opaque (`unknown`) on
 	 *  `ResolvedAnchor.display`. Generic UI cannot read it; pass
 	 *  it back to the format-specific reader for painting. */
