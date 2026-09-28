@@ -190,8 +190,15 @@ export interface PageHandle<F extends DocumentFormat> {
 	 * and would get it wrong the first time zoom or rotation changed.
 	 *
 	 * `options` defaults to the options this page was last rendered
-	 * with, which is what a caller that is not changing the render
-	 * state wants.
+	 * with, which is what a caller that is not changing render state
+	 * wants. A page that has never been rendered has no transform to
+	 * default to, and inventing one would place every rect in the
+	 * wrong place while looking like it worked: calling this before
+	 * `render` is a programming error and rejects.
+	 *
+	 * `display` is gated separately from a persisted anchor's
+	 * `payload` — it is a different field on a different type, and
+	 * `isPdfAnchor` does not apply to it. See ADR-0004 §Two gates.
 	 */
 	paintResolvedAnchor(
 		anchor: ResolvedAnchor,

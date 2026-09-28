@@ -310,8 +310,8 @@ the whole `ResolvedAnchor` to the page that produced it.**
         │   generic UI must NOT read: display
         ▼
   PageHandle.paintResolvedAnchor(resolved, target)
-        │  isAnchorOfFormat(anchor,'pdf') && isPdfAnchor(anchor)
-        │  display  → PdfRect[]  (narrowed inside reader/pdf/)
+        │  resolved.format === 'pdf'   ← different gate from recovery
+        │  isPdfResolvedDisplay(display)  ← PDF-side, guards `display`
         │  PdfRect[] (raw user-space) + RenderOptions
         │    → pdf.js viewport transform
         ▼
@@ -321,7 +321,7 @@ the whole `ResolvedAnchor` to the page that produced it.**
 Two properties the diagram is asserting, not just describing:
 
 - **The narrowing happens on the format side.** `display` is read
-  through `isPdfAnchor`'s companion check inside `reader/pdf/`, never
+  through a format-specific validator inside `reader/pdf/`, never
   by a cast in `src/ui/`. `unknown` is what forces that: a UI that
   tried to read it would not typecheck.
 - **The transform is applied once, at paint time.** Stored rects are
@@ -335,6 +335,31 @@ Two properties the diagram is asserting, not just describing:
 overlay is drawn as a resolved highlight or as the "this position is a
 guess" marker is a format decision about how the rects were derived,
 so the page needs it, not the UI.
+
+### Two gates, not one
+
+`isPdfAnchor` validates a **persisted `Anchor.payload`**. `display` is
+not that field — `ResolvedAnchor` has no `payload` at all — so the two
+`unknown`-typed values on either side of recovery are gated
+separately:
+
+| entry point | value being read | gate | lives in |
+| --- | --- | --- | --- |
+| `resolveAnchor(anchor)` | `Anchor.payload` | `isAnchorOfFormat(anchor, 'pdf') && isPdfAnchor(anchor)` | `domain/annotation/` + `reader/pdf/anchor.ts` |
+| `paintResolvedAnchor(resolved, target)` | `ResolvedAnchor.display` | `resolved.format === 'pdf' && isPdfResolvedDisplay(resolved.display)` | `reader/pdf/` |
+
+`isPdfResolvedDisplay(value): value is readonly PdfRect[]` is a
+separate validator because the thing it checks is a different thing:
+not "is this a well-formed anchor" but "is this a `PdfRect[]` that
+came out of our own recovery pass". It is deliberately not a reuse of
+`isPdfAnchor` — a single guard covering both would have to claim to
+validate a field that the other type does not have, which is the same
+kind of lie as the rejected single-guard
+`isAnchorOfFormat<PdfAnchor>` (ADR-0007 §Enforcement).
+
+Both gates return `false` rather than throwing on a shape they do not
+recognise, so a row written by a future version is painted as nothing
+instead of taking the reader down.
 
 ### Why `page()` is async
 
