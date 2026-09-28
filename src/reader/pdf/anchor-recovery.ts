@@ -59,24 +59,24 @@
  * asks for "one entry per visual line of the selection", which a
  * per-run rect is not even when the run happens to be a whole line.
  *
- * Turning offsets into rects is the next stage, and it has two
- * decisions in it that this file deliberately does not make:
+ * Turning offsets into rects is a separate stage, and it does not
+ * measure anything itself: it measures the text layer with
+ * `Range.getClientRects()` and converts the client rects back to
+ * user-space. See ADR-0007 §"Where fragment geometry comes from" for
+ * why the run's own box is not enough (a run's box is the box of the
+ * whole run) and why a proportional split along that box is not used
+ * (it is visibly wrong on a justified line, and a highlight that
+ * drifts off its text is worse than a coarse one).
  *
- *   - **Cutting a partially-covered run.** `PageTextItem` carries a
- *     bounding box and the run's text, with no per-character geometry,
- *     so the only thing available is a proportional split along the
- *     run's width. That is an approximation, and it is visibly wrong
- *     for a justified line or a run of mixed-width glyphs. It has to
- *     be decided against something better (pdf.js's per-item transform,
- *     or a text-layer measurement) rather than quietly assumed here.
- *   - **Merging runs on one visual line.** A line is often several
- *     runs; the payload wants one rect per line, so runs sharing a
- *     baseline have to be unioned — which needs the same geometry the
- *     cut above needs.
+ * The shapes here are what that stage needs and nothing more: which
+ * runs, and which characters inside each. Fragments are one-or-more
+ * per selection and are not merged per line — a PDF line is split
+ * into runs for reasons that have nothing to do with reading, so the
+ * runs on one baseline are not one rectangle.
  *
- * Both are display-only concerns (ADR-0007: rects are the display half,
- * the quote is canonical), which is why they do not sit on the path
- * that decides whether an anchor is trusted.
+ * All of this is display-only (ADR-0007: the quote is canonical and
+ * the rects are the display half), which is why none of it sits on
+ * the path that decides whether an anchor is trusted.
  */
 
 import type { PageTextItem, PageTextLayer } from '../types.ts';

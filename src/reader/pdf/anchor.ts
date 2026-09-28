@@ -84,10 +84,22 @@ export interface TextQuote {
 export interface PdfAnchor {
 	/** 1-based page index. */
 	readonly page: PageIndex;
-	/** Display rectangles. One entry per visual line of the
-	 *  selection (a single paragraph usually produces N rects,
-	 *  one per line). Raw PDF user-space; runtime rotation is
-	 *  applied at render time. */
+	/**
+	 * Display rectangles, in raw PDF user-space.
+	 *
+	 * One or more visual fragments covering the selection, not one
+	 * rect per line and not one per text-layer run. A PDF line is
+	 * split into runs for reasons that have nothing to do with reading
+	 * — a font change, a kerning pair, marked content — and the runs
+	 * on one baseline are not one rectangle, so merging them would
+	 * either cover the gap between them or take the widest run's box.
+	 * The count is not part of the contract; what is guaranteed is
+	 * that the fragments together cover the selection.
+	 *
+	 * These are built by measuring the text layer (see ADR-0007
+	 * §"Where fragment geometry comes from"), which is why a stored
+	 * rect is a place to paint rather than a derivation of the text.
+	 */
 	readonly rects: readonly PdfRect[];
 	/** Canonical recovery key. */
 	readonly quote: TextQuote;
