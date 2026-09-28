@@ -550,7 +550,12 @@ pre {
 	--rm-highlight-stale-fill: transparent;
 }
 
-.rm-page[data-highlight-color="yellow"] {
+/* Keyed off an attribute on whatever the UI owns around the page — the
+ * page host, not the box `render` created, which the reader and the
+ * painter both fill. The custom properties inherit down to the overlay
+ * inside the box, which is how a stored *name* reaches a colour without
+ * the painter knowing what colour is. */
+[data-highlight-color="yellow"] {
 	--rm-highlight-fill: color-mix(in srgb, var(--rm-highlight-yellow) 45%, transparent);
 	--rm-highlight-stale-fill: color-mix(in srgb, var(--rm-highlight-yellow) 20%, transparent);
 }

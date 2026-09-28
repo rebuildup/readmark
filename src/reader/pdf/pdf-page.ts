@@ -55,12 +55,23 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 	private closed = false;
 
 	/**
-	 * The viewport of the last render that completed, or `null` before
-	 * the first one. Held as the object, not as `RenderOptions`, so the
-	 * painter converts through the same transform the canvas was drawn
-	 * with rather than a re-derivation of it.
+	 * The last render that completed: its transform, and the two elements
+	 * it produced. `null` before the first one, and again while a render
+	 * is in flight.
+	 *
+	 * All three are held together because all three are what "the pixels
+	 * currently in this element were drawn with" means. The viewport
+	 * alone cannot say a caller's target is the right one: every rendered
+	 * page contains a `.rm-page`, so a host another `PageHandle` painted
+	 * would satisfy a structural check. The painter compares element
+	 * identity, which is the only thing that cannot be true of the wrong
+	 * page by coincidence.
 	 */
-	private lastViewport: ViewportLike | null = null;
+	private lastRender: {
+		readonly viewport: ViewportLike;
+		readonly target: HTMLElement;
+		readonly page: HTMLElement;
+	} | null = null;
 
 	constructor(
 		readonly index: PageIndex,
@@ -85,7 +96,7 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 		// converted through it would place fragments against a canvas that
 		// is about to be replaced. Dropping it makes such a paint say so
 		// instead of quietly drawing in the wrong place.
-		this.lastViewport = null;
+		this.lastRender = null;
 
 		const scale = options.scale ?? 1;
 		const rotation = options.rotation ?? 0;
@@ -164,7 +175,7 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 		// has to convert through *this* transform, and re-deriving one
 		// from options is how a highlight ends up beside its text.
 		if (this.generation === generation && !this.closed) {
-			this.lastViewport = viewport;
+			this.lastRender = { viewport, target, page };
 		}
 	}
 
@@ -253,23 +264,27 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 					`page ${anchor.page}`,
 			);
 		}
-		const viewport = this.lastViewport;
-		if (viewport === null) {
+		const rendered = this.lastRender;
+		if (rendered === null) {
 			// Also the case where a re-render is in flight: the transform
 			// was dropped when it started, and the target is mid-rebuild.
 			throw new Error(
 				`readmark: paintResolvedAnchor called before page ${this.index} finished rendering`,
 			);
 		}
-		// The page box, not the host: `render` puts the canvas and the
-		// text layer inside it, so an overlay appended to the host instead
-		// would be positioned in a different coordinate system and would
-		// sit outside the tokens the caller set on the host.
-		const page = target.querySelector<HTMLElement>(`.${PDF_PAGE_CLASS}`);
-		if (page === null) {
-			throw new Error(`readmark: paintResolvedAnchor target holds no rendered page ${this.index}`);
+		// Identity, not "does it contain a page box". Every rendered page
+		// holds a `.rm-page`, so a host some *other* `PageHandle` painted
+		// would pass a structural check — and this page's fragments would
+		// then be laid over someone else's canvas, converted through a
+		// transform that has nothing to do with either.
+		if (rendered.target !== target) {
+			throw new Error(
+				`readmark: paintResolvedAnchor was given an element page ${this.index} was not ` +
+					'rendered into',
+			);
 		}
 		if (!isPdfResolvedDisplay(anchor.display)) return;
+		const { viewport, page } = rendered;
 
 		const layer = document.createElement('div');
 		layer.className = 'rm-highlight';
@@ -308,7 +323,7 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 		this.generation++;
 		// A closed page has no canvas left to describe, so it has no
 		// transform to convert through either.
-		this.lastViewport = null;
+		this.lastRender = null;
 		this.cancelPendingRender();
 		this.pdfPage.cleanup();
 	}

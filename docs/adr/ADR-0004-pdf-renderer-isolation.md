@@ -192,12 +192,13 @@ export interface PageHandle<F extends DocumentFormat> {
   ): Promise<Anchor | null>;
 
   /** Paint a resolved anchor's highlight overlay into `target`.
-   *  Reads `anchor.display` (opaque to generic UI) and computes
-   *  viewport-space rects from the page's current render options. */
+   *  Reads `anchor.display` (opaque to generic UI) and converts it
+   *  through the transform of the last render that completed into
+   *  `target`. There is no options parameter: see §"What the painter
+   *  may refuse, and where it draws". */
   paintResolvedAnchor(
     anchor: ResolvedAnchor,
     target: HTMLElement,
-    options?: RenderOptions,
   ): Promise<void>;
 }
 ```
@@ -310,13 +311,14 @@ the whole `ResolvedAnchor` to the page that produced it.**
         │   generic UI reads: page, freshness, selectedText
         │   generic UI must NOT read: display
         ▼
-  PageHandle.paintResolvedAnchor(resolved, target)
-        │  resolved.format === 'pdf'   ← different gate from recovery
+  PageHandle.paintResolvedAnchor(anchor, target)
+        │  anchor.format === 'pdf'   ← different gate from recovery
         │  isPdfResolvedDisplay(display)  ← PDF-side, guards `display`
-        │  PdfRect[] (raw user-space) + RenderOptions
+        │  target must be the element this page was rendered into
+        │  PdfRect[] (raw user-space) + the last completed viewport
         │    → pdf.js viewport transform
         ▼
-  overlay elements in `target` (viewport CSS px)
+  overlay inside the page box `render` created (viewport CSS px)
 
   updatedAnchor                          ← only when it is not null
         │   generic caller persists it, payload unread
@@ -339,9 +341,18 @@ and there is no parameter to override that. An earlier version of the
 contract took `RenderOptions` and re-derived a viewport from them; that
 is the exact mistake the method exists to prevent, because the transform
 that puts a highlight on its glyphs is the one the canvas was drawn
-with. The viewport is also dropped when a render *starts*, so a paint
-during a re-render cannot convert through a transform that no longer
-describes what is on screen.
+with. The remembered render is also dropped when a render *starts*, so a
+paint during a re-render cannot convert through a transform that no
+longer describes what is on screen.
+
+**Ownership is by identity, not by structure.** "The target contains a
+`.rm-page`" is not evidence that this page painted it: every rendered
+page contains one, so a host another `PageHandle` painted would pass
+that check and this page's fragments would then be laid over someone
+else's canvas, converted through an unrelated transform. The handle
+therefore remembers the target element alongside the transform and
+compares identity, and draws into the page box it created rather than
+querying for one.
 
 Refusals are two kinds, and the difference is worth a stack trace:
 
@@ -364,10 +375,10 @@ Two properties the diagram is asserting, not just describing:
   tried to read it would not typecheck.
 - **The transform is applied once, at paint time.** Stored rects are
   raw user-space (ADR-0007), so a zoom or rotation change never
-  invalidates them; the page applies the transform the *current*
-  `RenderOptions` imply. A generic UI that positioned rects itself
-  would have to re-derive that transform on every zoom, and would
-  diverge from the canvas the first time it did.
+  invalidates them; the page applies the transform of the render the
+  canvas in the target was actually drawn with. A generic UI that
+  positioned rects itself would have to re-derive that transform on
+  every zoom, and would diverge from the canvas the first time it did.
 
 `freshness` travels with the anchor for the same reason: whether an
 overlay is drawn as a resolved highlight or as the "this position is a

@@ -558,16 +558,53 @@ describe('PdfPageHandle.paintResolvedAnchor', () => {
 		expect(style.width).toBe('400px');
 	});
 
-	it('rejects a target that holds no rendered page', async () => {
+	it('rejects an element this page was not rendered into', async () => {
 		const { page } = await renderedPage(makeProxy().proxy);
 
-		// `render` puts the canvas and the text layer inside a page box it
-		// creates; the overlay has to go in there too, or it is positioned
-		// in a different coordinate system and sits outside the tokens the
-		// caller set on the host.
+		// The overlay has to land inside the box `render` created, or it is
+		// positioned in a different coordinate system and sits outside the
+		// tokens the caller set on the host.
 		await expect(page.paintResolvedAnchor(resolved(), target())).rejects.toThrow(
-			/holds no rendered page/,
+			/was not rendered into/,
 		);
+	});
+
+	it('rejects a host that another page handle rendered', async () => {
+		// Every rendered page contains a `.rm-page`, so "the target holds a
+		// page box" is not evidence of anything. This is the check that
+		// stops one page's fragments being laid over another's canvas and
+		// converted through an unrelated transform.
+		const { page, into } = await renderedPage(makeProxy().proxy);
+		const other = await renderedPage(makeProxy().proxy, { scale: 2 });
+
+		await expect(page.paintResolvedAnchor(resolved(), other.into)).rejects.toThrow(
+			/was not rendered into/,
+		);
+		// Its own host still works, and the two handles are independent.
+		await page.paintResolvedAnchor(resolved(), into);
+		expect(into.querySelector('.rm-highlight')).not.toBeNull();
+		expect(other.into.querySelector('.rm-highlight')).toBeNull();
+	});
+
+	it('lets a colour set on the host reach the overlay, and only that way', async () => {
+		// `Highlight.color` is a semantic name on a generic domain type.
+		// The UI sets it on the host it owns; the custom property inherits
+		// down to the overlay inside the box, and the painter emits neither
+		// a colour nor a colour hook. An unlabelled host leaves the overlay
+		// transparent, which is the painter declining to choose rather than
+		// choosing a default.
+		const { page, into } = await renderedPage(makeProxy().proxy);
+		into.setAttribute('data-highlight-color', 'yellow');
+
+		await page.paintResolvedAnchor(resolved(), into);
+
+		const host = into as HTMLElement;
+		expect(host.getAttribute('data-highlight-color')).toBe('yellow');
+		const box = into.querySelector('.rm-page');
+		// The box is created by the reader, not by the UI, and the painter
+		// writes neither an attribute nor a colour into it.
+		expect(box?.hasAttribute('data-highlight-color')).toBe(false);
+		expect(box?.querySelector('.rm-highlight__fragment')).not.toBeNull();
 	});
 
 	it('places the overlay inside the page box, not beside it', async () => {
