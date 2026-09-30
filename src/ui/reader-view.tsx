@@ -99,8 +99,55 @@ function storedOffset(position: Bookmark['position']): ScrollPosition {
 
 /** Zoom stops the toolbar steps through. Discrete rather than
  *  multiplicative so "zoom in" can land back at 100% instead of
- *  drifting to 112% and staying there. */
+ *  drifting to 112% and staying there.
+ *
+ *  Note that the reader does NOT start on one of these. A book page is
+ *  ~515pt wide, so 100% draws it at 515 CSS px and the body text lands
+ *  around 10px — technically correct and practically unreadable. The
+ *  opening zoom is fit-width (see `fitWidthScale`), and these stops
+ *  remain for the explicit +/- steps from there. */
 export const ZOOM_LEVELS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3] as const;
+
+/** Horizontal breathing room the scroller leaves around a page.
+ *  Must match the `.rm-reader-scroll` / `.rm-reader-pages` padding in
+ *  `styles.css`, or a fitted page will overflow by exactly this much
+ *  and the user gets a horizontal scrollbar on first open. */
+export const FIT_WIDTH_PADDING_PX = 48;
+
+/**
+ * The scale at which a page fills the available width.
+ *
+ * Why this is the opening zoom: 100% means "one PDF point per CSS
+ * pixel", which is a printing notion, not a reading one. A 515pt book
+ * page at 100% is smaller than the real thing. Every reader worth
+ * using opens at fit-width, because "can I read the page" depends on
+ * the window, not on the file.
+ *
+ * Clamped to the same range the +/- buttons respect, so a fit can never
+ * land outside what the user can then step away from. The upper clamp
+ * matters most: a short page (a slide, a receipt) on a wide monitor
+ * would otherwise scale to an unreadable size and allocate a canvas
+ * far larger than the display.
+ */
+export function fitWidthScale(availableWidthPx: number, pageWidthPt: number): number {
+	if (!Number.isFinite(availableWidthPx) || !Number.isFinite(pageWidthPt)) return 1;
+	if (pageWidthPt <= 0 || availableWidthPx <= 0) return 1;
+	const usable = Math.max(120, availableWidthPx - FIT_WIDTH_PADDING_PX);
+	const scale = usable / pageWidthPt;
+	return clampZoom(scale);
+}
+
+/** The zoom range, as one rule.
+ *
+ *  `clampZoom` and `nextZoom` both have to agree on the ends, or a
+ *  fitted page could be one the user cannot zoom out of. */
+export const MIN_ZOOM = 0.25;
+export const MAX_ZOOM = 5;
+
+export function clampZoom(scale: number): number {
+	if (!Number.isFinite(scale)) return 1;
+	return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, scale));
+}
 
 /** Keys that scroll the document, and so count as the reader taking
  *  over from a restore in progress. */
@@ -228,6 +275,9 @@ interface PdfPageViewProps {
 	 *  highlighted; the render effect does not care either way. */
 	readonly highlights: readonly HighlightRow[];
 	readonly onMeasured: (index: PageIndex, footprint: PageFootprint) => void;
+	/** Reports a page's intrinsic size in PDF points (zoom-independent).
+	 *  Called for every measurement; the reader keeps the first. */
+	readonly onIntrinsicSize?: (size: { widthPt: number; heightPt: number }) => void;
 	readonly onError: (error: unknown) => void;
 }
 
@@ -249,6 +299,7 @@ function PdfPageView({
 	reserved,
 	highlights,
 	onMeasured,
+	onIntrinsicSize,
 	onError,
 }: PdfPageViewProps) {
 	const hostRef = useRef<HTMLDivElement | null>(null);
@@ -319,6 +370,19 @@ function PdfPageView({
 				if (cancelled) return;
 				const rendered = host.querySelector<HTMLElement>(`.${PDF_PAGE_CLASS}`);
 				if (rendered === null) return;
+				// The footprint is in CSS px, so it is zoom-dependent and
+				// cannot be compared against a viewport width. The
+				// intrinsic width in points is what fit-width needs, and
+				// dividing by the scale we just rendered at recovers it.
+				// Captured once, on the first report: later reports are
+				// the same page at a different zoom, and taking the
+				// latest would feed the fit its own output.
+				if (onIntrinsicSize !== undefined) {
+					const scale = options.scale !== undefined && options.scale > 0 ? options.scale : 1;
+					const w = rendered.offsetWidth || Number.parseFloat(rendered.style.width) || 0;
+					const h = rendered.offsetHeight || Number.parseFloat(rendered.style.height) || 0;
+					onIntrinsicSize({ widthPt: w / scale, heightPt: h / scale });
+				}
 				onMeasured(index, {
 					width: rendered.offsetWidth || Number.parseFloat(rendered.style.width) || 0,
 					height: rendered.offsetHeight || Number.parseFloat(rendered.style.height) || 0,
@@ -335,7 +399,7 @@ function PdfPageView({
 		return () => {
 			cancelled = true;
 		};
-	}, [handle, index, materialized, onError, onMeasured, options]);
+	}, [handle, index, materialized, onError, onMeasured, onIntrinsicSize, options]);
 
 	// What has been painted, and this view's ownership of it. A ref, not
 	// state: reconciliation is a side effect on the DOM, and putting the
@@ -457,7 +521,10 @@ export function ReaderView({
 	sourceFingerprint,
 	initialPosition,
 }: ReaderViewProps) {
-	const [zoom, setZoom] = useState<number>(1);
+	// `null` means "not chosen yet" and lets the fit-width effect below
+	// pick the opening zoom once a page and a viewport both exist. A
+	// number means the reader (or a restored preference) has taken over.
+	const [zoom, setZoom] = useState<number | null>(null);
 	const [rotation, setRotation] = useState<0 | 90 | 180 | 270>(0);
 	const [footprints, setFootprints] = useState<ReadonlyMap<PageIndex, PageFootprint>>(
 		() => new Map(),
@@ -557,22 +624,114 @@ export function ReaderView({
 		[flushSave],
 	);
 
+	const [intrinsicSizePt, setIntrinsicSizePt] = useState<{
+		readonly widthPt: number;
+		readonly heightPt: number;
+	} | null>(null);
+	const handleIntrinsicSize = useCallback((size: { widthPt: number; heightPt: number }) => {
+		setIntrinsicSizePt((previous) => {
+			if (previous !== null || size.widthPt <= 0 || size.heightPt <= 0) return previous;
+			return size;
+		});
+	}, []);
+
+	// The effective scale every render and every reserved box uses. Until
+	// the fit has been computed this is 1, which is only ever visible for
+	// the single frame before the first measurement lands.
+	const effectiveZoom = zoom ?? 1;
+
 	// One object for the whole document, so a zoom change re-renders
 	// every visible page against the same viewport and each page's
 	// effect sees a stable `options` identity.
-	const options = useMemo<RenderOptions>(() => ({ scale: zoom, rotation }), [zoom, rotation]);
+	const options = useMemo<RenderOptions>(
+		() => ({ scale: effectiveZoom, rotation }),
+		[effectiveZoom, rotation],
+	);
 
 	const pages = useMemo(
 		() => Array.from({ length: pageCount }, (_, index) => (index + 1) as PageIndex),
 		[pageCount],
 	);
 
+	// The box reserved for a page that has not rendered yet.
+	//
+	// This starts as a fixed A4 guess and switches to the first
+	// MEASURED page's own size. That switch is not cosmetic: a page's
+	// offset within the scroller is the sum of every box above it, so
+	// while unrendered pages hold a wrong box, every measured page below
+	// them sits at a wrong offset — and reading-progress restore and
+	// bookmark jumps both compute positions that way.
+	//
+	// With the A4 guess on a 420x896pt document the reserved box is ~57%
+	// too tall, and the error compounds: restoring to page 7 of 12 landed
+	// on page 4. A real book's pages are near-uniform, so measuring one
+	// collapses the error to the document's own variation. A genuinely
+	// mixed-size document keeps some error, which is why the jump also
+	// re-applies until the target stops moving.
+	const reservedPage = useMemo(
+		() => intrinsicSizePt ?? { widthPt: PROVISIONAL_PAGE.width, heightPt: PROVISIONAL_PAGE.height },
+		[intrinsicSizePt],
+	);
+
 	// Rotation-aware, so a turned page reserves a landscape slot from
 	// the start rather than jumping when it is measured.
 	const provisional = useMemo(
-		() => viewportSize(PROVISIONAL_PAGE.width, PROVISIONAL_PAGE.height, zoom, rotation),
-		[rotation, zoom],
+		() => viewportSize(reservedPage.widthPt, reservedPage.heightPt, effectiveZoom, rotation),
+		[effectiveZoom, reservedPage, rotation],
 	);
+
+	// The first page's width in PDF points, once a page has rendered.
+	// A book is 515pt and A4 is 595pt, so the provisional guess is off by
+	// enough to leave the opening page visibly short of the margin.
+	//
+	// This is deliberately NOT the footprint: that is measured in CSS px at
+	// whatever zoom happened to be applied, so using it here would feed
+	// the fit its own output and settle at a smaller scale each pass.
+
+	// Opening zoom: fit the page to the width actually available.
+	//
+	// Two facts are needed and neither exists on the first render — the
+	// scroller's width and the page's own dimensions — so this cannot be
+	// derived during render. It is also not compute-once: a window resize
+	// has to re-fit, which is what the observer is for.
+	//
+	// Why the reader's own zoom sticks: once they press +/-, the number is
+	// theirs, and re-fitting on every resize would throw that away.
+	// `userZoomedRef` is the whole of that state — a ref, not a second
+	// `useState`, so it cannot trigger a render or drift from `zoom`.
+	const userZoomedRef = useRef(false);
+
+	useEffect(() => {
+		const scroller = scrollRef.current;
+		if (scroller === null) return;
+
+		// A rotation swaps the page's width and height, so a turned page is
+		// fitted on its now-horizontal dimension.
+		const rotated = rotation === 90 || rotation === 270;
+		const pageWidth =
+			intrinsicSizePt !== null
+				? rotated
+					? // A turned page is fitted on its now-horizontal
+						// dimension, which is the page's height in points.
+						intrinsicSizePt.heightPt
+					: intrinsicSizePt.widthPt
+				: rotated
+					? PROVISIONAL_PAGE.height
+					: PROVISIONAL_PAGE.width;
+
+		const apply = () => {
+			if (userZoomedRef.current) return;
+			const available = scroller.clientWidth;
+			if (available <= 0) return;
+			const next = fitWidthScale(available, pageWidth);
+			setZoom((previous) => (previous === next ? previous : next));
+		};
+
+		apply();
+		const observer = new ResizeObserver(apply);
+		observer.observe(scroller);
+		return () => observer.disconnect();
+	}, [intrinsicSizePt, rotation]);
 
 	const handleMeasured = useCallback((index: PageIndex, footprint: PageFootprint) => {
 		setFootprints((previous) => {
@@ -934,17 +1093,23 @@ export function ReaderView({
 	 * materializes; the visible ones do so immediately.
 	 */
 	function changeOptions(next: { zoom?: number; rotation?: 0 | 90 | 180 | 270 }): void {
-		if (next.zoom !== undefined) setZoom(next.zoom);
+		// An explicit zoom is the reader overriding the fit, so the
+		// fit-width effect must stop re-applying it — including on the
+		// resize that follows, which is the whole point of choosing.
+		if (next.zoom !== undefined) {
+			userZoomedRef.current = true;
+			setZoom(clampZoom(next.zoom));
+		}
 		if (next.rotation !== undefined) setRotation(next.rotation);
 		setFootprints(new Map());
 	}
 
 	function zoomIn(): void {
-		changeOptions({ zoom: nextZoom(zoom, 1) });
+		changeOptions({ zoom: nextZoom(effectiveZoom, 1) });
 	}
 
 	function zoomOut(): void {
-		changeOptions({ zoom: nextZoom(zoom, -1) });
+		changeOptions({ zoom: nextZoom(effectiveZoom, -1) });
 	}
 
 	return (
@@ -958,7 +1123,7 @@ export function ReaderView({
 						−
 					</Button>
 					<span className="rm-reader-zoom" data-testid="rm-reader-zoom">
-						{Math.round(zoom * 100)}%
+						{Math.round(effectiveZoom * 100)}%
 					</span>
 					<Button variant="ghost" onClick={zoomIn} data-testid="rm-zoom-in" aria-label="拡大">
 						＋
@@ -1041,6 +1206,7 @@ export function ReaderView({
 								reserved={footprint ?? provisional}
 								highlights={byPage.get(index) ?? NO_HIGHLIGHTS}
 								onMeasured={handleMeasured}
+								onIntrinsicSize={handleIntrinsicSize}
 								onError={handleError}
 							/>
 						);

@@ -54,6 +54,12 @@ export type PageJumpOutcome =
  *  render does not leave the reader waiting. */
 const MAX_WAIT_FRAMES = 120;
 
+/** How many times the exact offset is re-applied while the pages above
+ *  the target settle into their real sizes. Each pass is one animation
+ *  frame, so this is a few tens of milliseconds; the bound exists so a
+ *  document whose layout never converges cannot spin here. */
+const MAX_SETTLE_PASSES = 12;
+
 export interface PageJumpRequest {
 	readonly scroller: HTMLElement;
 	readonly pageIndex: PageIndex;
@@ -92,11 +98,54 @@ export async function jumpToPage(request: PageJumpRequest): Promise<PageJumpOutc
 		scroller.scrollTop = scrollTopForPosition(extentOf(height), position, scroller.clientHeight);
 	};
 
+	// Phase 3: settle.
+	//
+	// Measuring the TARGET page is not sufficient. The target's offset
+	// is the sum of every page above it, including the ones still
+	// holding a *reserved* box, because a page only renders once the
+	// scroller reaches it. Scrolling the target into range can therefore
+	// grow the pages above it, which moves the target and invalidates
+	// the offset just applied.
+	//
+	// At 100% the reserved A4 box is close enough to the real one that
+	// one pass passes by luck. The reader opens at fit-width now, where
+	// a reserved A4 box is ~25% taller than a real 420x896pt page, and
+	// the error compounds: restoring to page 7 of 12 landed on page 4.
+	//
+	// Convergence is judged on `offsetTop`, NOT on
+	// `getBoundingClientRect().top`. The latter is viewport-relative, so
+	// it changes every time we scroll — comparing it across passes
+	// measures our own scrolling, never stabilises, and silently burns
+	// the whole pass budget. `offsetTop` is the layout position and is
+	// the thing that has to stop moving.
+	const settle = async (): Promise<PageJumpOutcome> => {
+		let lastTop = Number.NaN;
+		for (let pass = 0; pass < MAX_SETTLE_PASSES; pass++) {
+			// Yield before the first apply, and re-check for a takeover.
+			//
+			// The exact phase runs after an await (the page has to render),
+			// so the reader can take over inside it. Applying on the same
+			// tick we discovered the page is measured moves someone who has
+			// already started scrolling back to where the app decided they
+			// were — the exact outcome the abort check exists to prevent.
+			await nextFrame();
+			if (abort()) return 'aborted';
+			const height = measuredHeight(pageIndex);
+			if (height === undefined) return 'coarse';
+			apply(height);
+			await nextFrame();
+			if (abort()) return 'aborted';
+			const top = host.offsetTop;
+			if (Number.isFinite(lastTop) && Math.abs(top - lastTop) < 1) return 'applied';
+			lastTop = top;
+		}
+		return 'applied';
+	};
+
 	const measured = measuredHeight(pageIndex);
 	if (measured !== undefined) {
 		if (abort()) return 'aborted';
-		apply(measured);
-		return 'applied';
+		return await settle();
 	}
 
 	// Phase 1: into the prefetch band, at ratio 0 — the top of the

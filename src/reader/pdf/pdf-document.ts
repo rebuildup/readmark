@@ -50,7 +50,7 @@
 
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 
-import { READMARK_PDF_WORKER_URL, setupPdfWorker } from './pdf-worker.ts';
+import { READMARK_PDF_ASSET_URLS, READMARK_PDF_WORKER_URL, setupPdfWorker } from './pdf-worker.ts';
 
 /** `true` when running under Node (not a browser DOM).
  *
@@ -87,7 +87,39 @@ export async function loadPdfDocument(bytes: Uint8Array): Promise<PDFDocumentPro
 		void READMARK_PDF_WORKER_URL;
 	}
 
-	const loadingTask = pdfjsLib.getDocument({ data: bytes });
+	const loadingTask = pdfjsLib.getDocument({
+		data: bytes,
+		// pdf.js fetches these support tables over the network at
+		// render time. Without the URLs it cannot resolve them, and
+		// the failure mode is SILENT: no exception, no failed load —
+		// glyphs simply do not paint.
+		//
+		//   - `cMapUrl` — Adobe predefined CMaps. Japanese PDFs are
+		//     overwhelmingly Type0 / Identity-H or a predefined CMap
+		//     like UniJIS-UCS2-H, and the CMap is what maps a
+		//     character code to a CID. Missing it, and the code never
+		//     becomes a glyph index, so the text is invisible. pdf.js
+		//     says so once, in the console:
+		//
+		//       Warning: Error during font loading: Ensure that the
+		//       `cMapUrl` API parameter is provided.
+		//
+		//   - `standardFontDataUrl` — metrics/widths for the 14
+		//     standard fonts and the standard CJK fonts, used when a
+		//     document references a font it does not embed. Missing it,
+		//     text renders at wrong widths or not at all.
+		//
+		//   - `wasmUrl` — the image decoders (JBIG2 / OpenJPEG) and
+		//     QCMS colour management.
+		//
+		//   - `iccUrl` — ICC colour profiles.
+		//
+		// All four are bundled with pdfjs-dist, so this costs no
+		// network access at runtime — the URLs are same-origin, served
+		// from our own `dist/assets/`. See `pdf-worker.ts` for how the
+		// directories are copied into the build.
+		...(IS_NODE ? {} : READMARK_PDF_ASSET_URLS),
+	});
 	try {
 		return await loadingTask.promise;
 	} catch (cause: unknown) {

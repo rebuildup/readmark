@@ -1,11 +1,20 @@
 import { resolve } from 'node:path';
 import { defineConfig } from 'vitest/config';
 
+import { pdfjsSupportTables } from './vite.config';
+
 // readmark — Vitest config.
 //
 // - happy-dom (not jsdom) — pdfjs-dist wants modern Web APIs that jsdom still
 //   mocks imperfectly (ResizeObserver, structuredClone for Blob, etc.).
 //   happy-dom is closer to Chrome semantics in 2026.
+// - The pdf.js support-tables plugin is loaded here too, because
+//   `src/reader/pdf/pdf-worker.ts` imports the `virtual:readmark-pdfjs-assets`
+//   module it provides. Without it, every test that transitively imports the
+//   PDF reader fails to resolve at transform time — which is all of the
+//   reader, library and storage suites. Sharing the plugin (rather than
+//   stubbing the virtual module) keeps the test environment and the build
+//   in agreement about what the module contains.
 // - Coverage is opt-in (`bun run test:coverage`) — ADR of rebuildup/project-init
 //   explicitly refuses to mandate coverage thresholds.
 export default defineConfig({
@@ -14,6 +23,7 @@ export default defineConfig({
 			'~': resolve(import.meta.dirname, 'src'),
 		},
 	},
+	plugins: [pdfjsSupportTables()],
 	test: {
 		environment: 'happy-dom',
 		globals: true,
