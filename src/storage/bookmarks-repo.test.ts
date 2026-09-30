@@ -29,39 +29,71 @@ function useDeterministicIds(): void {
 	});
 }
 
-vi.mock('./db.ts', () => ({
-	getDb: () => ({
-		bookmarks: {
-			where: (index: string) => ({
-				equals: (value: unknown) => ({
-					filter: (predicate: (row: Record<string, unknown>) => boolean) => ({
-						async sortBy(key: string) {
-							return Array.from(rows.values())
-								.filter((row) => row[index] === value)
-								.filter(predicate)
-								.sort((a, b) => Number(a[key]) - Number(b[key]));
-						},
-					}),
+vi.mock('./db.ts', () => {
+	let inflight: Promise<unknown> = Promise.resolve();
+	return {
+		getDb: () => ({
+			bookmarks: {
+				where: (index: string) => ({
+					equals: (value: unknown) => {
+						// Index shape support. Single-column equality is a
+						// simple scan; compound equality matches an exact
+						// tuple so a `[documentId+sourceFingerprint]` read
+						// narrows to one document's bookmarks in one pass.
+						// Dexie's compound syntax wraps the index in
+						// `[...]`; strip the brackets before splitting.
+						const tuple = Array.isArray(value) ? value : [value];
+						const segments = index.replace(/[[\]]/g, '').split('+');
+						return {
+							filter: (predicate: (row: Record<string, unknown>) => boolean) => ({
+								async sortBy(key: string) {
+									return Array.from(rows.values())
+										.filter((row) => tuple.every((v, i) => row[segments[i] ?? index] === v))
+										.filter(predicate)
+										.sort((a, b) => Number(a[key]) - Number(b[key]));
+								},
+								async toArray() {
+									return Array.from(rows.values())
+										.filter((row) => tuple.every((v, i) => row[segments[i] ?? index] === v))
+										.filter(predicate);
+								},
+							}),
+							async toArray() {
+								return Array.from(rows.values()).filter((row) =>
+									tuple.every((v, i) => row[segments[i] ?? index] === v),
+								);
+							},
+						};
+					},
 				}),
-			}),
-			get: async (id: string) => rows.get(id),
-			put: async (row: Record<string, unknown>) => {
-				rows.set(String(row.id), row);
-				return row.id;
+				get: async (id: string) => rows.get(id),
+				put: async (row: Record<string, unknown>) => {
+					rows.set(String(row.id), row);
+					return row.id;
+				},
+				delete: async (id: string) => {
+					// Dexie 4 types `Table.delete` as `void`.
+					rows.delete(id);
+				},
+				update: async (id: string, changes: Record<string, unknown>) => {
+					const row = rows.get(id);
+					if (row === undefined) return 0;
+					rows.set(id, { ...row, ...changes });
+					return 1;
+				},
 			},
-			delete: async (id: string) => {
-				// Dexie 4 types `Table.delete` as `void`.
-				rows.delete(id);
+			transaction: async <T>(_mode: string, _tables: unknown, fn: () => Promise<T>) => {
+				// Serialise concurrent transactions on this table:
+				// a second `tx` awaits the first, so its `get` sees
+				// the first's `delete`. Mirrors Dexie's transactional
+				// queue for the race tests to be meaningful.
+				const result = inflight.then(async () => await fn());
+				inflight = result.catch(() => undefined);
+				return result;
 			},
-			update: async (id: string, changes: Record<string, unknown>) => {
-				const row = rows.get(id);
-				if (row === undefined) return 0;
-				rows.set(id, { ...row, ...changes });
-				return 1;
-			},
-		},
-	}),
-}));
+		}),
+	};
+});
 
 const { addBookmark, deleteBookmark, listBookmarks, listBookmarksOnPage } = await import(
 	'./bookmarks-repo.ts'
@@ -175,6 +207,21 @@ describe('listBookmarks', () => {
 		expect(listed.map((row) => row.pageIndex)).toEqual([3, 4, 5]);
 	});
 
+	it('breaks ties on id, so two marks in the same millisecond do not flicker', async () => {
+		const a = await add({ pageIndex: 5, createdAt: 1000 });
+		const b = await add({ pageIndex: 5, createdAt: 1000 });
+		const c = await add({ pageIndex: 5, createdAt: 1000 });
+
+		const scope = { documentId: DOC_A, sourceFingerprint: FINGERPRINT_A };
+		const first = await listBookmarks(scope);
+		const second = await listBookmarks(scope);
+		// A panel that re-renders is a panel that flickers otherwise:
+		// an order that changes between two reads is an order that
+		// means nothing to the reader.
+		expect(first.map((row) => row.id)).toEqual(second.map((row) => row.id));
+		expect([first[0]?.id, first[1]?.id, first[2]?.id]).toEqual([a.id, b.id, c.id]);
+	});
+
 	it('is empty for a source that was never marked', async () => {
 		expect(await listBookmarks({ documentId: DOC_A, sourceFingerprint: FINGERPRINT_A })).toEqual(
 			[],
@@ -215,5 +262,20 @@ describe('deleteBookmark', () => {
 
 		const listed = await listBookmarks({ documentId: DOC_A, sourceFingerprint: FINGERPRINT_A });
 		expect(listed.map((row) => row.id)).toEqual([keep.id]);
+	});
+
+	it('atomically reports only one winner when two callers race', async () => {
+		// The race that an unwrapped get-then-delete cannot answer:
+		// both callers see the row, both call delete, both would
+		// otherwise return true. The transaction serialises them so
+		// exactly one returns true.
+		const bookmark = await add({ pageIndex: 1 });
+
+		const results = await Promise.all([deleteBookmark(bookmark.id), deleteBookmark(bookmark.id)]);
+		expect(results.filter((r) => r === true)).toHaveLength(1);
+		expect(results.filter((r) => r === false)).toHaveLength(1);
+		expect(await listBookmarks({ documentId: DOC_A, sourceFingerprint: FINGERPRINT_A })).toEqual(
+			[],
+		);
 	});
 });

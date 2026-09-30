@@ -26,31 +26,43 @@ import type { Anchor } from '../domain/annotation/index.ts';
 import type { DocumentId, SourceFingerprint } from '../domain/document.ts';
 import type { Bookmark, PageIndex } from '../domain/reading-state.ts';
 import { getDb } from './db.ts';
+import type { BookmarkScope } from './scope.ts';
 
-/** The two keys a bookmark list is scoped by. A named object rather
- *  than two arguments, because both are branded strings and a swap
- *  would typecheck. */
-export interface BookmarkScope {
-	readonly documentId: DocumentId;
-	readonly sourceFingerprint: SourceFingerprint;
-}
+/** Re-exported so callers can keep importing from `./bookmarks-repo.ts`
+ *  without changing their call sites. */
+export type { BookmarkScope } from './scope.ts';
 
-/** Every bookmark in a source, oldest first. */
+/** Every bookmark in a source, oldest first. Uses the compound
+ *  `[documentId+sourceFingerprint+pageIndex]` index plus an in-memory
+ *  sort by `createdAt` so the panel reads as a history. */
 export async function listBookmarks(scope: BookmarkScope): Promise<readonly Bookmark[]> {
-	return await getDb()
-		.bookmarks.where('documentId')
-		.equals(scope.documentId)
-		.filter((row) => row.sourceFingerprint === scope.sourceFingerprint)
-		.sortBy('createdAt');
+	const rows = await getDb()
+		.bookmarks.where('[documentId+sourceFingerprint]')
+		.equals([scope.documentId, scope.sourceFingerprint])
+		.toArray();
+	// Tie-break on `id` so two bookmarks with the same millisecond
+	// `createdAt` (or a clock that has jumped) come back in the same
+	// order on every read. A panel that re-renders is a panel that
+	// flickers otherwise.
+	return [...rows].sort(
+		(a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+	);
 }
 
-/** Bookmarks on one page, oldest first — the query the reader's
- *  "what did I mark here" affordance needs. */
+/** Bookmarks on one page, oldest first. Hits the
+ *  `[documentId+sourceFingerprint+pageIndex]` compound index directly
+ *  so the painter's query is a single indexed read. */
 export async function listBookmarksOnPage(
 	scope: BookmarkScope,
 	pageIndex: PageIndex,
 ): Promise<readonly Bookmark[]> {
-	return (await listBookmarks(scope)).filter((row) => row.pageIndex === pageIndex);
+	const rows = await getDb()
+		.bookmarks.where('[documentId+sourceFingerprint+pageIndex]')
+		.equals([scope.documentId, scope.sourceFingerprint, pageIndex])
+		.toArray();
+	return [...rows].sort(
+		(a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+	);
 }
 
 /** What the caller supplies to mark a place. The generated fields
@@ -108,13 +120,20 @@ export async function addBookmark(input: NewBookmark): Promise<Bookmark> {
 
 /** Remove a bookmark. Returns whether the row was there, so the UI
  *  can tell "removed" from "already gone" (a second tab, or a
- *  re-render race). */
+ *  re-render race).
+ *
+ *  Race: a `get` outside a transaction cannot answer the question
+ *  "was there a row" atomically with the subsequent `delete` — two
+ *  concurrent calls (a panel + a cross-tab sync) can both observe
+ *  the row as present, both call `delete`, and both return `true`
+ *  while only one is a real write. Wrapping in a `rw` transaction
+ *  lets Dexie serialise the get-and-delete so the second caller
+ *  reads `undefined` and returns `false`. */
 export async function deleteBookmark(id: string): Promise<boolean> {
-	// Dexie 4 types `Table.delete` as `void`, so "was there a row" is
-	// answered by reading first. Bookmark lists are small and a single
-	// delete is not a hot path.
-	const existing = await getDb().bookmarks.get(id);
-	if (existing === undefined) return false;
-	await getDb().bookmarks.delete(id);
-	return true;
+	return await getDb().transaction('rw', getDb().bookmarks, async () => {
+		const existing = await getDb().bookmarks.get(id);
+		if (existing === undefined) return false;
+		await getDb().bookmarks.delete(id);
+		return true;
+	});
 }
