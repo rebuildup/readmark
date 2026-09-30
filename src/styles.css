@@ -149,6 +149,35 @@ pre {
 	margin: 12px;
 }
 
+/* The import status: a quiet confirmation, not an error. Same shape
+ * as `.rm-alert` so the eye reads it as the same kind of message,
+ * but with the muted palette that says "took, not failed". */
+.rm-status {
+	margin-top: 12px;
+	padding: 8px 12px;
+	border: 1px solid var(--rm-border);
+	border-radius: var(--rm-radius-md);
+	background: var(--rm-bg-surface);
+	color: var(--rm-fg-muted);
+	font-size: 14px;
+}
+
+/* The file input is hidden behind a `<Button>` trigger. Kept out of
+ * layout (`display: none`) so it does not take a row; not visually
+ * hidden, because a screen reader finding a real input is
+ * distracting — it has no business being announced. */
+.rm-document-import__input {
+	display: none;
+}
+
+/* Stack an alert under the thing that triggered it (the import
+ * button). The default `.rm-alert` has no margin so it can sit
+ * inline where it is needed; this variant is for the one place the
+ * alert has its own row. */
+.rm-alert--spaced {
+	margin-top: 12px;
+}
+
 /* Visually hidden, still announced. Used to label the search /
  * sort controls without repeating visible text. */
 .rm-visually-hidden {
