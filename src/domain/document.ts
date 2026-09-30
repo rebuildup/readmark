@@ -142,3 +142,20 @@ export function asSourceFingerprint(hex: string): SourceFingerprint {
 	}
 	return hex as SourceFingerprint;
 }
+
+/**
+ * Narrow a `DocumentSource` to one format. Returns a structural
+ * type (`source is DocumentSource & { readonly format: F }`) that
+ * downstream readers (e.g. `createPdfReader().open({ source })`) can
+ * accept without a cast.
+ *
+ * The guard reads only the `format` field; callers that need
+ * format-specific payload validation still need their own boundary
+ * check (see ADR-0007 §two-guard pattern).
+ */
+export function isFormatSource<F extends DocumentFormat>(
+	source: DocumentSource,
+	format: F,
+): source is DocumentSource & { readonly format: F } {
+	return source.format === format;
+}

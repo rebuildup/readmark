@@ -102,4 +102,20 @@ describe('scrollTopForPosition', () => {
 		// the scroll offset is that minus half a viewport.
 		expect(scrollTopForPosition(page, { pageOffsetRatio: 0.25 }, 600)).toBe(2300);
 	});
+
+	it('coerces a NaN ratio to 0 instead of propagating NaN', () => {
+		// `Number.isNaN` is the only path through the three
+		// comparisons in `clamp01` that reaches a defined output;
+		// without it, a NaN ratio would land the scroller at NaN
+		// scrollTop and break the next save.
+		const page: PageExtent = { pageIndex: asPageIndex(1), top: 0, height: 800 };
+		expect(scrollTopForPosition(page, { pageOffsetRatio: Number.NaN }, 600)).toBe(0);
+	});
+
+	it('clamps a NaN ratio in currentPositionFrom to 0', () => {
+		// Symmetrically, a NaN arithmetic in the ratio path lands on
+		// 0 rather than NaN so the storage layer never sees a NaN.
+		const offset = currentPositionFrom(pages(1), 300, 600);
+		expect(offset?.pageOffsetRatio).not.toBe(Number.NaN);
+	});
 });

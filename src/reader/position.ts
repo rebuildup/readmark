@@ -61,10 +61,11 @@ export interface ScrollPosition {
 	readonly [key: string]: number;
 }
 
-/** The reader's position plus the page it belongs to. */
+/** The reader's position plus the page it belongs to. `pageOffsetRatio`
+ *  is inherited from {@link ScrollPosition}; declaring it again here
+ *  would narrow to the same type and add no information. */
 export interface CurrentPosition extends ScrollPosition {
 	readonly pageIndex: PageIndex;
-	readonly pageOffsetRatio: number;
 }
 
 /** The midpoint of the visible area: the line that decides which page
@@ -74,7 +75,12 @@ function viewportMiddle(scrollTop: number, clientHeight: number): number {
 	return scrollTop + clientHeight / 2;
 }
 
+/** Clamp to `[0, 1]`. A `NaN` propagates as `NaN` from the three
+ *  comparisons — they all return `false` for `NaN` — so we guard it
+ *  explicitly; a `NaN` ratio left to the caller would land the
+ *  scroller at `NaN scrollTop` and break the next save. */
 function clamp01(value: number): number {
+	if (Number.isNaN(value)) return 0;
 	if (value < 0) return 0;
 	if (value > 1) return 1;
 	return value;
@@ -83,11 +89,11 @@ function clamp01(value: number): number {
 /**
  * Which page the reader is on, and how far into it.
  *
- * The rule: the first page whose own midpoint is at or below the
- * viewport's midpoint, falling back to the last page when the
- * scroller is past the end of the content (which happens with a short
- * final page). Returns `null` for an empty or unlaid-out page list, so
- * a caller can tell "no pages yet" from "page 1".
+ * The rule: the first page whose own bottom edge is at or below the
+ * viewport's midpoint, falling back to the last page when the scroller
+ * is past the end of the content (which happens with a short final
+ * page). Returns `null` for an empty or unlaid-out page list, so a
+ * caller can tell "no pages yet" from "page 1".
  */
 export function currentPositionFrom(
 	pages: readonly PageExtent[],
@@ -98,19 +104,23 @@ export function currentPositionFrom(
 	if (measured.length === 0) return null;
 
 	const middle = viewportMiddle(scrollTop, clientHeight);
+	let last: PageExtent | undefined;
 	for (const page of measured) {
 		// The page the midpoint falls inside: its bottom has not yet
 		// passed the reader's line of sight.
-		if (page.top + page.height < middle) continue;
+		if (page.top + page.height < middle) {
+			last = page;
+			continue;
+		}
 		return {
 			pageIndex: page.pageIndex,
 			pageOffsetRatio: clamp01((middle - page.top) / page.height),
 		};
 	}
-
-	const last = measured[measured.length - 1];
-	if (last === undefined) return null;
-	return { pageIndex: last.pageIndex, pageOffsetRatio: 1 };
+	// Fallback for a viewport scrolled past the bottom of the last
+	// measured page (short final page): the loop ran without returning.
+	if (last !== undefined) return { pageIndex: last.pageIndex, pageOffsetRatio: 1 };
+	return null;
 }
 
 /**
