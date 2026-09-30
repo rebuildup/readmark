@@ -395,8 +395,13 @@ function PdfPageView({
 					onIntrinsicSize({ widthPt: w / scale, heightPt: h / scale });
 				}
 				onMeasured(index, {
-					width: rendered.offsetWidth || Number.parseFloat(rendered.style.width) || 0,
-					height: rendered.offsetHeight || Number.parseFloat(rendered.style.height) || 0,
+					// `getBoundingClientRect` is the post-layout size; the
+					// chain `offsetWidth || parseFloat(style.width) || 0`
+					// reads from a not-yet-laid-out host and silently
+					// hands the view a zero, which is what makes a
+					// restored position fall through to "page 1".
+					width: rendered.getBoundingClientRect().width,
+					height: rendered.getBoundingClientRect().height,
 				});
 				setRenderEpoch((previous) => previous + 1);
 			} catch (error: unknown) {
@@ -557,6 +562,10 @@ export function ReaderView({
 		readonly pageOffsetRatio: number;
 	} | null>(null);
 	const [pendingDelete, setPendingDelete] = useState<Bookmark | null>(null);
+	/** Inline error for the add-bookmark dialog. Cleared on each
+	 *  fresh open of the dialog so a previous failure does not
+	 *  reappear over a new attempt. */
+	const [bookmarkError, setBookmarkError] = useState<string | null>(null);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
 	// The sticky header, so the selection toolbar knows the one thing it
 	// can land underneath.
@@ -598,6 +607,20 @@ export function ReaderView({
 	// scrolled once could never use a bookmark again — every jump would
 	// see the flag still set and abort before it moved anything.
 	const takeoverCountRef = useRef(0);
+	/**
+	 * Bump the takeover counter and return its new value.
+	 *
+	 * One place for the `+= 1` rule: a reader-initiated scroll (`wheel`,
+	 * `touchstart`, `pointerdown`, scroll-key) and a bookmark jump both
+	 * ask the view to retire whatever async was in flight, and the only
+	 * way to keep both honest is to go through here. The restore path
+	 * reads the counter — it does not write to it — so it does not
+	 * call this.
+	 */
+	const registerTakeover = useCallback((): number => {
+		takeoverCountRef.current += 1;
+		return takeoverCountRef.current;
+	}, []);
 	// Read by the jump through a callback, so the effect that starts it
 	// does not have to be re-created on every measurement.
 	const footprintsRef = useRef(footprints);
@@ -780,7 +803,15 @@ export function ReaderView({
 
 	const handleError = useCallback((error: unknown) => {
 		console.error('readmark: page render failed', error);
-		setRenderError('このページの描画に失敗しました。時間をおいて再度お試しください。');
+		// The first render failure is the one the reader sees on screen
+		// — they have to be told that *one* page failed. A second failure
+		// overwrites the first only by chance (it might be the same
+		// page, or it might be a different one), so keep the first and
+		// log the rest. The reader gets to keep the page they were on
+		// and the developer gets a stack trace per failure.
+		setRenderError((previous) =>
+			previous ? previous : 'このページの描画に失敗しました。時間をおいて再度お試しください。',
+		);
 	}, []);
 
 	// The reader's position, on every scroll frame that is not already
@@ -796,10 +827,15 @@ export function ReaderView({
 			frame = 0;
 			const position = readPosition(scroller);
 			if (position === null) return;
+			// Only update the header label after the restore has
+			// settled: the restore's own `.then` calls `update()` with
+			// the post-restore position, and labelling the reader as
+			// "on page 1" while the scroll-to-page is still in flight
+			// would be a flicker from 1 → restored page.
+			if (!restoredRef.current) return;
 			setCurrentPage((previous) =>
 				previous === position.pageIndex ? previous : position.pageIndex,
 			);
-			if (!restoredRef.current) return;
 			scheduleSave(position.pageIndex, { pageOffsetRatio: position.pageOffsetRatio });
 		};
 		const onScroll = () => {
@@ -810,7 +846,7 @@ export function ReaderView({
 		// programmatic scroll raises `scroll` but none of these, so the
 		// two are not confused.
 		const markReaderMoved = () => {
-			takeoverCountRef.current += 1;
+			registerTakeover();
 			// The restore is over — the reader has taken over. Leaving
 			// the gate closed here would be worse than losing one write:
 			// the effect that closes it only runs when the page
@@ -836,7 +872,12 @@ export function ReaderView({
 		const onKeyDown = (event: KeyboardEvent) => {
 			const target = event.target;
 			if (target instanceof HTMLElement) {
-				const control = target.closest('input, textarea, select, button, a, [contenteditable]');
+				// A keystroke aimed at a control belongs to that
+				// control. The role-based selectors catch custom widgets
+				// (`<div role="button">`) that the tag list would miss.
+				const control = target.closest(
+					'input, textarea, select, button, a, [contenteditable="true"], [role="button"], [role="menuitem"], [role="tab"]',
+				);
 				if (control !== null) return;
 			}
 			if (!READER_SCROLL_KEYS.has(event.key) && event.key !== ' ') return;
@@ -856,7 +897,7 @@ export function ReaderView({
 		// Mount-only: the listener reads the page hosts from the DOM at
 		// scroll time, and the page count is fixed for as long as this
 		// view is mounted. `scheduleSave` is stable.
-	}, [scheduleSave]);
+	}, [registerTakeover, scheduleSave]);
 
 	// Restore the reader's last position. The two-phase scroll lives in
 	// `scroll-to-page.ts` because a bookmark jump needs exactly the
@@ -978,11 +1019,58 @@ export function ReaderView({
 			}
 			if (cancelled) return;
 
-			const rows: HighlightRow[] = [];
-			for (const row of stored) {
-				if (cancelled) return;
-				rows.push(await resolveRow(row));
-			}
+			// Each row's resolution is independent: `resolveAnchor`
+			// does not mutate shared state, and the write-back is keyed
+			// on the row's own id. Resolving serially meant a 100-row
+			// document with a slow quote search on each one would
+			// gate every paint on every other row; in parallel, the
+			// wait is the slowest single row, not the sum.
+			//
+			// `Promise.all` preserves index order, so the assembled
+			// rows are in the same order as `stored` without a separate
+			// sort.
+			const rows = await Promise.all(
+				stored.map(async (row): Promise<HighlightRow> => {
+					// A malformed or unresolvable anchor resolves to
+					// null. The row is kept and simply not painted: this
+					// reader cannot resolve it against this source,
+					// which says nothing about whether the highlight
+					// exists, and deleting it would throw away a
+					// reader's work over a file they may not have the
+					// whole of.
+					const resolved = await handle.resolveAnchor(row.anchor).catch((error: unknown) => {
+						console.error('readmark: could not resolve a highlight anchor', error);
+						return null;
+					});
+					if (resolved === null) return { row, state: { kind: 'unresolved' } };
+					// Both are generic fields, so this is detectable
+					// without reading the payload. Disagreement means
+					// the row and the resolution are about different
+					// places, which is an integrity failure: nothing
+					// is painted, nothing is written, and the stored
+					// row is left as it is.
+					if (resolved.page !== row.pageIndex) {
+						console.error('readmark: highlight page mismatch', {
+							id: row.id,
+							storedPage: row.pageIndex,
+							resolvedPage: resolved.page,
+						});
+						return { row, state: { kind: 'mismatch' } };
+					}
+					if (resolved.updatedAnchor !== null) {
+						const wasStored = await replaceHighlightAnchor(row.id, resolved.updatedAnchor);
+						// The write-back is the only persistence this
+						// flow causes, and its boolean is why it is
+						// safe: false means the repository knows the
+						// row is gone — another tab, or the reader
+						// themselves. Painting it anyway would
+						// resurrect a deleted highlight on screen from
+						// a list that is already out of date.
+						if (!wasStored) return { row, state: { kind: 'vanished' } };
+					}
+					return { row, state: { kind: 'paintable', resolved } };
+				}),
+			);
 			if (cancelled) return;
 			setHighlights(rows);
 		})();
@@ -1175,6 +1263,7 @@ export function ReaderView({
 		if (scroller === null) return;
 		const position = readPosition(scroller);
 		if (position === null) return;
+		setBookmarkError(null);
 		setPendingAdd(position);
 	}, []);
 
@@ -1183,7 +1272,6 @@ export function ReaderView({
 		async (title: string) => {
 			const target = pendingAdd;
 			if (target === null) return;
-			setPendingAdd(null);
 			try {
 				const added = await addBookmark({
 					documentId,
@@ -1193,6 +1281,7 @@ export function ReaderView({
 					position: { pageOffsetRatio: target.pageOffsetRatio },
 					title,
 				});
+				setPendingAdd(null);
 				setBookmarks((previous) => [...previous, added]);
 				// The point of marking a page is seeing that it took, so
 				// the list is revealed — with the name that was just
@@ -1200,7 +1289,12 @@ export function ReaderView({
 				// their mind.
 				setSidePanel('bookmarks');
 			} catch (error: unknown) {
+				// Leave the dialog open with an inline message: the
+				// reader typed a title, and a silent close + console
+				// trace throws that work away. They can edit the title
+				// and retry, or cancel.
 				console.error('readmark: could not add a bookmark', error);
+				setBookmarkError('栞を保存できませんでした。もう一度お試しください。');
 			}
 		},
 		[documentId, pendingAdd, setSidePanel, sourceFingerprint],
@@ -1231,7 +1325,7 @@ export function ReaderView({
 			// reader has asked to be somewhere else, and the previous
 			// jump is not theirs to finish. It also retires a restore
 			// still settling, which is the same decision.
-			const takeover = ++takeoverCountRef.current;
+			const takeover = registerTakeover();
 			void jumpToPage({
 				scroller,
 				pageIndex: targetPage,
@@ -1244,7 +1338,7 @@ export function ReaderView({
 				shouldAbort: () => takeoverCountRef.current !== takeover,
 			});
 		},
-		[handle, pageCount],
+		[pageCount, registerTakeover],
 	);
 
 	const handleConfirmDelete = useCallback(async () => {
@@ -1383,6 +1477,7 @@ export function ReaderView({
 					pageIndex={pendingAdd.pageIndex}
 					onConfirm={(title) => void handleConfirmAdd(title)}
 					onCancel={() => setPendingAdd(null)}
+					error={bookmarkError}
 				/>
 			)}
 			{pendingDelete !== null && (
@@ -1402,7 +1497,7 @@ export function ReaderView({
 				 * scrolling exactly when a page failed to render.
 				 */}
 				{renderError !== null && (
-					<p className="rm-alert" role="alert" data-testid="rm-reader-error" style={{ margin: 12 }}>
+					<p className="rm-alert rm-alert--with-margin" role="alert" data-testid="rm-reader-error">
 						{renderError}
 					</p>
 				)}
