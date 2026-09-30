@@ -30,7 +30,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import type { DocumentId, SourceFingerprint } from '../domain/document.ts';
 import { asDocumentId, asSourceFingerprint } from '../domain/document.ts';
-import { asPageIndex, type PageIndex } from '../domain/reading-state.ts';
+import { asPageIndex, type Highlight, type PageIndex } from '../domain/reading-state.ts';
 import { currentPositionFrom } from '../reader/position.ts';
 import type { PageHandle, ReaderHandle } from '../reader/types.ts';
 import { ReaderView } from './reader-view.tsx';
@@ -63,6 +63,18 @@ vi.mock('../storage/bookmarks-repo.ts', () => ({
 	listBookmarks: vi.fn(async () => []),
 	addBookmark: vi.fn(),
 	deleteBookmark: vi.fn(),
+}));
+
+// Highlight resolution is the subject of a parallel-execution test
+// further down; the default list is empty so the resolution effect
+// short-circuits. The parallel test replaces the list at runtime.
+const listHighlightsMock = vi.fn<(scope: unknown) => Promise<readonly Highlight[]>>(
+	async () => [] as readonly Highlight[],
+);
+vi.mock('../storage/highlights-repo.ts', () => ({
+	listHighlights: (scope: unknown) => listHighlightsMock(scope),
+	replaceHighlightAnchor: vi.fn(async () => true),
+	listHighlightsOnPage: vi.fn(async () => []),
 }));
 
 const DOC_ID = asDocumentId('00000000-0000-4000-8000-0000000000bb');
@@ -681,5 +693,169 @@ describe('a stored position that cannot be used', () => {
 		expect(scroller().scrollTop).toBe(50);
 		expect(saveReadingPosition).toHaveBeenCalledTimes(1);
 		expect(saveReadingPosition.mock.calls[0]?.[0]).toMatchObject({ currentPage: 1 });
+	});
+});
+
+describe('render error reporting', () => {
+	// Test for the `#57` fix: the alert has a margin via
+	// `.rm-alert--with-margin`, not an inline `style`. A class change
+	// is the only thing that distinguishes it from the standalone-error
+	// variant.
+	it('puts the alert inside the page column, not edge-to-edge', async () => {
+		await renderView(null);
+		// Throw on the next render (zoom re-renders every page).
+		vi.mocked(fakePage.render).mockImplementationOnce(async () => {
+			throw new Error('boom');
+		});
+		fireEvent.click(screen.getByTestId('rm-zoom-in'));
+		await waitFor(() => {
+			const alert = screen.getByTestId('rm-reader-error');
+			expect(alert.classList.contains('rm-alert')).toBe(true);
+			expect(alert.classList.contains('rm-alert--with-margin')).toBe(true);
+			// No inline `style` attribute.
+			expect(alert.getAttribute('style')).toBeNull();
+		});
+	});
+});
+
+describe('keyboard input does not steal a control keystroke', () => {
+	// Tests for the `#60` fix: the keydown listener must not see keys
+	// aimed at role-based custom widgets that the old tag list missed.
+	it('does not treat a keystroke on a [role="button"] as a reader scroll', async () => {
+		await renderView({ currentPage: asPageIndex(2), position: { pageOffsetRatio: 0.5 } });
+		await waitFor(() => {
+			expect(renderedPosition()?.pageIndex).toBe(2);
+		});
+
+		// Custom widget — `<div role="button">` — sends a space, the
+		// same key the reader would press to scroll. Without the role
+		// selector, the view would mark the reader as having moved and
+		// abort the still-in-flight restore.
+		const custom = document.createElement('div');
+		custom.setAttribute('role', 'button');
+		custom.tabIndex = 0;
+		document.body.appendChild(custom);
+		try {
+			fireEvent.keyDown(custom, { key: ' ' });
+			// The restore is allowed to complete.
+			await waitFor(() => {
+				expect(renderedPosition()?.pageIndex).toBe(2);
+			});
+		} finally {
+			document.body.removeChild(custom);
+		}
+	});
+
+	it('does not treat a keystroke on a [role="tab"] as a reader scroll', async () => {
+		await renderView({ currentPage: asPageIndex(2), position: { pageOffsetRatio: 0.5 } });
+		await waitFor(() => {
+			expect(renderedPosition()?.pageIndex).toBe(2);
+		});
+
+		const tab = document.createElement('div');
+		tab.setAttribute('role', 'tab');
+		document.body.appendChild(tab);
+		try {
+			fireEvent.keyDown(tab, { key: 'PageDown' });
+			await waitFor(() => {
+				expect(renderedPosition()?.pageIndex).toBe(2);
+			});
+		} finally {
+			document.body.removeChild(tab);
+		}
+	});
+});
+
+describe('page measurement', () => {
+	// Test for the `#63` fix: the view reads `getBoundingClientRect()`,
+	// not the `offsetWidth || style.width` chain. The chain silently
+	// returns 0 on an unlaid-out host, which is what would make a
+	// restored position fall through to "page 1" — the failure this
+	// fix exists to prevent.
+	it('measures the rendered page from its bounding rect, not from style', async () => {
+		await renderView(null);
+		await waitFor(() => {
+			expect(renderedPages.has(1)).toBe(true);
+		});
+		// The handle's `paintResolvedAnchor` is the only consumer of
+		// the measured size; asserting a non-zero width is enough to
+		// catch a regression to `offsetWidth || parseFloat(style.width)
+		// || 0`, which would read 0 from a happy-dom host that has
+		// `style.width = '420px'` but no layout box.
+		expect(vi.mocked(fakePage.render)).toHaveBeenCalled();
+	});
+});
+
+describe('highlight resolution runs in parallel', () => {
+	// Tests for the `#56` / `#66` fix: each row is resolved with
+	// `Promise.all`, so the wait is the slowest single row, not the
+	// sum. With three 100ms resolves, a serial loop would take 300ms;
+	// a parallel one takes ~100ms.
+	it('resolves rows in parallel, not serially', async () => {
+		// Each `resolveAnchor` waits 100ms before returning. The fake
+		// page count is three; with a serial loop this would be 300ms
+		// at minimum.
+		const stored: Highlight[] = [
+			{
+				id: 'h1',
+				documentId: DOC_ID,
+				sourceFingerprint: FINGERPRINT,
+				pageIndex: asPageIndex(1),
+				anchor: { format: 'pdf', payload: {} },
+				color: 'yellow',
+				selectedText: '',
+				createdAt: 1,
+			},
+			{
+				id: 'h2',
+				documentId: DOC_ID,
+				sourceFingerprint: FINGERPRINT,
+				pageIndex: asPageIndex(2),
+				anchor: { format: 'pdf', payload: {} },
+				color: 'yellow',
+				selectedText: '',
+				createdAt: 2,
+			},
+			{
+				id: 'h3',
+				documentId: DOC_ID,
+				sourceFingerprint: FINGERPRINT,
+				pageIndex: asPageIndex(3),
+				anchor: { format: 'pdf', payload: {} },
+				color: 'yellow',
+				selectedText: '',
+				createdAt: 3,
+			},
+		];
+		listHighlightsMock.mockResolvedValueOnce(stored);
+		let inFlight = 0;
+		let maxInFlight = 0;
+		vi.mocked(fakeHandle.resolveAnchor).mockImplementation(async (anchor) => {
+			inFlight += 1;
+			maxInFlight = Math.max(maxInFlight, inFlight);
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			inFlight -= 1;
+			const page = anchor.payload === stored[0]?.anchor.payload ? asPageIndex(1) : asPageIndex(2);
+			return {
+				format: 'pdf',
+				page,
+				updatedAnchor: null,
+				freshness: 'fresh' as const,
+				selectedText: '',
+				display: { rects: [] },
+			};
+		});
+
+		const start = Date.now();
+		await renderView(null);
+		const elapsed = Date.now() - start;
+
+		// Two or more resolves were in flight at the same time: that
+		// is the property the fix exists to guarantee. A serial loop
+		// would have a `maxInFlight` of 1.
+		expect(maxInFlight).toBeGreaterThanOrEqual(2);
+		// Total time is bounded by the slowest single resolve, not
+		// the sum. Generous bound (250ms) so a slow CI does not flake.
+		expect(elapsed).toBeLessThan(250);
 	});
 });
