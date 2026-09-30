@@ -36,38 +36,76 @@ import type {
 	SourceFingerprint,
 	SourceMetadata,
 } from '../domain/document.ts';
+import { asDocumentId } from '../domain/document.ts';
 import { fingerprintBlob } from '../lib/fingerprint.ts';
 import { getDb } from './db.ts';
 
 /** A row in the library list: one Document plus its "primary"
- *  source. The primary source is the most recently imported one
- *  (and in MVP the only one). The UI uses this for display; the
- *  repository uses it for navigation. */
+ *  source. The primary source is the oldest one attached to the
+ *  Document — which, in MVP, is the only one. The UI uses this for
+ *  display; the repository uses it for navigation. */
 export interface LibraryEntry {
 	readonly document: Document;
 	readonly primarySource: DocumentSource;
 }
 
 /** List the library. Order: most recently read first, then
- *  never-opened documents in import order. */
+ *  never-opened documents in import order.
+ *
+ *  Reads the document list and the source list in two indexed reads
+ *  (not one read per document), then groups sources by `documentId`
+ *  in memory. A per-document read would be N+1: every additional
+ *  document paid for its own IndexedDB roundtrip. With the index
+ *  `[documentId+importedAt]` already declared on `documentSources`
+ *  (`db.ts`), a single `where('documentId').anyOf([...])` returns
+ *  every source for every row in the library in one shot. */
 export async function listLibrary(): Promise<readonly LibraryEntry[]> {
 	const db = getDb();
 
 	const docs = await db.documents.toArray();
-	const entries = await Promise.all(
-		docs.map(async (document) => {
-			const primarySource = await getPrimarySource(document.id);
-			return primarySource ? { document, primarySource } : null;
-		}),
-	);
+	if (docs.length === 0) return [];
 
-	return entries
-		.filter((e): e is LibraryEntry => e !== null)
-		.sort((a, b) => {
-			const aT = a.document.lastReadAt ?? a.document.importedAt;
-			const bT = b.document.lastReadAt ?? b.document.importedAt;
-			return bT - aT;
-		});
+	const documentIds = docs.map((document) => document.id);
+	const allSources = await db.documentSources.where('documentId').anyOf(documentIds).toArray();
+
+	// Group by documentId; sort each bucket by `importedAt` so
+	// `getPrimarySource`'s "oldest" rule is honoured locally without
+	// a second indexed read.
+	const sourcesByDocument = new Map<DocumentId, DocumentSource[]>();
+	for (const source of allSources) {
+		const bucket = sourcesByDocument.get(source.documentId);
+		if (bucket === undefined) {
+			sourcesByDocument.set(source.documentId, [source]);
+		} else {
+			bucket.push(source);
+		}
+	}
+	for (const bucket of sourcesByDocument.values()) {
+		bucket.sort((a, b) => a.importedAt - b.importedAt);
+	}
+
+	const entries: LibraryEntry[] = [];
+	for (const document of docs) {
+		const bucket = sourcesByDocument.get(document.id);
+		const primarySource = bucket?.[0];
+		if (primarySource === undefined) {
+			// A Document with no source is a data-integrity bug —
+			// every Document written by `importDocument` is created
+			// in the same transaction as its first DocumentSource.
+			// Logging instead of silently dropping lets tests and
+			// telemetry notice; the row is still filtered so the
+			// library does not show a card with no file.
+			console.error('readmark: document has no primary source', { documentId: document.id });
+			continue;
+		}
+		entries.push({ document, primarySource });
+	}
+
+	return entries.sort((a, b) => {
+		const aT = a.document.lastReadAt ?? a.document.importedAt;
+		const bT = b.document.lastReadAt ?? b.document.importedAt;
+		return bT - aT;
+	});
 }
 
 /** Fetch a Document by its logical id. Does NOT load sources or
@@ -88,10 +126,10 @@ export async function listDocumentSources(
 		.toArray();
 }
 
-/** The "primary" source of a Document. MVP uses the oldest source
- *  (which is the only source). When multi-source UI lands, this
- *  becomes "the source the reader last opened, or the oldest if
- *  never opened." */
+/** The "primary" source of a Document — the oldest one attached.
+ *  In MVP one Document has one source, so this is unambiguous.
+ *  When multi-source UI lands, this becomes "the source the reader
+ *  last opened, or the oldest if never opened." */
 export async function getPrimarySource(documentId: DocumentId): Promise<DocumentSource | null> {
 	const sources = await listDocumentSources(documentId);
 	return sources[0] ?? null;
@@ -168,7 +206,11 @@ export async function importDocument(
 			}
 
 			// New source → mint a Document and its first Source together.
-			const id = crypto.randomUUID() as DocumentId;
+			// UUID v4 is the only shape a `DocumentId` accepts, so
+			// route through the brand guard instead of casting —
+			// `as DocumentId` would let a future shape change (e.g.
+			// adding a checksum) through unnoticed.
+			const id = asDocumentId(crypto.randomUUID());
 
 			await db.documents.put({
 				id,

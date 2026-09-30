@@ -39,14 +39,11 @@ import type { Anchor } from '../domain/annotation/index.ts';
 import type { DocumentId, SourceFingerprint } from '../domain/document.ts';
 import type { Highlight, PageIndex } from '../domain/reading-state.ts';
 import { getDb } from './db.ts';
+import type { HighlightScope } from './scope.ts';
 
-/** The two keys a highlight list is scoped by. A named object rather
- *  than two arguments, because both are branded strings and a swap
- *  would typecheck. */
-export interface HighlightScope {
-	readonly documentId: DocumentId;
-	readonly sourceFingerprint: SourceFingerprint;
-}
+/** Re-exported so callers can keep importing from `./highlights-repo.ts`
+ *  without changing their call sites. */
+export type { HighlightScope } from './scope.ts';
 
 /**
  * The colour a new highlight is stored with, as a name rather than a
@@ -102,25 +99,38 @@ export async function addHighlight(input: NewHighlight): Promise<Highlight> {
 }
 
 /** Every highlight in a source, in painting order: by page, then by
- *  when it was made. */
+ *  when it was made. Hits the compound
+ *  `[documentId+sourceFingerprint]` index and post-filters by the
+ *  scope pair in memory — keeping the secondary index read narrow
+ *  for the same cost as the prior single-column scan. */
 export async function listHighlights(scope: HighlightScope): Promise<readonly Highlight[]> {
 	const rows = await getDb()
-		.highlights.where('documentId')
-		.equals(scope.documentId)
-		.filter((row) => row.sourceFingerprint === scope.sourceFingerprint)
+		.highlights.where('[documentId+sourceFingerprint]')
+		.equals([scope.documentId, scope.sourceFingerprint])
 		.toArray();
 	return [...rows].sort(
-		(a, b) => a.pageIndex - b.pageIndex || a.createdAt - b.createdAt || a.id.localeCompare(b.id),
+		(a, b) =>
+			a.pageIndex - b.pageIndex ||
+			a.createdAt - b.createdAt ||
+			(a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
 	);
 }
 
-/** The highlights on one page, in the order they were made — the query
- *  the compound index exists for, and the one a painter asks. */
+/** The highlights on one page, in the order they were made. Hits the
+ *  `[documentId+sourceFingerprint+pageIndex]` compound index directly
+ *  so the painter's query is a single indexed read with no
+ *  post-filter. */
 export async function listHighlightsOnPage(
 	scope: HighlightScope,
 	pageIndex: PageIndex,
 ): Promise<readonly Highlight[]> {
-	return (await listHighlights(scope)).filter((row) => row.pageIndex === pageIndex);
+	const rows = await getDb()
+		.highlights.where('[documentId+sourceFingerprint+pageIndex]')
+		.equals([scope.documentId, scope.sourceFingerprint, pageIndex])
+		.toArray();
+	return [...rows].sort(
+		(a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+	);
 }
 
 /**
@@ -133,6 +143,11 @@ export async function listHighlightsOnPage(
  * a resolver that has just decided an anchor is still valid is not in
  * a position to create it, and reporting success for a row that does
  * not exist would hide a highlight that vanished.
+ *
+ * The caller is responsible for detecting a page mismatch between the
+ * stored row and the resolver-supplied `Anchor` (the `Anchor.page`
+ * field against `Highlight.pageIndex`); this repository stays
+ * format-agnostic on purpose, per ADR-0007.
  *
  * ADR-0007 leaves the quote alone on a recovery, which is why
  * `selectedText` is not touched either: it mirrors the quote, and
@@ -149,10 +164,18 @@ export async function replaceHighlightAnchor(id: string, anchor: Anchor): Promis
 	return (await getDb().highlights.update(id, { anchor })) > 0;
 }
 
-/** Remove a highlight. A reader action — see the file header. */
+/** Remove a highlight. A reader action — see the file header.
+ *
+ *  Race: same shape as `bookmarks-repo.deleteBookmark` — a `get`
+ *  outside a transaction cannot answer "was there a row" atomically
+ *  with the subsequent `delete`. Wrapping in `rw` serialises the two
+ *  so a second concurrent caller reads `undefined` and returns
+ *  `false`. */
 export async function deleteHighlight(id: string): Promise<boolean> {
-	const existing = await getDb().highlights.get(id);
-	if (existing === undefined) return false;
-	await getDb().highlights.delete(id);
-	return true;
+	return await getDb().transaction('rw', getDb().highlights, async () => {
+		const existing = await getDb().highlights.get(id);
+		if (existing === undefined) return false;
+		await getDb().highlights.delete(id);
+		return true;
+	});
 }

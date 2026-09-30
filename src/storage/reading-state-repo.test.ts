@@ -23,23 +23,33 @@ function key(documentId: DocumentId, fingerprint: string): string {
 	return `${documentId}|${fingerprint}`;
 }
 
-vi.mock('./db.ts', () => ({
-	getDb: () => ({
-		readingProgress: {
-			get: async ([documentId, fingerprint]: [DocumentId, string]) =>
-				rows.get(key(documentId, fingerprint)) ?? undefined,
-			put: async (row: { documentId: DocumentId; sourceFingerprint: string }) => {
-				putCalls.push(row);
-				rows.set(key(row.documentId, row.sourceFingerprint), row);
-				return row.sourceFingerprint;
+vi.mock('./db.ts', () => {
+	let inflight: Promise<unknown> = Promise.resolve();
+	return {
+		getDb: () => ({
+			readingProgress: {
+				get: async ([documentId, fingerprint]: [DocumentId, string]) =>
+					rows.get(key(documentId, fingerprint)) ?? undefined,
+				put: async (row: { documentId: DocumentId; sourceFingerprint: string }) => {
+					putCalls.push(row);
+					rows.set(key(row.documentId, row.sourceFingerprint), row);
+					return row.sourceFingerprint;
+				},
+				delete: async ([documentId, fingerprint]: [DocumentId, string]) => {
+					// Dexie 4 types `Table.delete` as `void`.
+					rows.delete(key(documentId, fingerprint));
+				},
 			},
-			delete: async ([documentId, fingerprint]: [DocumentId, string]) => {
-				// Dexie 4 types `Table.delete` as `void`.
-				rows.delete(key(documentId, fingerprint));
+			transaction: async <T>(_mode: string, _tables: unknown, fn: () => Promise<T>) => {
+				// Serialise concurrent transactions on this table so
+				// the delete-vs-save race resolves deterministically.
+				const result = inflight.then(async () => await fn());
+				inflight = result.catch(() => undefined);
+				return result;
 			},
-		},
-	}),
-}));
+		}),
+	};
+});
 
 const { deleteReadingProgress, getReadingProgress, saveReadingPosition } = await import(
 	'./reading-state-repo.ts'
@@ -185,5 +195,26 @@ describe('deleteReadingProgress', () => {
 		expect(
 			await deleteReadingProgress({ documentId: DOC_A, sourceFingerprint: FINGERPRINT_A }),
 		).toBe(false);
+	});
+
+	it('atomically reports only one winner when two callers race', async () => {
+		// Without a transaction, two concurrent "forget progress"
+		// clicks would both pass the existence check and both delete.
+		// The transaction serialises the read-and-delete so the
+		// second caller sees the row is already gone.
+		await saveReadingPosition({
+			documentId: DOC_A,
+			sourceFingerprint: FINGERPRINT_A,
+			currentPage: asPageIndex(5),
+			position: null,
+		});
+
+		const key = { documentId: DOC_A, sourceFingerprint: FINGERPRINT_A };
+		const results = await Promise.all([deleteReadingProgress(key), deleteReadingProgress(key)]);
+		expect(results.filter((r) => r === true)).toHaveLength(1);
+		expect(results.filter((r) => r === false)).toHaveLength(1);
+		expect(
+			await getReadingProgress({ documentId: DOC_A, sourceFingerprint: FINGERPRINT_A }),
+		).toBeNull();
 	});
 });

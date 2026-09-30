@@ -37,47 +37,73 @@ function useDeterministicIds(): void {
 	});
 }
 
-vi.mock('./db.ts', () => ({
-	getDb: () => ({
-		highlights: {
-			where: (index: string) => ({
-				equals: (value: unknown) => ({
-					filter: (predicate: (row: Record<string, unknown>) => boolean) => ({
-						async toArray() {
-							return Array.from(rows.values())
-								.filter((row) => row[index] === value)
-								.filter(predicate);
-						},
-					}),
+vi.mock('./db.ts', () => {
+	let inflight: Promise<unknown> = Promise.resolve();
+	return {
+		getDb: () => ({
+			highlights: {
+				where: (index: string) => ({
+					equals: (value: unknown) => {
+						// Compound-index shape: equality against a tuple
+						// matches each position against the matching
+						// segment of the index name so a
+						// `[documentId+sourceFingerprint+pageIndex]` read
+						// narrows to one page of one document in one pass.
+						// Dexie's compound syntax wraps the index in
+						// `[...]`; strip the brackets before splitting.
+						const tuple = Array.isArray(value) ? value : [value];
+						const segments = index.replace(/[[\]]/g, '').split('+');
+						return {
+							filter: (predicate: (row: Record<string, unknown>) => boolean) => ({
+								async toArray() {
+									return Array.from(rows.values())
+										.filter((row) => tuple.every((v, i) => row[segments[i] ?? index] === v))
+										.filter(predicate);
+								},
+							}),
+							async toArray() {
+								return Array.from(rows.values()).filter((row) =>
+									tuple.every((v, i) => row[segments[i] ?? index] === v),
+								);
+							},
+						};
+					},
 				}),
-			}),
-			get: async (id: string) => rows.get(id),
-			put: async (row: Record<string, unknown>) => {
-				rows.set(String(row.id), row);
-				return row.id;
-			},
-			update: async (id: string, changes: Record<string, unknown>) => {
-				// Another tab's delete, landing between a caller's
-				// decision and this write. Dexie reports the number of
-				// rows it modified, and that count is the only honest
-				// answer — which is what the fake has to be able to
-				// produce for the race to be testable at all.
-				if (deletedElsewhere.has(id)) {
-					deletedElsewhere.delete(id);
+				get: async (id: string) => rows.get(id),
+				put: async (row: Record<string, unknown>) => {
+					rows.set(String(row.id), row);
+					return row.id;
+				},
+				update: async (id: string, changes: Record<string, unknown>) => {
+					// Another tab's delete, landing between a caller's
+					// decision and this write. Dexie reports the number of
+					// rows it modified, and that count is the only honest
+					// answer — which is what the fake has to be able to
+					// produce for the race to be testable at all.
+					if (deletedElsewhere.has(id)) {
+						deletedElsewhere.delete(id);
+						rows.delete(id);
+						return 0;
+					}
+					const row = rows.get(id);
+					if (row === undefined) return 0;
+					rows.set(id, { ...row, ...changes });
+					return 1;
+				},
+				delete: async (id: string) => {
 					rows.delete(id);
-					return 0;
-				}
-				const row = rows.get(id);
-				if (row === undefined) return 0;
-				rows.set(id, { ...row, ...changes });
-				return 1;
+				},
 			},
-			delete: async (id: string) => {
-				rows.delete(id);
+			transaction: async <T>(_mode: string, _tables: unknown, fn: () => Promise<T>) => {
+				// Serialise concurrent transactions on this table so
+				// the delete race resolves deterministically.
+				const result = inflight.then(async () => await fn());
+				inflight = result.catch(() => undefined);
+				return result;
 			},
-		},
-	}),
-}));
+		}),
+	};
+});
 
 const {
 	DEFAULT_HIGHLIGHT_COLOR,
@@ -287,5 +313,18 @@ describe('deleteHighlight', () => {
 			sourceFingerprint: FINGERPRINT_A,
 		});
 		expect(listed.map((row) => row.pageIndex)).toEqual([2]);
+	});
+
+	it('atomically reports only one winner when two callers race', async () => {
+		// Same shape as `bookmarks-repo.deleteBookmark`: two
+		// concurrent calls cannot both observe the row as present.
+		const highlight = await add({ pageIndex: 1 });
+
+		const results = await Promise.all([
+			deleteHighlight(highlight.id),
+			deleteHighlight(highlight.id),
+		]);
+		expect(results.filter((r) => r === true)).toHaveLength(1);
+		expect(results.filter((r) => r === false)).toHaveLength(1);
 	});
 });
