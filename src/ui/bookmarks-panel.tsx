@@ -100,10 +100,15 @@ export function AddBookmarkDialog({
 	pageIndex,
 	onConfirm,
 	onCancel,
+	error,
 }: {
 	readonly pageIndex: number;
 	readonly onConfirm: (title: string) => void;
 	readonly onCancel: () => void;
+	/** Inline message shown above the title field. The dialog stays
+	 *  open so the reader can edit and retry instead of re-entering
+	 *  the title from scratch. */
+	readonly error?: string | null;
 }) {
 	const [title, setTitle] = useState('');
 	return (
@@ -121,6 +126,11 @@ export function AddBookmarkDialog({
 			onConfirm={() => onConfirm(title.trim())}
 			onCancel={onCancel}
 		>
+			{error !== null && error !== undefined && (
+				<p className="rm-alert" role="alert" data-testid="rm-bookmark-error">
+					{error}
+				</p>
+			)}
 			<label className="rm-dialog__field">
 				<span className="rm-dialog__field-label">名前（任意）</span>
 				<input
