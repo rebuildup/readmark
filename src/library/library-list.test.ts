@@ -22,10 +22,13 @@ import type {
 } from '../domain/document.ts';
 import type { LibraryEntry } from '../storage/documents-repo.ts';
 import {
+	displayAuthor,
+	displayTitle,
 	filterLibrary,
 	formatByteSize,
 	formatImportedAt,
 	formatLastReadAt,
+	formatLastReadStructured,
 	selectVisibleLibrary,
 	sortLibrary,
 } from './library-list.ts';
@@ -210,6 +213,13 @@ describe('filterLibrary', () => {
 		expect(filterLibrary(entries, '   ')).toHaveLength(entries.length);
 	});
 
+	it('returns the input array by reference when the needle is empty', () => {
+		// Short-circuit contract: callers can rely on the unchanged
+		// reference for the no-filter path, so sort + downstream
+		// passes don't allocate a fresh array per re-render.
+		expect(filterLibrary(entries, '')).toBe(entries);
+	});
+
 	it('returns nothing when the query matches no row', () => {
 		expect(filterLibrary(entries, '存在しない書名')).toHaveLength(0);
 	});
@@ -285,5 +295,32 @@ describe('formatImportedAt / formatLastReadAt', () => {
 
 	it('reports 未閲覧 for a document that was never opened', () => {
 		expect(formatLastReadAt(null, now)).toBe('未閲覧');
+	});
+});
+
+describe('formatLastReadStructured', () => {
+	const now = at(2026, 8, 27, 15);
+
+	it('returns null for a never-opened document', () => {
+		expect(formatLastReadStructured(null, now)).toBeNull();
+	});
+
+	it('returns the relative label and the absolute timestamp for an opened document', () => {
+		const opened = at(2026, 8, 26, 23, 50);
+		const result = formatLastReadStructured(opened, now);
+
+		expect(result).toEqual({ label: '昨日', absolute: opened });
+	});
+});
+
+describe('displayTitle / displayAuthor', () => {
+	it('falls back to a labelled placeholder for missing metadata', () => {
+		expect(displayTitle({})).toBe('(タイトルなし)');
+		expect(displayAuthor({})).toBe('(著者なし)');
+	});
+
+	it('returns the value as-is when present', () => {
+		expect(displayTitle({ title: '雪国' })).toBe('雪国');
+		expect(displayAuthor({ author: '川端康成' })).toBe('川端康成');
 	});
 });
