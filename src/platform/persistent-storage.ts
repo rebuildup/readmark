@@ -42,22 +42,24 @@ export interface QuotaSnapshot {
  *  number they are enforcing, not duplicate `0.9` literals. */
 export const QUOTA_REFUSE_THRESHOLD = 0.9;
 
-/** Module-level flag: have we already asked the browser for
- *  persistence in this tab? `persist()` is spec'd as idempotent but
- *  some browsers surface the prompt on every call, which would be
- *  hostile to the reader. The flag dies with the tab — exactly the
- *  "once per session" scope we want. */
-let persistenceRequested = false;
+/** Cached result of the first persistence attempt in this tab.
+ *  `null` means "have not asked yet". `persist()` is spec'd as
+ *  idempotent but some browsers surface the prompt on every call,
+ *  which would be hostile to the reader; we cache so the browser is
+ *  asked at most once per tab. The flag dies with the tab — exactly
+ *  the "once per session" scope we want. */
+let persistenceResult: boolean | null = null;
 
 /** For tests only. Production code never resets this. */
 export function _resetPersistenceRequestFlag(): void {
-	persistenceRequested = false;
+	persistenceResult = null;
 }
 
 /**
  * Ask the browser to mark this origin as persistent. Idempotent
- * within a tab: subsequent calls are no-ops that re-read the
- * current `persisted()` state.
+ * within a tab: the first call asks the browser and caches the
+ * answer; subsequent calls return the cached answer without
+ * touching the browser.
  *
  * Returns `true` if storage is persistent (was already, or the
  * browser granted the request), `false` otherwise. Returns `false`
@@ -72,22 +74,24 @@ export function _resetPersistenceRequestFlag(): void {
  *     is a normal user choice, not an error.
  */
 export async function requestPersistenceIfNeeded(): Promise<boolean> {
-	const storage = globalThis.navigator?.storage;
-	if (storage?.persist === undefined) return false;
+	if (persistenceResult !== null) return persistenceResult;
 
-	if (persistenceRequested) {
-		try {
-			return await storage.persisted();
-		} catch {
-			return false;
-		}
+	const storage = globalThis.navigator?.storage;
+	if (storage?.persist === undefined) {
+		persistenceResult = false;
+		return false;
 	}
-	persistenceRequested = true;
 
 	try {
-		if (await storage.persisted()) return true;
-		return await storage.persist();
+		if (await storage.persisted()) {
+			persistenceResult = true;
+			return true;
+		}
+		const result = await storage.persist();
+		persistenceResult = result;
+		return result;
 	} catch {
+		persistenceResult = false;
 		return false;
 	}
 }

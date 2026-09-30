@@ -38,9 +38,9 @@ import {
 } from './persistent-storage.ts';
 
 interface MockStorage {
-	persist?: ReturnType<typeof vi.fn>;
-	persisted?: ReturnType<typeof vi.fn>;
-	estimate?: ReturnType<typeof vi.fn>;
+	persist: ReturnType<typeof vi.fn> | undefined;
+	persisted: ReturnType<typeof vi.fn> | undefined;
+	estimate: ReturnType<typeof vi.fn> | undefined;
 }
 
 function installMockStorage(overrides: Partial<MockStorage> = {}): MockStorage {
@@ -192,29 +192,19 @@ describe('isQuotaOverThreshold', () => {
 	});
 
 	it('returns false below the default 90% threshold', () => {
-		expect(
-			isQuotaOverThreshold({ usage: 8000, quota: 10000, persistent: true }),
-		).toBe(false);
+		expect(isQuotaOverThreshold({ usage: 8000, quota: 10000, persistent: true })).toBe(false);
 	});
 
 	it('returns true at the threshold', () => {
-		expect(
-			isQuotaOverThreshold({ usage: 9000, quota: 10000, persistent: true }),
-		).toBe(true);
+		expect(isQuotaOverThreshold({ usage: 9000, quota: 10000, persistent: true })).toBe(true);
 	});
 
 	it('returns true above the threshold', () => {
-		expect(
-			isQuotaOverThreshold({ usage: 9500, quota: 10000, persistent: true }),
-		).toBe(true);
+		expect(isQuotaOverThreshold({ usage: 9500, quota: 10000, persistent: true })).toBe(true);
 	});
 
 	it('respects a custom threshold', () => {
-		expect(
-			isQuotaOverThreshold({ usage: 5000, quota: 10000, persistent: true }, 0.5),
-		).toBe(true);
-		expect(
-			isQuotaOverThreshold({ usage: 4999, quota: 10000, persistent: true }, 0.5),
-		).toBe(false);
+		expect(isQuotaOverThreshold({ usage: 5000, quota: 10000, persistent: true }, 0.5)).toBe(true);
+		expect(isQuotaOverThreshold({ usage: 4999, quota: 10000, persistent: true }, 0.5)).toBe(false);
 	});
 });
