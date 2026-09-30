@@ -42,13 +42,22 @@
  *          that the conversion math cannot remove. Per-fragment
  *          drift is logged unconditionally; genuine geometry bugs
  *          shift fragments by tens of CSS px and still fail.
- *   - `resolveAnchor` runs once per source open. After the initial
- *     write-back, the stored rects are recorded; after every viewport
- *     change the row is re-read and the rects must still match the
- *     recorded values within the same tolerance. A viewport change
- *     that re-ran recovery would either write a different set
- *     (caught here) or fail to write the same set twice (also caught
- *     here).
+ *   - A viewport operation does not mutate persisted geometry. After
+ *     the initial write-back, the stored rects are recorded; after
+ *     every zoom and rotation the row is re-read and must still hold
+ *     the recorded values.
+ *
+ *     Note what that does and does not show. It shows the stored
+ *     geometry is stable across viewport changes, which is the
+ *     contract: rects are raw user-space (ADR-0007), so a zoom or a
+ *     rotation is a change to the projection and not to the anchor. It
+ *     does *not* show that recovery did not re-run — re-measuring the
+ *     same geometry yields `updatedAnchor: null` and leaves the row
+ *     byte-identical, so a re-run is invisible here by construction.
+ *     The evidence for "recovery runs once per source open" is the
+ *     `resolveAnchor` call count in
+ *     `src/ui/highlights-integration.test.tsx`. Each claim is asserted
+ *     by the layer that can actually see it.
  *   - No stale or duplicate overlay is left behind: exactly one
  *     `.rm-highlight` per seeded row is painted, across the whole
  *     document.
@@ -186,7 +195,8 @@ async function readIndexedDbIdentity(page) {
 }
 
 /** Insert one highlight row into IndexedDB. Direct write — the
- *  reader's recovery is what we want to exercise, not its write path. */
+ *  reader's recovery is what this file is here to exercise, not the
+ *  repository's insert path. */
 async function seedHighlight(page, row) {
 	await page.evaluate(async (row) => {
 		const db = await new Promise((resolve, reject) => {
@@ -466,7 +476,9 @@ async function main() {
 		}
 		log(`seeded ${seeds.length} highlight rows with deliberately wrong rects`);
 
-		// --- Open the reader; recovery runs once per source open ---
+		// --- Open the reader ---
+		// Opening runs recovery once. That it runs *once* is the
+		// integration test's call count, not this file's — see the header.
 		await page.click('[data-testid="rm-library-row-read"]');
 		await page.locator('[data-testid="rm-reader-toolbar"]').waitFor({ state: 'visible' });
 		await page
@@ -640,10 +652,15 @@ async function main() {
 			`A) zoom=1 rot=0: ${a1.rects.length}+${a2.rects.length}+${a3.rects.length} fragments match`,
 		);
 
-		// Snapshot the stored rects — they are what the next scenarios
-		// must NOT change. A viewport operation that re-ran recovery
-		// would either re-measure (drift > TOLERANCE_PX) or write the
-		// same values back; both are caught here.
+		// Snapshot the stored rects. The scenarios below change the
+		// viewport and must leave them exactly as they are: rects are raw
+		// user-space, so a zoom or a rotation is a projection change and
+		// not a change to the anchor (ADR-0007).
+		//
+		// A weaker claim than "recovery did not re-run", and deliberately
+		// so — see the file header. Re-measuring the same geometry writes
+		// nothing back, so a re-run cannot be seen from here at all; the
+		// call count in the integration test is what sees it.
 		const baselineSingle1 = JSON.stringify(writtenSingle1.anchor.payload.rects);
 		const baselineMulti2 = JSON.stringify(writtenMulti2.anchor.payload.rects);
 		const baselineSingle3 = JSON.stringify(writtenSingle3.anchor.payload.rects);
@@ -720,23 +737,29 @@ async function main() {
 		const afterD_single3Str = JSON.stringify(afterD_single3.anchor.payload.rects);
 		if (afterD_single1Str !== baselineSingle1) {
 			fail(
-				`zoom+rotation re-ran recovery: geo-single-1 rects changed ` +
-					`(was=${baselineSingle1}, now=${afterD_single1Str})`,
+				`a viewport operation changed the stored rects for geo-single-1: ` +
+					`(was=${baselineSingle1}, now=${afterD_single1Str}); rects are raw user-space, so a zoom or a ` +
+					'rotation is not allowed to mutate them (ADR-0007)',
 			);
 		}
 		if (afterD_multi2Str !== baselineMulti2) {
 			fail(
-				`zoom+rotation re-ran recovery: geo-multi-2 rects changed ` +
-					`(was=${baselineMulti2}, now=${afterD_multi2Str})`,
+				`a viewport operation changed the stored rects for geo-multi-2: ` +
+					`(was=${baselineMulti2}, now=${afterD_multi2Str}); rects are raw user-space, so a zoom or a ` +
+					'rotation is not allowed to mutate them (ADR-0007)',
 			);
 		}
 		if (afterD_single3Str !== baselineSingle3) {
 			fail(
-				`zoom+rotation re-ran recovery: geo-single-3 rects changed ` +
-					`(was=${baselineSingle3}, now=${afterD_single3Str})`,
+				`a viewport operation changed the stored rects for geo-single-3: ` +
+					`(was=${baselineSingle3}, now=${afterD_single3Str}); rects are raw user-space, so a zoom or a ` +
+					'rotation is not allowed to mutate them (ADR-0007)',
 			);
 		}
-		log('recovery did not re-run on zoom/rotation: stored rects unchanged across scenarios B/C/D');
+		log(
+			'stored geometry unmutated by zoom/rotation across scenarios B/C/D ' +
+				"(whether recovery re-ran is the integration test's call count, not this)",
+		);
 
 		// --- Exactly one .rm-highlight per seeded row, no duplicates ---
 		const counts = await page.evaluate(() => {
