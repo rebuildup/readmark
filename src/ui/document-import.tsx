@@ -36,6 +36,11 @@ import { useNavigate } from 'react-router-dom';
 
 import type { ImportError, ImportSuccess } from '../library/import-document.ts';
 import { importPdfDocument } from '../library/import-document.ts';
+import {
+	isQuotaOverThreshold,
+	readQuotaUsage,
+	requestPersistenceIfNeeded,
+} from '../platform/persistent-storage.ts';
 import { Button } from './primitives/button.tsx';
 
 interface DocumentImportProps {
@@ -67,10 +72,36 @@ export function DocumentImport({ onImported, navigateOnSuccess = 'library' }: Do
 		// would never observe aria-busy="true" long enough to prove
 		// the change handler actually ran.
 		await Promise.resolve();
+
+		// Pre-flight quota check (#10 acceptance: importing while the
+		// origin is at >= 90% of its quota must surface an error
+		// before we touch IndexedDB). If `readQuotaUsage` rejects
+		// (private mode / unsupported browser), proceed; the actual
+		// storage write will surface a real `quota-exceeded` error if
+		// the origin is genuinely full.
+		try {
+			const snapshot = await readQuotaUsage();
+			if (isQuotaOverThreshold(snapshot)) {
+				setError({
+					kind: 'quota-exceeded',
+					cause: new Error('quota over 90% before import'),
+				});
+				setBusy(false);
+				return;
+			}
+		} catch {
+			// Proceed; the storage layer will catch genuine failures.
+		}
+
 		try {
 			const result = await importPdfDocument(file);
 			if (result.ok) {
 				setLastImport(result.value);
+				// Ask for persistent storage once per tab. Wrapped in
+				// `void` because the reader does not need to see the
+				// outcome — the badge in the library header reflects it
+				// after the next refresh.
+				void requestPersistenceIfNeeded();
 				onImported?.(result.value);
 				if (navigateOnSuccess === 'reader') {
 					navigate(`/read/${result.value.documentId}`);
