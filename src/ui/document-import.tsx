@@ -59,13 +59,10 @@ export function DocumentImport({ onImported, navigateOnSuccess = 'library' }: Do
 		setBusy(true);
 		setError(null);
 		setLastImport(null);
-		// Force a microtask boundary so React commits `busy=true`
-		// before the import's first await. Without this, React 19's
-		// automatic batching may collapse setBusy(true) and the
-		// downstream state changes into one render commit for
-		// sub-frame imports — the smoke (`scripts/smoke-import.mjs`)
-		// would never observe aria-busy="true" long enough to prove
-		// the change handler actually ran.
+		// A microtask boundary so React commits `busy=true` before
+		// the import's first await; without this, sub-frame imports
+		// would collapse the state changes into one render commit
+		// and the smoke would never observe aria-busy="true".
 		await Promise.resolve();
 		try {
 			const result = await importPdfDocument(file);
@@ -78,6 +75,13 @@ export function DocumentImport({ onImported, navigateOnSuccess = 'library' }: Do
 			} else {
 				setError(result.error);
 			}
+		} catch (thrown: unknown) {
+			// Defensive: `importPdfDocument()` is typed to return a
+			// `Result` and never throws. If a future change breaks
+			// that contract, leaving the busy spinner spinning is
+			// worse than surfacing a generic message.
+			console.error('readmark: import threw unexpectedly', thrown);
+			setError({ kind: 'unknown', cause: thrown });
 		} finally {
 			setBusy(false);
 		}
@@ -85,7 +89,7 @@ export function DocumentImport({ onImported, navigateOnSuccess = 'library' }: Do
 
 	function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
 		const file = e.target.files?.[0];
-		// Always reset so re-selecting the same file fires `change`.
+		// Reset so re-selecting the same file fires `change`.
 		e.target.value = '';
 		if (!file) return;
 		void handleFile(file);
@@ -105,7 +109,7 @@ export function DocumentImport({ onImported, navigateOnSuccess = 'library' }: Do
 				accept="application/pdf"
 				onChange={handleChange}
 				disabled={busy}
-				style={{ display: 'none' }}
+				className="rm-document-import__input"
 				data-testid="rm-document-import-input"
 			/>
 			<Button
@@ -119,38 +123,15 @@ export function DocumentImport({ onImported, navigateOnSuccess = 'library' }: Do
 			</Button>
 
 			{error !== null && (
-				<div
-					role="alert"
-					style={{
-						marginTop: 12,
-						padding: '8px 12px',
-						border: '1px solid var(--rm-error)',
-						borderRadius: 'var(--rm-radius-md)',
-						background: 'var(--rm-error-bg)',
-						color: 'var(--rm-error-fg)',
-						fontSize: 14,
-					}}
-				>
+				<p className="rm-alert rm-alert--spaced" role="alert">
 					{errorMessage(error)}
-				</div>
+				</p>
 			)}
 
 			{lastImport !== null && error === null && (
-				<div
-					role="status"
-					data-testid="rm-import-status"
-					style={{
-						marginTop: 12,
-						padding: '8px 12px',
-						border: '1px solid var(--rm-border)',
-						borderRadius: 'var(--rm-radius-md)',
-						background: 'var(--rm-bg-surface)',
-						color: 'var(--rm-fg-muted)',
-						fontSize: 14,
-					}}
-				>
+				<p className="rm-status" role="status" data-testid="rm-import-status">
 					{lastImport.title ?? '(タイトルなし)'} — {lastImport.pageCount} ページを取り込みました
-				</div>
+				</p>
 			)}
 		</div>
 	);
@@ -170,5 +151,13 @@ function errorMessage(err: ImportError): string {
 			return 'この形式はサポートされていません。';
 		case 'unknown':
 			return '取り込みに失敗しました。時間をおいて再度お試しください。';
+		default: {
+			// Exhaustive guard: a future kind added to `ImportError`
+			// would be silently dropped without this. The reader
+			// gets a generic message; the developer gets a typed
+			// compiler error at the call site above.
+			const _exhaustive: never = err;
+			return _exhaustive;
+		}
 	}
 }

@@ -111,10 +111,12 @@ export async function importPdfDocument(blob: Blob): Promise<Result<ImportSucces
 	const sourceMetadata: SourceMetadata = pdfMetadataToSourceMetadata(pdfMeta);
 	// Build `DocumentMetadata` with `exactOptionalPropertyTypes`
 	// in mind: omit absent keys rather than passing `undefined`.
+	// Title / author are mirrored from the source; language is
+	// not extracted in MVP (PDF /Info has no /Lang; the catalog
+	// entry is not exposed by pdf.js 5.x's `getMetadata()`).
 	const documentMetadata: { title?: string; author?: string; language?: string } = {};
 	if (pdfMeta.title !== undefined) documentMetadata.title = pdfMeta.title;
 	if (pdfMeta.author !== undefined) documentMetadata.author = pdfMeta.author;
-	if (pdfMeta.language !== undefined) documentMetadata.language = pdfMeta.language;
 
 	try {
 		const { documentId, sourceFingerprint } = await importDocument(blob, 'pdf', {

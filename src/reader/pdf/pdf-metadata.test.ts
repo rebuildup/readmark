@@ -44,7 +44,7 @@
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
 import { PdfInvalidError } from './pdf-errors.ts';
-import { extractPdfMetadata } from './pdf-metadata.ts';
+import { extractPdfMetadata, pdfMetadataToSourceMetadata } from './pdf-metadata.ts';
 
 async function makeTwoPagePdfBytes(): Promise<Uint8Array> {
 	const pdf = await PDFDocument.create();
@@ -129,5 +129,29 @@ describe('extractPdfMetadata (real PDF integration smoke)', () => {
 		const meta = await extractPdfMetadata(goodBlob);
 
 		expect(meta.pageCount).toBe(2);
+	});
+});
+
+describe('pdfMetadataToSourceMetadata (full forward)', () => {
+	it('mirrors pageCount', () => {
+		expect(pdfMetadataToSourceMetadata({ pageCount: 12 }).pageCount).toBe(12);
+	});
+
+	it('forwards title and author when present', () => {
+		const out = pdfMetadataToSourceMetadata({
+			pageCount: 3,
+			title: '雪国',
+			author: '川端康成',
+		});
+		expect(out.title).toBe('雪国');
+		expect(out.author).toBe('川端康成');
+	});
+
+	it('omits absent keys (does not set them to undefined)', () => {
+		// `exactOptionalPropertyTypes` rejects explicit `undefined`,
+		// so the helper must drop absent fields entirely — pin that.
+		const out = pdfMetadataToSourceMetadata({ pageCount: 1 });
+		expect('title' in out).toBe(false);
+		expect('author' in out).toBe(false);
 	});
 });

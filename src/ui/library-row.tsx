@@ -27,7 +27,13 @@
 import { Link } from 'react-router-dom';
 
 import type { DocumentId } from '../domain/document.ts';
-import { formatByteSize, formatImportedAt, formatLastReadAt } from '../library/library-list.ts';
+import {
+	displayAuthor,
+	displayTitle,
+	formatByteSize,
+	formatImportedAt,
+	formatLastReadStructured,
+} from '../library/library-list.ts';
 import type { LibraryEntry } from '../storage/documents-repo.ts';
 import { Button } from './primitives/button.tsx';
 
@@ -42,9 +48,9 @@ interface LibraryRowProps {
 
 export function LibraryRow({ entry, now, onRequestDelete }: LibraryRowProps) {
 	const { document, primarySource } = entry;
-	const title = document.metadata.title ?? '(タイトルなし)';
-	const author = document.metadata.author ?? '(著者なし)';
-	const lastRead = formatLastReadAt(document.lastReadAt, now);
+	const title = displayTitle(document.metadata);
+	const author = displayAuthor(document.metadata);
+	const lastRead = formatLastReadStructured(document.lastReadAt, now);
 	const imported = formatImportedAt(document.importedAt, now);
 
 	return (
@@ -67,7 +73,7 @@ export function LibraryRow({ entry, now, onRequestDelete }: LibraryRowProps) {
 					<span>{formatByteSize(primarySource.byteSize)}</span>
 				</div>
 				<div className="rm-library-row__status">
-					<span>{lastRead === '未閲覧' ? '未閲覧' : `最終閲覧 ${lastRead}`}</span>
+					<span>{lastRead === null ? '未閲覧' : `最終閲覧 ${lastRead.label}`}</span>
 					<span aria-hidden="true">・</span>
 					<span>{imported}に追加</span>
 				</div>
