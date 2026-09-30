@@ -90,6 +90,16 @@ export interface Document {
 export interface SourceMetadata {
 	/** Page count for paged formats; chapter count for reflowable. */
 	readonly pageCount?: number;
+	/** Title from the source's intrinsic metadata (e.g. PDF
+	 *  /Info `Title`). Mirrored from `DocumentMetadata` at import
+	 *  time so the storage layer can reconstruct the title from
+	 *  the source alone (e.g. for a future "re-import the same
+	 *  book from a new file" flow). Generic UI should prefer
+	 *  `Document.metadata.title`. */
+	readonly title?: string;
+	/** Author from the source's intrinsic metadata (e.g. PDF
+	 *  /Info `Author`). See `title` for the mirroring rationale. */
+	readonly author?: string;
 	/** Format-specific extras. NEVER depend on this from generic
 	 *  code. */
 	readonly extras?: Readonly<Record<string, unknown>>;
