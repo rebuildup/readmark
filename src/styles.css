@@ -166,6 +166,14 @@ pre {
 	font-size: 14px;
 }
 
+/* Variant for an alert that is a sibling of the page column, not a
+ * standalone message — the page column is edge-to-edge, so the alert
+ * sits in the same gap the pages do. Without this the alert would
+ * butt against the reader's left edge. */
+.rm-alert--with-margin {
+	margin: 12px;
+}
+
 /* Visually hidden, still announced. Used to label the search /
  * sort controls without repeating visible text. */
 .rm-visually-hidden {
