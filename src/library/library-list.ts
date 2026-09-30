@@ -73,15 +73,17 @@ export function sortLibrary(
 	return sorted;
 }
 
-/** Filter by `search` over title and author. Returns a new array;
- *  the input is untouched. */
+/** Filter by `search` over title and author. Returns the input
+ *  unchanged when the needle is empty so the common "no filter"
+ *  path costs no allocation; otherwise returns a filtered copy. */
 export function filterLibrary(
 	entries: readonly LibraryEntry[],
 	search: string,
 ): readonly LibraryEntry[] {
-	const needle = search.trim().toLocaleLowerCase();
-	if (needle === '') return [...entries];
-	return entries.filter((entry) => matchesSearch(entry, needle));
+	const needle = search.trim();
+	if (needle === '') return entries;
+	const needleFold = needle.toLocaleLowerCase('ja');
+	return entries.filter((entry) => matchesSearch(entry, needleFold));
 }
 
 /** Filter, then sort — the exact pipeline the screen renders.
@@ -94,12 +96,16 @@ export function selectVisibleLibrary(
 	return sortLibrary(filterLibrary(entries, query.search), query.sort);
 }
 
-/** Documented export so tests and future callers can assert the
- *  tie-break contract directly. */
-function matchesSearch(entry: LibraryEntry, needle: string): boolean {
-	const title = entry.document.metadata.title ?? '';
-	const author = entry.document.metadata.author ?? '';
-	return title.toLocaleLowerCase().includes(needle) || author.toLocaleLowerCase().includes(needle);
+/** Substring match with the same `'ja'` locale + `sensitivity: 'base'`
+ *  the sort uses, so "Sa" matches "さ" the same way it does in
+ *  `compareTitleAsc`. The needle is already lower-cased here; the
+ *  haystack folds on every call. Callers that re-render often should
+ *  wrap `selectVisibleLibrary` in a `useMemo` keyed on `(entries,
+ *  search, sort)` — the screen does. */
+function matchesSearch(entry: LibraryEntry, needleFold: string): boolean {
+	const title = entry.document.metadata.title?.toLocaleLowerCase('ja') ?? '';
+	const author = entry.document.metadata.author?.toLocaleLowerCase('ja') ?? '';
+	return title.includes(needleFold) || author.includes(needleFold);
 }
 
 function compareRecentlyRead(a: LibraryEntry, b: LibraryEntry): number {
@@ -146,6 +152,31 @@ const KB = 1024;
 const MB = KB * 1024;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** "Title" with the same fallback the row uses, so the delete-confirm
+ *  dialog and the row agree on what an untitled document is called.
+ *  The literal string is shared between three call sites; one
+ *  definition is what keeps them in sync. */
+export function displayTitle(metadata: { readonly title?: string }): string {
+	return metadata.title ?? '(タイトルなし)';
+}
+
+/** "Author" with the same fallback the row uses. */
+export function displayAuthor(metadata: { readonly author?: string }): string {
+	return metadata.author ?? '(著者なし)';
+}
+
+/** `lastReadAt` as both a short label the row can render and the
+ *  timestamp the row uses to decide the "未閲覧" prefix. Returning a
+ *  structured value keeps the row from sniffing the helper's exact
+ *  output string — adding "never" or "—" as a future label would
+ *  silently work, with `absolute === null` as the source of truth. */
+export type LastRead = { readonly label: string; readonly absolute: number } | null;
+
+export function formatLastReadStructured(lastReadAt: number | null, now: number): LastRead {
+	if (lastReadAt === null) return null;
+	return { label: formatRelativeDay(lastReadAt, now), absolute: lastReadAt };
+}
+
 /** Byte size as a short human string: `912 B` / `248.0 KB` /
  *  `12.4 MB`. PDF sizes span three orders of magnitude between a
  *  single-page form and a 400-page scan, so a single unit would
@@ -160,11 +191,7 @@ export function formatByteSize(bytes: number): string {
  *  `今日` / `昨日` / `3 日前` / `2026/9/14`. `now` is a parameter so
  *  the output is deterministic under test. */
 export function formatImportedAt(importedAt: number, now: number): string {
-	const days = wholeDaysBetween(importedAt, now);
-	if (days === 0) return '今日';
-	if (days === 1) return '昨日';
-	if (days < 7) return `${days} 日前`;
-	return formatDate(importedAt);
+	return formatRelativeDay(importedAt, now);
 }
 
 /** "When did I last read this", relative to `now`. `null` means the
@@ -176,11 +203,19 @@ export function formatImportedAt(importedAt: number, now: number): string {
  *  through". */
 export function formatLastReadAt(lastReadAt: number | null, now: number): string {
 	if (lastReadAt === null) return '未閲覧';
-	const days = wholeDaysBetween(lastReadAt, now);
+	return formatRelativeDay(lastReadAt, now);
+}
+
+/** One label for "n days back, in local calendar time". Both the
+ *  import-time and last-read-time labels want the same shape
+ *  (`今日` / `昨日` / `n 日前` / `YYYY/M/D`), and centralising the
+ *  logic is what makes a future-label change a one-line edit. */
+function formatRelativeDay(timestamp: number, now: number): string {
+	const days = wholeDaysBetween(timestamp, now);
 	if (days === 0) return '今日';
 	if (days === 1) return '昨日';
 	if (days < 7) return `${days} 日前`;
-	return formatDate(lastReadAt);
+	return formatDate(timestamp);
 }
 
 /** Whole local calendar days between two instants. A document read
@@ -189,7 +224,7 @@ export function formatLastReadAt(lastReadAt: number | null, now: number): string
 function wholeDaysBetween(from: number, to: number): number {
 	const fromDay = startOfLocalDay(from);
 	const toDay = startOfLocalDay(to);
-	return Math.round((toDay - fromDay) / DAY_MS);
+	return Math.max(0, Math.round((toDay - fromDay) / DAY_MS));
 }
 
 function startOfLocalDay(timestamp: number): number {
