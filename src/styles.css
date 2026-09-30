@@ -590,6 +590,36 @@ pre {
 	color: transparent;
 }
 
+/* --- selection toolbar -------------------------------------------------- */
+
+/* Above the selection it belongs to, or below it when the sticky
+ * header is in the way — see `toolbarPlacement` for why only that one
+ * obstacle is worth moving for. Fixed to the viewport because it
+ * follows the text, not the scroller. */
+.rm-selection-toolbar {
+	display: flex;
+	gap: 8px;
+	padding: 4px;
+	border: 1px solid var(--rm-border);
+	border-radius: var(--rm-radius-md);
+	background: var(--rm-bg-surface);
+	box-shadow: var(--rm-shadow-md);
+	z-index: 2;
+}
+
+/* A short-lived banner for selection-action failures. Fixed near the
+ * top of the viewport so a reader sees it without scrolling; sits
+ * above the selection toolbar in the stack. */
+.rm-reader-action-error {
+	position: fixed;
+	top: 64px;
+	left: 16px;
+	right: 16px;
+	max-width: 560px;
+	margin: 0 auto;
+	z-index: 3;
+}
+
 /* --- highlights --------------------------------------------------------- */
 
 /* The PDF painter emits geometry and freshness and nothing else. The

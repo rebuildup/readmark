@@ -27,9 +27,9 @@
  */
 
 import type { PDFPageProxy, RenderTask } from 'pdfjs-dist';
-import type { Anchor } from '../../domain/annotation/index.ts';
 import type { PageIndex } from '../../domain/reading-state.ts';
 import type {
+	NewAnchor,
 	PageHandle,
 	PageTextLayer,
 	PaintedAnchor,
@@ -210,7 +210,7 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 	 * (ADR-0007), and a selection that reaches into another page has no
 	 * single page to belong to.
 	 */
-	async createAnchorFromSelection(selection: ReaderSelection): Promise<Anchor | null> {
+	async createAnchorFromSelection(selection: ReaderSelection): Promise<NewAnchor | null> {
 		const layer = await this.text();
 		const range = selectionRangeInLayer(selection.container, selection.range, layer);
 		// A collapsed range is a click, not a drag.
@@ -225,8 +225,10 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 		if (fragments === null) return null;
 
 		return {
-			format: 'pdf',
-			payload: { page: this.index, rects: fragments, quote },
+			anchor: { format: 'pdf', payload: { page: this.index, rects: fragments, quote } },
+			// The quote's own text, not the selection's. They are built
+			// from the same items, so they cannot disagree.
+			selectedText: quote.exact,
 		};
 	}
 
