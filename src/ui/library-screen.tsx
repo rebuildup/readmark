@@ -30,12 +30,14 @@
  * action that changes that.
  */
 
+import type { ReactNode } from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import type { DocumentId } from '../domain/document.ts';
 import type { ImportSuccess } from '../library/import-document.ts';
 import {
 	DEFAULT_LIBRARY_SORT,
+	displayTitle,
 	formatByteSize,
 	LIBRARY_SORT_LABELS,
 	LIBRARY_SORTS,
@@ -94,17 +96,20 @@ export function LibraryScreen() {
 	// The dialog needs the whole row (for its title and size), but
 	// the click handler only has the id. Resolve at click time
 	// instead of keeping a second copy of the row in state.
-	function handleRequestDelete(documentId: DocumentId) {
-		const entry = entries?.find((candidate) => candidate.document.id === documentId);
-		if (!entry) {
-			// The row disappeared between paint and click (another
-			// tab deleted it). Nothing to confirm; just resync.
-			refresh();
-			return;
-		}
-		setDeleteError(null);
-		setPendingDelete(entry);
-	}
+	const handleRequestDelete = useCallback(
+		(documentId: DocumentId) => {
+			const entry = entries?.find((candidate) => candidate.document.id === documentId);
+			if (!entry) {
+				// The row disappeared between paint and click (another
+				// tab deleted it). Nothing to confirm; just resync.
+				refresh();
+				return;
+			}
+			setDeleteError(null);
+			setPendingDelete(entry);
+		},
+		[entries, refresh],
+	);
 
 	const cancelDelete = useCallback(() => {
 		setPendingDelete(null);
@@ -144,6 +149,104 @@ export function LibraryScreen() {
 	const matchedCount = visible?.length ?? 0;
 	const filtering = search.trim() !== '';
 
+	// Two empty states, deliberately distinct. Split into a helper
+	// so the JSX in the render body stays a flat ladder of conditions
+	// rather than a nested ternary — the original `(visible === null
+	// ? ... : loadError !== null ? null : ...)` violated the "no
+	// nested ternaries" rule and was a wall to read on top of that.
+	const renderBody = (): ReactNode => {
+		if (visible === null) {
+			return (
+				<p className="rm-muted" data-testid="rm-library-loading">
+					読み込み中…
+				</p>
+			);
+		}
+		if (loadError !== null) {
+			// A failed read must NOT fall through to the empty state:
+			// "the library is empty" and "we could not read the library"
+			// are different facts, and offering the import CTA after a
+			// read failure invites the reader to re-import documents
+			// that are still there.
+			return null;
+		}
+		const toolbar = totalCount > 0 && (
+			<div className="rm-library-toolbar">
+				<label className="rm-library-search">
+					<span className="rm-visually-hidden">タイトル・著者を検索</span>
+					<input
+						type="search"
+						value={search}
+						placeholder="タイトル・著者を検索"
+						onChange={(event) => setSearch(event.target.value)}
+						data-testid="rm-library-search"
+					/>
+				</label>
+				<label className="rm-library-sort">
+					<span className="rm-visually-hidden">並び順</span>
+					<select
+						value={sort}
+						onChange={(event) => setSort(event.target.value as LibrarySort)}
+						data-testid="rm-library-sort"
+					>
+						{LIBRARY_SORTS.map((option) => (
+							<option key={option} value={option}>
+								{LIBRARY_SORT_LABELS[option]}
+							</option>
+						))}
+					</select>
+				</label>
+				<span className="rm-muted rm-library-count" data-testid="rm-library-count">
+					{filtering ? `${matchedCount} / ${totalCount} 件` : `${totalCount} 件`}
+				</span>
+			</div>
+		);
+		if (visible.length === 0) {
+			if (filtering) {
+				return (
+					<>
+						{toolbar}
+						<section className="rm-library-empty" data-testid="rm-library-empty-filtered">
+							<h3>一致する文書がありません</h3>
+							<p className="rm-muted">「{search.trim()}」にタイトルも著者も一致しませんでした。</p>
+							<Button variant="secondary" onClick={() => setSearch('')}>
+								検索をクリア
+							</Button>
+						</section>
+					</>
+				);
+			}
+			return (
+				<>
+					{toolbar}
+					<section className="rm-library-empty" data-testid="rm-library-empty">
+						<h3>まだ文書がありません</h3>
+						<p className="rm-muted">
+							import ボタンから PDF を追加してください。ファイルはこのブラウザの IndexedDB
+							にのみ保存され、外部へ送信されません。
+						</p>
+						<DocumentImport onImported={handleImported} />
+					</section>
+				</>
+			);
+		}
+		return (
+			<>
+				{toolbar}
+				<ul className="rm-library-list">
+					{visible.map((entry) => (
+						<LibraryRow
+							key={entry.document.id}
+							entry={entry}
+							now={now}
+							onRequestDelete={handleRequestDelete}
+						/>
+					))}
+				</ul>
+			</>
+		);
+	};
+
 	return (
 		<div className="rm-app">
 			<header className="rm-library-header">
@@ -165,99 +268,12 @@ export function LibraryScreen() {
 					</p>
 				)}
 
-				{/*
-				 * A failed read must NOT fall through to the empty
-				 * state: "the library is empty" and "we could not read
-				 * the library" are different facts, and offering the
-				 * import CTA after a read failure invites the reader
-				 * to re-import documents that are still there.
-				 */}
-				{visible === null ? (
-					<p className="rm-muted" data-testid="rm-library-loading">
-						読み込み中…
-					</p>
-				) : loadError !== null ? null : (
-					<>
-						{/*
-						 * The toolbar survives an empty result on
-						 * purpose. Hiding the input that produced the
-						 * no-match state would make the only way out a
-						 * button that is not the thing the reader
-						 * reached for, and would make the sort control
-						 * disappear with it.
-						 */}
-						{totalCount > 0 && (
-							<div className="rm-library-toolbar">
-								<label className="rm-library-search">
-									<span className="rm-visually-hidden">タイトル・著者を検索</span>
-									<input
-										type="search"
-										value={search}
-										placeholder="タイトル・著者を検索"
-										onChange={(event) => setSearch(event.target.value)}
-										data-testid="rm-library-search"
-									/>
-								</label>
-								<label className="rm-library-sort">
-									<span className="rm-visually-hidden">並び順</span>
-									<select
-										value={sort}
-										onChange={(event) => setSort(event.target.value as LibrarySort)}
-										data-testid="rm-library-sort"
-									>
-										{LIBRARY_SORTS.map((option) => (
-											<option key={option} value={option}>
-												{LIBRARY_SORT_LABELS[option]}
-											</option>
-										))}
-									</select>
-								</label>
-								<span className="rm-muted rm-library-count" data-testid="rm-library-count">
-									{filtering ? `${matchedCount} / ${totalCount} 件` : `${totalCount} 件`}
-								</span>
-							</div>
-						)}
-
-						{visible.length === 0 ? (
-							filtering ? (
-								<section className="rm-library-empty" data-testid="rm-library-empty-filtered">
-									<h3>一致する文書がありません</h3>
-									<p className="rm-muted">
-										「{search.trim()}」にタイトルも著者も一致しませんでした。
-									</p>
-									<Button variant="secondary" onClick={() => setSearch('')}>
-										検索をクリア
-									</Button>
-								</section>
-							) : (
-								<section className="rm-library-empty" data-testid="rm-library-empty">
-									<h3>まだ文書がありません</h3>
-									<p className="rm-muted">
-										import ボタンから PDF を追加してください。ファイルはこのブラウザの IndexedDB
-										にのみ保存され、外部へ送信されません。
-									</p>
-									<DocumentImport onImported={handleImported} />
-								</section>
-							)
-						) : (
-							<ul className="rm-library-list">
-								{visible.map((entry) => (
-									<LibraryRow
-										key={entry.document.id}
-										entry={entry}
-										now={now}
-										onRequestDelete={handleRequestDelete}
-									/>
-								))}
-							</ul>
-						)}
-					</>
-				)}
+				{renderBody()}
 			</main>
 
 			{pendingDelete !== null && (
 				<ConfirmDialog
-					title={`「${pendingDelete.document.metadata.title ?? '(タイトルなし)'}」を削除しますか？`}
+					title={`「${displayTitle(pendingDelete.document.metadata)}」を削除しますか？`}
 					description={
 						<>
 							<p>

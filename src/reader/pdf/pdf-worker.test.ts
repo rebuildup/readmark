@@ -54,4 +54,15 @@ describe('pdf-worker (Node contract)', () => {
 	it('setupPdfWorker resolves to void', async () => {
 		await expect(setupPdfWorker()).resolves.toBeUndefined();
 	});
+
+	it('dedupes concurrent calls — both await the same in-flight promise', async () => {
+		// Two calls fired without `await` should resolve to the
+		// same Promise reference: the dedupe guarantee from
+		// `setupPromise`. Without it, the second call could race
+		// into its own import path.
+		const a = setupPdfWorker();
+		const b = setupPdfWorker();
+		expect(a).toBe(b);
+		await Promise.all([a, b]);
+	});
 });
