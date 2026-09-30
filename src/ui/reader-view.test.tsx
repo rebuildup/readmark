@@ -70,6 +70,9 @@ const DOC_ID = asDocumentId('00000000-0000-4000-8000-0000000000bb');
 const FINGERPRINT = asSourceFingerprint('c'.repeat(64));
 
 const PAGE_COUNT = 3;
+/** The page the restore tests steer to. It is rendered last, so the
+ *  coarse→exact window is wide enough to observe. */
+const RESTORE_TARGET_PAGE = 3;
 /** The real page height, once rendered. */
 const PAGE_HEIGHT = 800;
 /** The provisional height the view reserves for an unrendered page
@@ -82,6 +85,41 @@ const VIEWPORT_HEIGHT = 600;
  *  content, the rest are only as tall as their reservation. */
 const renderedPages = new Set<number>();
 
+/**
+ * Pages whose render is parked until the test opens them.
+ *
+ * The restore is coarse-then-exact: the coarse pass brings the target
+ * into the prefetch band, and the exact pass runs once that page has a
+ * measured height. Only a takeover *between* those can be abandoned, and
+ * the gap is one frame wide — a test that polls for it catches it only
+ * when the machine is slow, which is the worst possible failure mode
+ * for an assertion that is supposed to always hold.
+ *
+ * Parking the target's render makes the gap as wide as the test needs
+ * it, so "the reader scrolled before the exact pass ran" becomes a state
+ * the test constructs rather than one it races for.
+ */
+const heldPages = new Map<number, { promise: Promise<void>; release: () => void }>();
+
+/** Park the next render of `pageIndex` until `releaseRender` is called. */
+function holdRender(pageIndex: number): void {
+	if (heldPages.has(pageIndex)) return;
+	let release: () => void = () => {};
+	const promise = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	heldPages.set(pageIndex, { promise, release });
+}
+
+/** Let a parked render finish. Idempotent, and does not re-gate a page
+ *  that renders again later. */
+function releaseRender(pageIndex: number): void {
+	const held = heldPages.get(pageIndex);
+	if (held === undefined) return;
+	heldPages.delete(pageIndex);
+	held.release();
+}
+
 const fakePage = {
 	format: 'pdf',
 	render: vi.fn(async (target: HTMLElement, options: { scale?: number }) => {
@@ -90,6 +128,10 @@ const fakePage = {
 		const host = target.closest<HTMLElement>('[data-page-index]');
 		if (host === null) return;
 		const index = Number(host.dataset.pageIndex);
+		const held = heldPages.get(index);
+		// Parked *before* the page counts as rendered, so the view still
+		// sees a reserved box for it — which is the state under test.
+		if (held !== undefined) await held.promise;
 		renderedPages.add(index);
 		target.replaceChildren();
 		const page = document.createElement('div');
@@ -337,6 +379,25 @@ async function scrollTo(offset: number): Promise<void> {
 }
 
 /**
+ * Wait for the restore's coarse pass to have moved the scroller, and
+ * return where it stopped.
+ *
+ * With the target page's render parked there is no exact pass to race,
+ * so this only has to wait for the coarse `scrollTop` assignment, which
+ * is synchronous once the restore effect runs.
+ */
+async function waitForCoarseRestore(): Promise<number> {
+	for (let tick = 0; tick < 40; tick++) {
+		const offset = scroller().scrollTop;
+		if (offset > 0) return offset;
+		await new Promise((resolve) => {
+			setTimeout(resolve, 0);
+		});
+	}
+	throw new Error('the restore never reached its coarse phase');
+}
+
+/**
  * Wait until no further page has been materialized for a few ticks.
  *
  * Asserting a position while pages are still rendering measures a
@@ -397,6 +458,9 @@ function renderedPosition(): { pageIndex: number; pageOffsetRatio: number } | nu
 beforeEach(() => {
 	vi.clearAllMocks();
 	renderedPages.clear();
+	// A page left parked by an earlier test would stall every later
+	// restore, and the failure would point at the wrong test.
+	for (const page of [...heldPages.keys()]) releaseRender(page);
 	saveReadingPosition.mockResolvedValue(undefined);
 });
 
@@ -633,16 +697,29 @@ describe('restoring the position', () => {
 	});
 
 	it('abandons the restore when the reader scrolls first', async () => {
-		await renderView({ currentPage: asPageIndex(3), position: { pageOffsetRatio: 0.25 } });
-		// Phase 1 has already brought the page into range; the exact
-		// phase is what must not happen now.
-		const afterCoarseScroll = scroller().scrollTop;
+		// Park the target's render so the restore cannot get past its
+		// coarse pass on its own. Without this the test asserts on
+		// whichever side of the coarse→exact boundary it happens to
+		// land, which is a coin flip rather than a contract.
+		holdRender(RESTORE_TARGET_PAGE);
+		await renderView({
+			currentPage: asPageIndex(RESTORE_TARGET_PAGE),
+			position: { pageOffsetRatio: 0.25 },
+		});
+		// Phase 1 has brought the page into range; the exact phase is
+		// waiting on a page that is not going to arrive until we say so.
+		const afterCoarseScroll = await waitForCoarseRestore();
+
 		// A wheel event is the reader's own hand. Yanking them back to
 		// where the app decided they were, after they have started
 		// moving, is worse than opening them at the top.
 		fireEvent.wheel(scroller());
 		fireEvent.scroll(scroller());
-		await waitFor(() => expect(renderedPages.has(3)).toBe(true));
+
+		// Now let the page arrive. The exact pass must already have
+		// been abandoned by the time it could have run.
+		releaseRender(RESTORE_TARGET_PAGE);
+		await waitFor(() => expect(renderedPages.has(RESTORE_TARGET_PAGE)).toBe(true));
 		await new Promise((resolve) => setTimeout(resolve, 50));
 
 		// Still where the reader is, not at the stored ratio.
