@@ -231,6 +231,26 @@ describe('ReaderScreen', () => {
 		expect(await screen.findByTestId('rm-reader-toolbar')).toBeTruthy();
 	});
 
+	it('restores to the top of a stored page when the offset is null', async () => {
+		// `position === null` with a valid `currentPage` is a freshly
+		// imported document: the first save fired before any scroll. The
+		// page is the field that survives (ADR-0002), so the view receives
+		// a stored position with `pageOffsetRatio: 0` (the top of that
+		// page) rather than the screen discarding the page entirely.
+		mockGetProgress.mockResolvedValueOnce({
+			documentId: DOC_ID,
+			sourceFingerprint: FINGERPRINT,
+			currentPage: asPageIndex(2),
+			position: null,
+			updatedAt: 1,
+		});
+		renderReader();
+		// The view mounted; the reader is alive at the top of page 2,
+		// ready for a save that will record the user's first scroll.
+		await screen.findByTestId('rm-reader-toolbar');
+		await waitFor(() => expect(document.querySelectorAll('[data-page-index]')).toHaveLength(3));
+	});
+
 	it('opens the other document when the route changes', async () => {
 		// React reuses the component for a new `/read/:documentId`, so
 		// the view keeps its instance unless it is keyed. Its refs hold
@@ -389,6 +409,47 @@ describe('ReaderScreen', () => {
 		);
 		// `lastReadAt` is "opened", not "looked at": a file that never
 		// opened must not float to the top of the recently-read order.
+		expect(mockTouch).not.toHaveBeenCalled();
+	});
+
+	it('surfaces a non-PDF source as "MVP は PDF のみ対応" instead of silently failing', async () => {
+		// An EPUB / Markdown / text source routed to the PDF reader is a
+		// real case once the format-portable storage is in place; the UI
+		// has to name the format, not pretend the bytes are corrupted.
+		mockGetPrimarySource.mockResolvedValueOnce({
+			sourceFingerprint: FINGERPRINT,
+			documentId: DOC_ID,
+			format: 'epub',
+			byteSize: 1024,
+			importedAt: 1,
+			metadata: {},
+		});
+		renderReader();
+
+		const state = await screen.findByTestId('rm-reader-state');
+		expect(state.textContent).toContain('MVP は PDF のみ対応');
+		expect(state.textContent).toContain('epub');
+		expect(screen.queryByTestId('rm-reader-toolbar')).toBeNull();
+		expect(createPdfReader).not.toHaveBeenCalled();
+		// A non-PDF source never opened, so it must not float up the
+		// recently-read order on the strength of an attempt alone.
+		expect(mockTouch).not.toHaveBeenCalled();
+	});
+
+	it('distinguishes a corrupt / password-protected PDF from a generic open failure', async () => {
+		// pdf.js's three "this is not a usable PDF" exceptions are wrapped
+		// once at the reader boundary; the screen reads `instanceof`
+		// instead of `error.name` so a future pdf.js rename stays local.
+		const { PdfInvalidError } = await import('../reader/pdf/pdf-errors.ts');
+		openMock.mockRejectedValueOnce(
+			new PdfInvalidError('wrapped', { cause: { name: 'PasswordException' } }),
+		);
+		renderReader();
+
+		const state = await screen.findByTestId('rm-reader-state');
+		expect(state.textContent).toContain('破損しているか、パスワードで保護');
+		// And not the generic "開けませんでした" copy, which would mislead.
+		expect(state.textContent).not.toContain('時間をおいて');
 		expect(mockTouch).not.toHaveBeenCalled();
 	});
 
