@@ -78,7 +78,6 @@ let setupPromise: Promise<void> | null = null;
 export const READMARK_PDF_WORKER_URL: string = pdfWorkerUrl;
 
 /**
-<<<<<<< HEAD
  * Base URL the support tables are served from.
  *
  * `vite.config.ts` serves `pdfjs-dist/{cmaps,standard_fonts,wasm,iccs}`
