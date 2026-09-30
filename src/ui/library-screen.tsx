@@ -49,6 +49,7 @@ import { ConfirmDialog } from './confirm-dialog.tsx';
 import { DocumentImport } from './document-import.tsx';
 import { LibraryRow } from './library-row.tsx';
 import { Button } from './primitives/button.tsx';
+import { QuotaBadge } from './quota-badge.tsx';
 
 export function LibraryScreen() {
 	const [entries, setEntries] = useState<readonly LibraryEntry[] | null>(null);
@@ -58,6 +59,11 @@ export function LibraryScreen() {
 	const [pendingDelete, setPendingDelete] = useState<LibraryEntry | null>(null);
 	const [deleting, setDeleting] = useState(false);
 	const [deleteError, setDeleteError] = useState<string | null>(null);
+	// Bumped on every successful library refresh so `<QuotaBadge>` can
+	// re-read `navigator.storage.estimate()`. The badge is read-only
+	// presentation; this counter is the seam that keeps it in sync
+	// without the screen reaching into the platform layer.
+	const [quotaRefreshKey, setQuotaRefreshKey] = useState(0);
 
 	// The instant the relative dates ("3 日前") are measured against.
 	// Re-based on every successful fetch, never on a timer: it must
@@ -72,6 +78,7 @@ export function LibraryScreen() {
 				setEntries(rows);
 				setNow(Date.now());
 				setLoadError(null);
+				setQuotaRefreshKey((key) => key + 1);
 			})
 			.catch((err: unknown) => {
 				console.error('listLibrary failed', err);
@@ -148,6 +155,7 @@ export function LibraryScreen() {
 		<div className="rm-app">
 			<header className="rm-library-header">
 				<h1>readmark</h1>
+				<QuotaBadge refreshKey={quotaRefreshKey} />
 			</header>
 
 			<main className="rm-shell">
