@@ -22,10 +22,13 @@
  *     run and so callers can await when timing matters.
  *
  * Synchronization (the actual guarantee):
- *   - `setupPdfWorker()` is `async` and lazily imports
+ *   - `setupPdfWorker()` returns a Promise and lazily imports
  *     `pdfjs-dist`. The side-effect import only *issues* the
  *     registration; the worker URL is set on `GlobalWorkerOptions`
  *     only when the dynamic import resolves.
+ *   - Concurrent callers share the same in-flight Promise, so
+ *     two near-simultaneous calls will not both race into a
+ *     `pdfjs-dist` import + `GlobalWorkerOptions` write.
  *   - Callers that touch pdf.js APIs MUST `await setupPdfWorker()`
  *     before their first `getDocument()`. `loadPdfDocument()`
  *     does this in its browser path. The Node path skips the
@@ -34,14 +37,15 @@
  *     sufficient; `loadPdfDocument()` is the synchronization
  *     point.
  *
- * Why idempotent (the `initialized` flag):
+ * Why idempotent (the `setupPromise` flag):
  *   - Module-graph re-evaluation under HMR / Vitest can run the
  *     top-level statement more than once. Setting the same URL
  *     twice is harmless but wastes cycles; an early-return keeps
  *     behavior tight.
- *   - If a future test wants to swap the worker URL, it can call
- *     `setupPdfWorker({ force: true, src: ... })` (not in MVP
- *     surface; reserved hook).
+ *   - Concurrent callers are deduped via `setupPromise`: a second
+ *     caller arriving while the first is still awaiting the
+ *     `pdfjs-dist` import reuses the in-flight promise, so we
+ *     only do the import + assignment once.
  *
  * Why the dynamic import of `pdfjs-dist`:
  *   - The legacy build (`pdfjs-dist/legacy/build/pdf.mjs`) used
@@ -64,8 +68,11 @@ import { SUPPORT_TABLE_COUNTS } from 'virtual:readmark-pdfjs-assets';
 // and uses ESM format (`worker.format: 'es'`).
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
-/** Module-private: has the worker URL been registered already? */
-let initialized = false;
+/** Module-private: has the worker URL been registered already?
+ *  Set synchronously when the call enters so concurrent callers
+ *  see the in-flight promise rather than racing into a second
+ *  `await import('pdfjs-dist')`. */
+let setupPromise: Promise<void> | null = null;
 
 /** Module-private: the URL we registered. Exposed for tests. */
 export const READMARK_PDF_WORKER_URL: string = pdfWorkerUrl;
@@ -119,7 +126,10 @@ export const READMARK_PDF_ASSET_URLS = {
 export const READMARK_PDF_ASSET_TABLES = SUPPORT_TABLE_COUNTS;
 
 /**
- * Idempotent worker registration. Safe to call multiple times.
+ * Idempotent worker registration. Safe to call multiple times
+ * AND safe under concurrent calls: a second caller arriving
+ * while the first is still awaiting the `pdfjs-dist` import
+ * reuses the in-flight promise.
  *
  * Browser-only: under Node (Vitest), this is a no-op because
  * the legacy build (loaded by `pdf-document.ts`) does not use
@@ -129,19 +139,26 @@ export const READMARK_PDF_ASSET_TABLES = SUPPORT_TABLE_COUNTS;
  *
  * Called automatically on module evaluation (see bottom of file).
  */
-export async function setupPdfWorker(): Promise<void> {
-	if (initialized) return;
+export function setupPdfWorker(): Promise<void> {
+	if (setupPromise !== null) return setupPromise;
 	// Skip the worker registration under Node. The legacy build
 	// ignores `workerSrc` anyway, and touching `GlobalWorkerOptions`
 	// on the unused modern entry would emit a deprecation warning.
-	if (typeof process !== 'undefined' && process.versions?.node !== undefined) {
-		return;
+	// `globalThis.process` is the safer shape — Vite's process
+	// polyfill exposes `process` as a global in browser builds
+	// too, so a bare `typeof process` check would (wrongly)
+	// report Node and skip worker setup there as well.
+	if (typeof globalThis.process?.versions?.node === 'string') {
+		setupPromise = Promise.resolve();
+		return setupPromise;
 	}
-	const pdfjsLib = await import('pdfjs-dist');
-	if (pdfjsLib.GlobalWorkerOptions.workerSrc !== pdfWorkerUrl) {
-		pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
-	}
-	initialized = true;
+	setupPromise = (async () => {
+		const pdfjsLib = await import('pdfjs-dist');
+		if (pdfjsLib.GlobalWorkerOptions.workerSrc !== pdfWorkerUrl) {
+			pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+		}
+	})();
+	return setupPromise;
 }
 
 // Side-effect: register the worker as soon as this module is imported

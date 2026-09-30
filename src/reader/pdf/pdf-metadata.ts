@@ -39,9 +39,9 @@ import type { SourceMetadata } from '../../domain/document.ts';
 import { loadPdfDocument } from './pdf-document.ts';
 import { isPdfJsInvalidException, PdfInvalidError } from './pdf-errors.ts';
 
-/** PDF metadata that flows into `DocumentSource.metadata.extras`
- *  via the library import flow. Format-specific; generic UI
- *  must NOT depend on this shape. */
+/** PDF metadata that flows into `DocumentSource.metadata` (and
+ *  mirrored into `Document.metadata`) via the library import flow.
+ *  Format-specific; generic UI must NOT depend on this shape. */
 export interface PdfMetadata {
 	/** Page count (PDF: total across the document, not the
 	 *  outline). Stored under `SourceMetadata.pageCount`. */
@@ -52,7 +52,6 @@ export interface PdfMetadata {
 	 *  from "the producer did not bother to set one". */
 	readonly title?: string;
 	readonly author?: string;
-	readonly language?: string;
 }
 
 /**
@@ -112,18 +111,15 @@ export async function extractPdfMetadata(blob: Blob): Promise<PdfMetadata> {
 		const infoDict = (info.info ?? {}) as Record<string, unknown>;
 		const title = nonEmptyString(infoDict.Title);
 		const author = nonEmptyString(infoDict.Author);
-		// /Info has no `Language`; pull from catalog if present.
-		const language = nonEmptyString(infoDict.Language);
 
 		// Build the result with `exactOptionalPropertyTypes` in
 		// mind: an explicit `undefined` is not assignable to a
 		// property typed `title?: string`. We omit absent keys.
-		const meta: { pageCount: number; title?: string; author?: string; language?: string } = {
+		const meta: { pageCount: number; title?: string; author?: string } = {
 			pageCount: doc.numPages,
 		};
 		if (title !== undefined) meta.title = title;
 		if (author !== undefined) meta.author = author;
-		if (language !== undefined) meta.language = language;
 		return meta;
 	} finally {
 		// Always destroy. Even if `getMetadata()` throws, the
@@ -135,9 +131,24 @@ export async function extractPdfMetadata(blob: Blob): Promise<PdfMetadata> {
 
 /** Convert `PdfMetadata` into the generic `SourceMetadata` that
  *  the storage layer accepts. Lives here (not in the storage
- *  layer) because it knows the pdf.js shape. */
+ *  layer) because it knows the pdf.js shape.
+ *
+ *  Full forward: every field we know how to extract is mirrored
+ *  onto `SourceMetadata`, so a downstream caller that has only
+ *  the source (and not the parallel `DocumentMetadata`) can still
+ *  see the title / author. The library row's `displayTitle` reads
+ *  from `Document.metadata` today; this forward is for the storage
+ *  layer's own use and for the future "re-import the same logical
+ *  book from a new file" flow. */
 export function pdfMetadataToSourceMetadata(meta: PdfMetadata): SourceMetadata {
-	return { pageCount: meta.pageCount };
+	const out: {
+		pageCount: number;
+		title?: string;
+		author?: string;
+	} = { pageCount: meta.pageCount };
+	if (meta.title !== undefined) out.title = meta.title;
+	if (meta.author !== undefined) out.author = meta.author;
+	return out;
 }
 
 /** PDFs produced by some tools have `Title: ''` or `null` in
