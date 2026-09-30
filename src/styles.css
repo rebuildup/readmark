@@ -219,6 +219,40 @@ pre {
 	font-size: 20px;
 }
 
+.rm-library-header .rm-quota-badge {
+	margin: 6px 0 0;
+	font-size: 13px;
+}
+
+/*
+ * The badge lives in the header next to the title. Two spans: the
+ * primary "usage / quota" line, and an optional warning that appears
+ * only when the origin is not marked persistent. The warning uses
+ * the same muted foreground as the primary line and leans on a
+ * slightly tinted background so it is discoverable without being
+ * alarming — losing persistent storage is a soft risk, not an
+ * error.
+ */
+.rm-quota-badge {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	color: var(--rm-fg-muted);
+}
+
+.rm-quota-badge__usage {
+	font-variant-numeric: tabular-nums;
+}
+
+.rm-quota-badge__warning {
+	display: inline-block;
+	padding: 4px 8px;
+	border-radius: var(--rm-radius-sm);
+	background: var(--rm-bg-subtle);
+	color: var(--rm-fg-muted);
+	font-size: 12px;
+}
+
 .rm-library-intro {
 	margin-bottom: 24px;
 }
