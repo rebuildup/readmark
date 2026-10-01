@@ -1,12 +1,20 @@
 import { resolve } from 'node:path';
 import { defineConfig } from 'vitest/config';
 
+import { pdfjsSupportTables } from './vite.config';
+
 // readmark — Vitest config.
 //
 // - happy-dom (not jsdom) — pdfjs-dist wants modern Web APIs that jsdom still
 //   mocks imperfectly (ResizeObserver, structuredClone for Blob, etc.).
 //   happy-dom is closer to Chrome semantics in 2026.
-// - `pool: 'vmThreads'` so worker setup for pdfjs doesn't bleed into tests.
+// - The pdf.js support-tables plugin is loaded here too, because
+//   `src/reader/pdf/pdf-worker.ts` imports the `virtual:readmark-pdfjs-assets`
+//   module it provides. Without it, every test that transitively imports the
+//   PDF reader fails to resolve at transform time — which is all of the
+//   reader, library and storage suites. Sharing the plugin (rather than
+//   stubbing the virtual module) keeps the test environment and the build
+//   in agreement about what the module contains.
 // - Coverage is opt-in (`bun run test:coverage`) — ADR of rebuildup/project-init
 //   explicitly refuses to mandate coverage thresholds.
 export default defineConfig({
@@ -15,15 +23,29 @@ export default defineConfig({
 			'~': resolve(import.meta.dirname, 'src'),
 		},
 	},
+	plugins: [pdfjsSupportTables()],
 	test: {
 		environment: 'happy-dom',
 		globals: true,
 		setupFiles: ['./src/test/setup.ts'],
 		include: ['src/**/*.{test,spec}.{ts,tsx}'],
 		exclude: ['**/node_modules/**', '**/dist/**'],
-		pool: 'vmThreads',
-		poolOptions: {
-			vmThreads: { singleThread: true },
-		},
+		// Pool: Vitest's default (`forks`), one isolated process per
+		// test file.
+		//
+		// Why not `vmThreads` (this config used to pin it so pdfjs'
+		// worker setup could not bleed between files): react-router 7
+		// ships a CJS entry that `require`s its own ESM build
+		// (`react-router/dom` → `dom-export.mjs`). Inside a
+		// `vmThreads` worker Node resolves that through the CJS
+		// condition and the file is parsed as CommonJS, so any test
+		// that touches a `Link` / `useNavigate` dies with
+		// "Cannot use import statement outside a module" before a
+		// single assertion runs. Inlining the package does not help —
+		// the require happens in Node's own loader.
+		//
+		// Isolation is not lost: `isolate` defaults to true, so each
+		// test file still gets a fresh process and pdfjs' global
+		// worker state cannot leak across files.
 	},
 });

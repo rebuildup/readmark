@@ -18,6 +18,11 @@
 	--rm-fg-inverse: #f7f8fa;
 	--rm-accent: #3a6cff;
 	--rm-accent-fg: #ffffff;
+	--rm-danger: #c0392b;
+	--rm-danger-fg: #ffffff;
+	--rm-error: #d64545;
+	--rm-error-bg: #fdf1f0;
+	--rm-error-fg: #8c2f2f;
 	--rm-border: #e0e3ea;
 	--rm-border-strong: #b9bfcc;
 
@@ -25,13 +30,43 @@
 	--rm-radius-md: 8px;
 	--rm-radius-lg: 16px;
 
-	--rm-font-sans: "Noto Sans JP", "Hiragino Kaku Gothic ProN", system-ui, -apple-system, sans-serif;
+	/* Font stacks.
+	 *
+	 * Every stack must contain a face that can actually draw Japanese,
+	 * and the generic `system-ui` / `sans-serif` fallback cannot be
+	 * relied on for that: on a bare Linux container (CI images, slim
+	 * servers, sandboxes) no CJK font is installed at all, so the
+	 * generic resolves to something like DejaVu Sans, which has no
+	 * kana or kanji. The result is not a missing-font warning but
+	 * silent tofu — every label renders as □ and the app looks broken
+	 * while working perfectly.
+	 *
+	 * `Noto Sans JP` is loaded as a webfont from Google Fonts (see
+	 * `index.html`), so it is present regardless of what the host has
+	 * installed. It is repeated in the heading stack as a fallback so
+	 * that a failed or blocked webfont request degrades to *readable
+	 * Japanese* rather than to boxes.
+	 */
+	--rm-font-sans:
+		"Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, system-ui, -apple-system,
+		sans-serif;
 	--rm-font-heading:
-		"Zen Kaku Gothic New", "Hiragino Kaku Gothic ProN", system-ui, -apple-system, sans-serif;
-	--rm-font-mono: "JetBrains Mono", ui-monospace, monospace;
+		"Zen Kaku Gothic New", "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo,
+		system-ui, -apple-system, sans-serif;
+	/* `JetBrains Mono` is not loaded as a webfont: it is only ever used
+	 * for Latin/digit content (fingerprints, page counters), where a
+	 * system monospace is fine. If it is ever applied to Japanese text
+	 * the generic falls through to a CJK face, which is the correct
+	 * degradation. */
+	--rm-font-mono: "JetBrains Mono", ui-monospace, "Noto Sans JP", monospace;
 
 	--rm-shadow-sm: 0 1px 2px rgba(11, 16, 32, 0.06);
 	--rm-shadow-md: 0 4px 12px rgba(11, 16, 32, 0.08);
+
+	/* Highlight palette. A row stores the *name*; this is where the name
+	 * becomes a colour, so changing the palette here changes what every
+	 * stored highlight looks like without touching a row. */
+	--rm-highlight-yellow: #ffd54a;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -43,6 +78,10 @@
 		--rm-bg-subtle: #1c2440;
 		--rm-border: #2a3454;
 		--rm-border-strong: #3f4a6e;
+		--rm-danger: #e0645a;
+		--rm-error: #e0645a;
+		--rm-error-bg: #34191b;
+		--rm-error-fg: #f7cfcb;
 	}
 }
 
@@ -110,4 +149,654 @@ pre {
 	max-width: 1200px;
 	margin: 0 auto;
 	width: 100%;
+}
+
+/* --- shared bits ------------------------------------------------------- */
+
+.rm-muted {
+	color: var(--rm-fg-muted);
+}
+
+.rm-alert {
+	padding: 8px 12px;
+	border: 1px solid var(--rm-error);
+	border-radius: var(--rm-radius-md);
+	background: var(--rm-error-bg);
+	color: var(--rm-error-fg);
+	font-size: 14px;
+}
+
+/* Variant for an alert that is a sibling of the page column, not a
+ * standalone message — the page column is edge-to-edge, so the alert
+ * sits in the same gap the pages do. Without this the alert would
+ * butt against the reader's left edge. */
+.rm-alert--with-margin {
+	margin: 12px;
+}
+
+/* The import status: a quiet confirmation, not an error. Same shape
+ * as `.rm-alert` so the eye reads it as the same kind of message,
+ * but with the muted palette that says "took, not failed". */
+.rm-status {
+	margin-top: 12px;
+	padding: 8px 12px;
+	border: 1px solid var(--rm-border);
+	border-radius: var(--rm-radius-md);
+	background: var(--rm-bg-surface);
+	color: var(--rm-fg-muted);
+	font-size: 14px;
+}
+
+/* The file input is hidden behind a `<Button>` trigger. Kept out of
+ * layout (`display: none`) so it does not take a row; not visually
+ * hidden, because a screen reader finding a real input is
+ * distracting — it has no business being announced. */
+.rm-document-import__input {
+	display: none;
+}
+
+/* Stack an alert under the thing that triggered it (the import
+ * button). The default `.rm-alert` has no margin so it can sit
+ * inline where it is needed; this variant is for the one place the
+ * alert has its own row. */
+.rm-alert--spaced {
+	margin-top: 12px;
+}
+
+/* Visually hidden, still announced. Used to label the search /
+ * sort controls without repeating visible text. */
+.rm-visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	padding: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	clip-path: inset(50%);
+	white-space: nowrap;
+	border: 0;
+}
+
+/*
+ * Buttons are classes, not inline styles, so a `<Link>` can be a
+ * button without rendering a `<button>` inside an `<a>`: nesting
+ * interactive elements is invalid HTML, and the row's "読む"
+ * affordance is a navigation, not an action. Both paths therefore
+ * read the same tokens from one place.
+ */
+.rm-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 8px 14px;
+	border-radius: var(--rm-radius-md);
+	font-weight: 500;
+	line-height: 1.4;
+	text-decoration: none;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.rm-button:disabled {
+	opacity: 0.6;
+	cursor: not-allowed;
+}
+
+.rm-button--primary {
+	background: var(--rm-accent);
+	color: var(--rm-accent-fg);
+	border: 1px solid var(--rm-accent);
+}
+
+.rm-button--secondary {
+	background: var(--rm-bg-surface);
+	color: var(--rm-fg);
+	border: 1px solid var(--rm-border);
+}
+
+.rm-button--ghost {
+	background: transparent;
+	color: var(--rm-fg);
+	border: 1px solid transparent;
+}
+
+/* Irreversible actions only. */
+.rm-button--danger {
+	background: var(--rm-danger);
+	color: var(--rm-danger-fg);
+	border: 1px solid var(--rm-danger);
+}
+
+/* --- library ----------------------------------------------------------- */
+
+.rm-library-header {
+	padding: 16px 24px;
+	border-bottom: 1px solid var(--rm-border);
+	background: var(--rm-bg-surface);
+}
+
+.rm-library-header h1 {
+	margin: 0;
+	font-size: 20px;
+}
+
+.rm-library-header .rm-quota-badge {
+	margin: 6px 0 0;
+	font-size: 13px;
+}
+
+/*
+ * The badge lives in the header next to the title. Two spans: the
+ * primary "usage / quota" line, and an optional warning that appears
+ * only when the origin is not marked persistent. The warning uses
+ * the same muted foreground as the primary line and leans on a
+ * slightly tinted background so it is discoverable without being
+ * alarming — losing persistent storage is a soft risk, not an
+ * error.
+ */
+.rm-quota-badge {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	color: var(--rm-fg-muted);
+}
+
+.rm-quota-badge__usage {
+	font-variant-numeric: tabular-nums;
+}
+
+.rm-quota-badge__warning {
+	display: inline-block;
+	padding: 4px 8px;
+	border-radius: var(--rm-radius-sm);
+	background: var(--rm-bg-subtle);
+	color: var(--rm-fg-muted);
+	font-size: 12px;
+}
+
+.rm-library-intro {
+	margin-bottom: 24px;
+}
+
+.rm-library-intro h2 {
+	font-size: 24px;
+}
+
+.rm-library-intro p {
+	margin-top: 0;
+}
+
+.rm-library-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding-bottom: 12px;
+	flex-wrap: wrap;
+}
+
+.rm-library-search input,
+.rm-library-sort select {
+	padding: 6px 10px;
+	border: 1px solid var(--rm-border);
+	border-radius: var(--rm-radius-md);
+	background: var(--rm-bg-surface);
+	color: var(--rm-fg);
+	font-family: inherit;
+	font-size: 14px;
+}
+
+.rm-library-search input {
+	min-width: 240px;
+}
+
+.rm-library-count {
+	font-size: 14px;
+	margin-left: auto;
+}
+
+.rm-library-list {
+	list-style: none;
+	padding: 0;
+	margin: 0;
+	border-top: 1px solid var(--rm-border);
+}
+
+.rm-library-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	padding: 12px 8px;
+	border-bottom: 1px solid var(--rm-border);
+}
+
+.rm-library-row:hover {
+	background: var(--rm-bg-subtle);
+}
+
+.rm-library-row__body {
+	min-width: 0;
+}
+
+.rm-library-row__title {
+	display: block;
+	font-weight: 500;
+	color: var(--rm-fg);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.rm-library-row__title:hover {
+	text-decoration: underline;
+}
+
+.rm-library-row__meta,
+.rm-library-row__status {
+	color: var(--rm-fg-muted);
+	font-size: 14px;
+	display: flex;
+	gap: 4px;
+	flex-wrap: wrap;
+}
+
+/*
+ * Row actions are revealed on hover / focus, but they stay in the
+ * DOM and in the tab order: `visibility` / `display` would break
+ * keyboard access, and touch devices have no hover at all.
+ * `prefers-reduced-motion` readers get no transition.
+ */
+.rm-library-row__actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex: none;
+	opacity: 0;
+	transition: opacity 120ms ease-in-out;
+}
+
+.rm-library-row:hover .rm-library-row__actions,
+.rm-library-row:focus-within .rm-library-row__actions {
+	opacity: 1;
+}
+
+@media (hover: none) {
+	.rm-library-row__actions {
+		opacity: 1;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.rm-library-row__actions {
+		transition: none;
+	}
+}
+
+.rm-library-empty {
+	border: 1px dashed var(--rm-border-strong);
+	border-radius: var(--rm-radius-lg);
+	padding: 32px;
+	text-align: center;
+}
+
+.rm-library-empty h3 {
+	margin-top: 0;
+}
+
+/* --- confirm dialog ---------------------------------------------------- */
+
+.rm-dialog-backdrop {
+	position: fixed;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	padding: 24px;
+	background: rgba(11, 16, 32, 0.45);
+	z-index: 10;
+}
+
+.rm-dialog {
+	width: min(480px, 100%);
+	background: var(--rm-bg-surface);
+	color: var(--rm-fg);
+	border: 1px solid var(--rm-border);
+	border-radius: var(--rm-radius-lg);
+	box-shadow: var(--rm-shadow-md);
+	padding: 20px;
+}
+
+.rm-dialog__title {
+	margin-top: 0;
+	font-size: 18px;
+}
+
+.rm-dialog__description p {
+	margin: 0 0 12px;
+	font-size: 14px;
+	color: var(--rm-fg-muted);
+}
+
+.rm-dialog__error {
+	margin: 0 0 12px;
+	padding: 8px 12px;
+	border: 1px solid var(--rm-error);
+	border-radius: var(--rm-radius-md);
+	background: var(--rm-error-bg);
+	color: var(--rm-error-fg);
+	font-size: 14px;
+}
+
+.rm-dialog__field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin: 0 0 12px;
+}
+
+.rm-dialog__field-label {
+	font-size: 13px;
+	color: var(--rm-fg-muted);
+}
+
+.rm-dialog__field input {
+	width: 100%;
+	padding: 6px 10px;
+	border: 1px solid var(--rm-border);
+	border-radius: var(--rm-radius-md);
+	background: var(--rm-bg-surface);
+	color: var(--rm-fg);
+	font-family: inherit;
+	font-size: 14px;
+}
+
+.rm-dialog__actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+/* --- reader ------------------------------------------------------------ */
+
+.rm-app--reader {
+	/* The reader owns its own scroll container: an inner scroller is
+	 * what makes "render the pages near the viewport" expressible at
+	 * all, and it keeps the toolbar fixed while the document scrolls. */
+	height: 100%;
+	overflow: hidden;
+	/* Row 2 holds the optional panel and the scroller side by side.
+	 * `.rm-app` declares `grid-template-rows: auto 1fr`, so the
+	 * columns come from a template the panel opts into — a grid item
+	 * that lands in an implicit row would take the scroller's height
+	 * with it. */
+	grid-template-columns: 1fr;
+}
+
+.rm-app--reader:has(.rm-panel) {
+	grid-template-columns: minmax(0, 1fr) 280px;
+}
+
+.rm-reader-header {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 10px 16px;
+	border-bottom: 1px solid var(--rm-border);
+	background: var(--rm-bg-surface);
+}
+
+.rm-reader-header__title {
+	margin: 0;
+	font-size: 15px;
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.rm-reader-header__spacer {
+	flex: 1;
+}
+
+.rm-reader-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.rm-reader-zoom {
+	min-width: 52px;
+	text-align: center;
+	font-family: var(--rm-font-mono);
+	font-size: 13px;
+	color: var(--rm-fg-muted);
+}
+
+.rm-reader-scroll {
+	overflow: auto;
+	padding: 20px 0 60vh;
+	/* A scroll container with `position: sticky` children needs the
+	 * padding on the scroller, not on the page, or the last page can
+	 * never reach the top of the viewport. */
+	background: var(--rm-bg);
+}
+
+.rm-reader-pages {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 16px;
+}
+
+.rm-page {
+	position: relative;
+	background: #ffffff;
+	box-shadow: var(--rm-shadow-sm);
+}
+
+.rm-page__canvas {
+	display: block;
+}
+
+/*
+ * The text layer sits on top of the canvas and is what the reader
+ * selects across: transparent text, real glyph positions, real
+ * selection. `letter-spacing` / `word-spacing` are pinned because
+ * their defaults accumulate across a span, and a one-pixel drift per
+ * glyph run is enough to make a selection cover the wrong pixels
+ * without looking wrong.
+ */
+.rm-text-layer {
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+	line-height: 1;
+	text-align: initial;
+	text-size-adjust: none;
+	-webkit-text-size-adjust: none;
+	caret-color: CanvasText;
+	letter-spacing: 0;
+	word-spacing: 0;
+}
+
+.rm-text-layer span {
+	position: absolute;
+	transform-origin: 0% 0%;
+	white-space: pre;
+	cursor: text;
+	color: transparent;
+}
+
+/* --- selection toolbar -------------------------------------------------- */
+
+/* Above the selection it belongs to, or below it when the sticky
+ * header is in the way — see `toolbarPlacement` for why only that one
+ * obstacle is worth moving for. Fixed to the viewport because it
+ * follows the text, not the scroller. */
+.rm-selection-toolbar {
+	display: flex;
+	gap: 8px;
+	padding: 4px;
+	border: 1px solid var(--rm-border);
+	border-radius: var(--rm-radius-md);
+	background: var(--rm-bg-surface);
+	box-shadow: var(--rm-shadow-md);
+	z-index: 2;
+}
+
+/* A short-lived banner for selection-action failures. Fixed near the
+ * top of the viewport so a reader sees it without scrolling; sits
+ * above the selection toolbar in the stack. */
+.rm-reader-action-error {
+	position: fixed;
+	top: 64px;
+	left: 16px;
+	right: 16px;
+	max-width: 560px;
+	margin: 0 auto;
+	z-index: 3;
+}
+
+/* --- highlights --------------------------------------------------------- */
+
+/* The PDF painter emits geometry and freshness and nothing else. The
+ * colour is a semantic name on the row (`Highlight.color`) and it is
+ * resolved here, from a token, keyed off an attribute the *UI* sets on
+ * an ancestor — so a stored row is never pinned to one theme's palette,
+ * and a reader in dark mode gets the colour the theme chose rather
+ * than the one the file was written under.
+ *
+ * Unlabelled means invisible. A default here would be the painter
+ * quietly choosing a colour it was told not to choose. */
+.rm-highlight {
+	--rm-highlight-fill: transparent;
+	/* A stale anchor is one the document moved out from under. It is
+	 * shown, not hidden — the reader chose it — and marked, so it does
+	 * not read as a highlight in the right place. */
+	--rm-highlight-stale-fill: transparent;
+}
+
+/* Keyed off an attribute on whatever the UI owns around the page — the
+ * page host, not the box `render` created, which the reader and the
+ * painter both fill. The custom properties inherit down to the overlay
+ * inside the box, which is how a stored *name* reaches a colour without
+ * the painter knowing what colour is. */
+[data-highlight-color="yellow"] {
+	--rm-highlight-fill: color-mix(in srgb, var(--rm-highlight-yellow) 45%, transparent);
+	--rm-highlight-stale-fill: color-mix(in srgb, var(--rm-highlight-yellow) 20%, transparent);
+}
+
+.rm-highlight__fragment {
+	background: var(--rm-highlight-fill);
+}
+
+.rm-highlight[data-freshness="stale"] .rm-highlight__fragment {
+	background: var(--rm-highlight-stale-fill);
+	outline: 1px dashed var(--rm-fg-muted);
+}
+
+.rm-text-layer span::selection {
+	background: rgba(58, 108, 255, 0.35);
+}
+
+.rm-reader-empty {
+	border: 1px dashed var(--rm-border-strong);
+	border-radius: var(--rm-radius-lg);
+	padding: 40px;
+	text-align: center;
+	color: var(--rm-fg-muted);
+	max-width: 520px;
+	margin: 40px auto;
+}
+
+/* --- side panel --------------------------------------------------------- */
+
+.rm-panel {
+	border-left: 1px solid var(--rm-border);
+	background: var(--rm-bg-surface);
+	padding: 12px 8px;
+	overflow: auto;
+	min-width: 0;
+}
+
+/* The reader's panel is a grid item that comes after the header and
+ * the scroller, so auto-placement would drop it into the header's row
+ * and give it the header's height. It belongs beside the whole reading
+ * column — the full height of the document area, from under the
+ * toolbar down. */
+.rm-panel--reader {
+	grid-column: 2;
+	grid-row: 1 / -1;
+}
+
+.rm-panel__header {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 0 8px 8px;
+}
+
+.rm-panel__title {
+	margin: 0;
+	font-size: 15px;
+}
+
+.rm-panel__empty {
+	padding: 0 8px;
+	font-size: 14px;
+}
+
+.rm-panel__list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.rm-panel__item {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	border-radius: var(--rm-radius-md);
+}
+
+.rm-panel__item:hover {
+	background: var(--rm-bg-subtle);
+}
+
+.rm-panel__jump {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 2px;
+	padding: 8px;
+	border: none;
+	border-radius: var(--rm-radius-md);
+	background: transparent;
+	color: var(--rm-fg);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.rm-panel__jump:hover {
+	background: var(--rm-bg-subtle);
+}
+
+.rm-panel__jump-label {
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.rm-panel__jump-hint {
+	color: var(--rm-fg-muted);
+	font-size: 12px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 100%;
 }

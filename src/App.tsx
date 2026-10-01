@@ -7,7 +7,7 @@ export function App() {
 		<BrowserRouter>
 			<Routes>
 				<Route path="/" element={<LibraryScreen />} />
-				<Route path="/read/:documentFingerprint" element={<ReaderScreen />} />
+				<Route path="/read/:documentId" element={<ReaderScreen />} />
 				<Route path="*" element={<Navigate to="/" replace />} />
 			</Routes>
 		</BrowserRouter>

@@ -1,8 +1,9 @@
 /**
  * readmark — fingerprint helper unit test.
  *
- * Locks the SHA-256 hex shape so future changes that break the contract
- * (e.g. switching to xxhash, switching to base64) fail loudly here.
+ * Locks the SHA-256 hex shape so future changes that break the
+ * contract (e.g. switching to xxhash, switching to base64) fail
+ * loudly here.
  */
 
 import { describe, expect, it } from 'vitest';

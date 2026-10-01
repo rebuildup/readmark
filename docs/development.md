@@ -46,20 +46,85 @@ bun install --frozen-lockfile  # CI 用
 | `bun run validate` | typecheck + lint + test + build |
 | `bun run validate:fast` | typecheck + lint + test（PR 前） |
 | `bun run skills` | `bunx skills` のショートカット |
+| `bun scripts/smoke-import.mjs` | import フロー（#3）のブラウザ smoke |
+| `bun scripts/smoke-library.mjs` | ライブラリ一覧（#4）のブラウザ smoke |
+| `bun scripts/smoke-reader.mjs` | Reader（#11）のブラウザ smoke |
+| `bun scripts/smoke-geometry.mjs` | highlight geometry（#7）のブラウザ smoke |
+| `bun scripts/smoke-pdf-assets.mjs` | pdf.js の support table（CMap / standard font / wasm）が `dist/` にあり HTTP で取得できることの smoke |
+| `bun scripts/smoke-schema-upgrade.mjs` | 旧スキーマの IndexedDB を app が回復できることの smoke |
+
+> `smoke-geometry` / `smoke-pdf-assets` / `smoke-schema-upgrade` は
+> **それぞれ 1 種類の環境依存を検出する**。他の smoke は毎回 Chromium
+> profile が新品なので、IndexedDB が壊れている状態と pdf.js の
+> support table が `dist/` に無い状態を再現できない。それぞれ
+> `docs/troubleshooting.md` §4 / §5 に対応する。
+
+### ブラウザ smoke
+
+`scripts/smoke-*.mjs` は `bun run preview`（= `bun run build` 済み）を
+headless Chromium で操作する one-shot のスクリプトで、CI では動かない。
+共通の土台（preview 起動、Chromium 起動、count の settle、IndexedDB の
+store 件数読み出し）は `scripts/smoke-harness.mjs` にある。
+
+```bash
+bun run build
+bun scripts/smoke-library.mjs
+```
+
+Storage を触る変更（import / delete / schema）は、unit test だけでは
+「DOM から消えたが store には残っている」ような取りこぼしを検出できな
+い。該当する場合は smoke を走らせてから PR を Ready にする。
+
+描画・layout・Selection に依存する変更（reader / text layer / zoom /
+rotation）も同じで、happy-dom には canvas も layout も実 Selection も
+無いので、主張の根拠は smoke 側になる。
 
 ## 4. 環境変数
 
-> サンドボックス上 `.env*` ファイル名は使えないため、`README.md` /
-> `AGENTS.md` / 本ファイルのみが env schema の SoT。
-> ローカル開発で `.env` を置きたい場合はファイルを直接作る（gitignore
-> される）。
+> env schema はリポジトリ root の `.env.example` を canonical として
+> 扱う。`.env`, `.env.development`, `.env.production` は gitignore。
+
+MVP で必要な env 変数は 1 つだけ：
 
 | 変数 | デフォルト | 用途 |
 | ---- | ---------- | ---- |
-| `PORT` | `5173` | Vite dev server port |
-| `READMARK_EPHEMERAL` | `false` | true で IndexedDB 永続化を拒否（プレビュー専用） |
-| `READMARK_TELEMETRY` | `false` | true で将来のオプトイン crash reporter を有効化 |
-| `READMARK_ENABLE_EPUB` | `false` | 実験的 EPUB reader を有効化（ADR-0003 まで常に false） |
+| `READMARK_EPHEMERAL` | `false` | true で IndexedDB 永続化を拒否（プレビュー / sandbox mode 用） |
+
+それ以外（`READMARK_TELEMETRY` や `READMARK_ENABLE_EPUB` 等）は MVP
+では **schema にも存在しない**。テレメトリは ADR-0001 で
+「含めない」と決めており、EPUB は ADR-0003 で「post-MVP」と決めて
+いるため、YAGNI に従い schema を膨らませない。必要になった時点で
+ADR と一緒に追加する。
+
+### `.env.example` の正本
+
+`.env.example` はリポジトリに正本としてコミットされている。
+開発を始める際はこれを `.env` にコピーして使う：
+
+```dotenv
+# readmark — local development env schema.
+#
+# Copy this file to .env (gitignored) and edit as needed. The env
+# schema here is the canonical contract between local development
+# and the runtime; CI does not read .env files.
+#
+# Why so few variables?
+#   - MVP is local-first; no backend, no telemetry, no remote
+#     feature flags (ADR-0001, ADR-0003).
+#   - YAGNI: variables for unimplemented features belong with the
+#     ADR that introduces them. Adding `READMARK_TELEMETRY` or
+#     `READMARK_ENABLE_EPUB` here would imply those features are
+#     on the MVP roadmap — they are not.
+
+# When true, IndexedDB persistence is bypassed. Useful for
+# ephemeral preview / sandbox mode where every reload starts
+# from an empty library.
+READMARK_EPHEMERAL=false
+```
+
+CI は `.env.example` を参照しない（`.env*` を読みに行く step が
+ない）。schema が変わったら `.env.example` とこのセクションを同時に
+更新する。
 
 ## 5. 開発フロー
 

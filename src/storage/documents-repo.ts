@@ -1,82 +1,346 @@
 /**
  * readmark — documents repository.
  *
- * The "library" surface reads/writes through this module. Generic code must
- * NOT bypass this layer to touch Dexie directly; the IndexedDB schema is
- * a storage concern, not a domain concern.
+ * The "library" surface reads/writes through this module. Generic
+ * code must NOT bypass this layer to touch Dexie directly; the
+ * IndexedDB schema is a storage concern, not a domain concern.
+ *
+ * Identity model (see `domain/document.ts`):
+ *   - On import: compute sourceFingerprint from bytes.
+ *   - If a DocumentSource with that fingerprint already exists,
+ *     refresh its blob + format-specific metadata in place; the
+ *     DocumentId is preserved.
+ *   - Else: mint a fresh DocumentId, create a Document, attach a
+ *     DocumentSource, and store the DocumentBlob — all in one
+ *     transaction.
+ *
+ * MVP is 1:1 (one Document ↔ one DocumentSource). The repository
+ * already supports the 1:N case in shape; the only thing missing is
+ * a UX that asks "do you want to attach this as a second source?"
+ * (out of MVP scope).
+ *
+ * Blob handling:
+ *   - The Blob lives ONLY in `documentBlobs`. The `documents` table
+ *     holds metadata only.
+ *   - Eviction policy: future work. The architectural promise is
+ *     that eviction can drop `documentBlobs` rows without touching
+ *     `documents` or any reading-state table.
  */
 
-import type { Document, DocumentFingerprint } from '../domain/document.ts';
+import type {
+	Document,
+	DocumentFormat,
+	DocumentId,
+	DocumentMetadata,
+	DocumentSource,
+	SourceFingerprint,
+	SourceMetadata,
+} from '../domain/document.ts';
+import { asDocumentId } from '../domain/document.ts';
 import { fingerprintBlob } from '../lib/fingerprint.ts';
-import { type DocumentBlobRecord, getDb, type StoredDocument } from './db.ts';
+import { getDb } from './db.ts';
 
-export async function listDocuments(): Promise<readonly Document[]> {
-	const rows = await getDb()
-		.documents.orderBy('lastReadAt')
-		.reverse()
-		.filter((d) => d.lastReadAt !== null)
-		.toArray();
-	const neverOpened = await getDb()
-		.documents.orderBy('importedAt')
-		.reverse()
-		.filter((d) => d.lastReadAt === null)
-		.toArray();
-	return [...rows, ...neverOpened].map(toDocument);
+/** A row in the library list: one Document plus its "primary"
+ *  source. The primary source is the oldest one attached to the
+ *  Document — which, in MVP, is the only one. The UI uses this for
+ *  display; the repository uses it for navigation. */
+export interface LibraryEntry {
+	readonly document: Document;
+	readonly primarySource: DocumentSource;
 }
 
-/** Import (or re-import) a PDF/EPUB/... into the library. Idempotent by
- *  fingerprint — re-importing the same bytes updates timestamps only. */
-export async function importDocument(
-	blob: Blob,
-	format: Document['format'],
-	metadata: Document['metadata'],
-): Promise<DocumentFingerprint> {
-	const fingerprint = await fingerprintBlob(blob);
-	const now = Date.now();
+/** List the library. Order: most recently read first, then
+ *  never-opened documents in import order.
+ *
+ *  Reads the document list and the source list in two indexed reads
+ *  (not one read per document), then groups sources by `documentId`
+ *  in memory. A per-document read would be N+1: every additional
+ *  document paid for its own IndexedDB roundtrip. With the index
+ *  `[documentId+importedAt]` already declared on `documentSources`
+ *  (`db.ts`), a single `where('documentId').anyOf([...])` returns
+ *  every source for every row in the library in one shot. */
+export async function listLibrary(): Promise<readonly LibraryEntry[]> {
 	const db = getDb();
 
-	await db.transaction('rw', db.documents, db.documentBlobs, async () => {
-		const existing = await db.documents.get(fingerprint);
-		if (existing) {
-			// Re-import — preserve importedAt, refresh the blob, bump lastReadAt.
-			await db.documents.update(fingerprint, {
-				blob,
-				lastReadAt: existing.lastReadAt,
-				metadata: { ...existing.metadata, ...metadata },
-			});
-		} else {
-			await db.documents.put({
-				fingerprint,
-				format,
-				byteSize: blob.size,
-				importedAt: now,
-				lastReadAt: null,
-				metadata,
-				blob,
-			});
-		}
-		const blobRecord: DocumentBlobRecord = {
-			fingerprint,
-			blob,
-			storedAt: now,
-		};
-		await db.documentBlobs.put(blobRecord);
-	});
+	const docs = await db.documents.toArray();
+	if (docs.length === 0) return [];
 
-	return fingerprint;
+	const documentIds = docs.map((document) => document.id);
+	const allSources = await db.documentSources.where('documentId').anyOf(documentIds).toArray();
+
+	// Group by documentId; sort each bucket by `importedAt` so
+	// `getPrimarySource`'s "oldest" rule is honoured locally without
+	// a second indexed read.
+	const sourcesByDocument = new Map<DocumentId, DocumentSource[]>();
+	for (const source of allSources) {
+		const bucket = sourcesByDocument.get(source.documentId);
+		if (bucket === undefined) {
+			sourcesByDocument.set(source.documentId, [source]);
+		} else {
+			bucket.push(source);
+		}
+	}
+	for (const bucket of sourcesByDocument.values()) {
+		bucket.sort((a, b) => a.importedAt - b.importedAt);
+	}
+
+	const entries: LibraryEntry[] = [];
+	for (const document of docs) {
+		const bucket = sourcesByDocument.get(document.id);
+		const primarySource = bucket?.[0];
+		if (primarySource === undefined) {
+			// A Document with no source is a data-integrity bug —
+			// every Document written by `importDocument` is created
+			// in the same transaction as its first DocumentSource.
+			// Logging instead of silently dropping lets tests and
+			// telemetry notice; the row is still filtered so the
+			// library does not show a card with no file.
+			console.error('readmark: document has no primary source', { documentId: document.id });
+			continue;
+		}
+		entries.push({ document, primarySource });
+	}
+
+	return entries.sort((a, b) => {
+		const aT = a.document.lastReadAt ?? a.document.importedAt;
+		const bT = b.document.lastReadAt ?? b.document.importedAt;
+		return bT - aT;
+	});
 }
 
-export async function getDocumentBlob(fingerprint: DocumentFingerprint): Promise<Blob | null> {
-	const row = await getDb().documentBlobs.get(fingerprint);
+/** Fetch a Document by its logical id. Does NOT load sources or
+ *  blobs — callers that need them ask explicitly. */
+export async function getDocument(id: DocumentId): Promise<Document | null> {
+	const row = await getDb().documents.get(id);
+	return row ?? null;
+}
+
+/** List all sources of a Document, ordered by import time
+ *  (oldest first). */
+export async function listDocumentSources(
+	documentId: DocumentId,
+): Promise<readonly DocumentSource[]> {
+	return getDb()
+		.documentSources.where('[documentId+importedAt]')
+		.between([documentId, 0], [documentId, Number.MAX_SAFE_INTEGER])
+		.toArray();
+}
+
+/** The "primary" source of a Document — the oldest one attached.
+ *  In MVP one Document has one source, so this is unambiguous.
+ *  When multi-source UI lands, this becomes "the source the reader
+ *  last opened, or the oldest if never opened." */
+export async function getPrimarySource(documentId: DocumentId): Promise<DocumentSource | null> {
+	const sources = await listDocumentSources(documentId);
+	return sources[0] ?? null;
+}
+
+export async function getDocumentSource(
+	sourceFingerprint: SourceFingerprint,
+): Promise<DocumentSource | null> {
+	const row = await getDb().documentSources.get(sourceFingerprint);
+	return row ?? null;
+}
+
+/** Load the bytes for a source. Returns null if the bytes have been
+ *  evicted; the UI must surface that the user needs to re-import. */
+export async function getDocumentBlob(sourceFingerprint: SourceFingerprint): Promise<Blob | null> {
+	const row = await getDb().documentBlobs.get(sourceFingerprint);
 	return row?.blob ?? null;
 }
 
-export async function touchLastReadAt(fingerprint: DocumentFingerprint): Promise<void> {
-	await getDb().documents.update(fingerprint, { lastReadAt: Date.now() });
+/** Options for `importDocument`. The two metadata buckets are
+ *  separated because they belong to different tables — Document
+ *  metadata is user-facing book identity, DocumentSource metadata
+ *  is file-derived. */
+export interface ImportOptions {
+	readonly documentMetadata?: DocumentMetadata;
+	readonly sourceMetadata?: SourceMetadata;
 }
 
-function toDocument(stored: StoredDocument): Document {
-	const { blob: _blob, ...rest } = stored;
-	void _blob;
-	return rest;
+/** The identity pair returned by `importDocument`. Callers that
+ *  need both keys (the library import flow in #3, e.g. to show
+ *  "this is the same file as X") get them in a single object so
+ *  we do not re-hash the blob after the IndexedDB commit. */
+export interface ImportResult {
+	readonly documentId: DocumentId;
+	readonly sourceFingerprint: SourceFingerprint;
+}
+
+/** Import (or re-import) a file. Idempotent by SourceFingerprint:
+ *  re-importing the same bytes refreshes the source record and
+ *  its blob. Returns the (preserved or minted) DocumentId plus
+ *  the physical SourceFingerprint (which the caller already
+ *  knows is the dedup key — we just return it so the caller
+ *  does not have to re-hash). */
+export async function importDocument(
+	blob: Blob,
+	format: DocumentFormat,
+	options: ImportOptions = {},
+): Promise<ImportResult> {
+	const sourceFingerprint = await fingerprintBlob(blob);
+	const now = Date.now();
+	const db = getDb();
+	const { documentMetadata = {}, sourceMetadata = {} } = options;
+
+	const id = await db.transaction(
+		'rw',
+		db.documents,
+		db.documentSources,
+		db.documentBlobs,
+		async () => {
+			// Dedup by physical identity.
+			const existing = await db.documentSources.get(sourceFingerprint);
+			if (existing) {
+				await db.documentSources.update(sourceFingerprint, {
+					format,
+					byteSize: blob.size,
+					metadata: sourceMetadata,
+				});
+				await db.documentBlobs.put({
+					sourceFingerprint,
+					blob,
+					storedAt: now,
+				});
+				return existing.documentId;
+			}
+
+			// New source → mint a Document and its first Source together.
+			// UUID v4 is the only shape a `DocumentId` accepts, so
+			// route through the brand guard instead of casting —
+			// `as DocumentId` would let a future shape change (e.g.
+			// adding a checksum) through unnoticed.
+			const id = asDocumentId(crypto.randomUUID());
+
+			await db.documents.put({
+				id,
+				metadata: documentMetadata,
+				importedAt: now,
+				lastReadAt: null,
+			});
+			await db.documentSources.put({
+				sourceFingerprint,
+				documentId: id,
+				format,
+				byteSize: blob.size,
+				importedAt: now,
+				metadata: sourceMetadata,
+			});
+			await db.documentBlobs.put({
+				sourceFingerprint,
+				blob,
+				storedAt: now,
+			});
+			return id;
+		},
+	);
+
+	return { documentId: id, sourceFingerprint };
+}
+
+/** Bump `Document.lastReadAt`. Called by the reader whenever a
+ *  source of this Document is opened. */
+export async function touchLastReadAt(id: DocumentId): Promise<void> {
+	await getDb().documents.update(id, { lastReadAt: Date.now() });
+}
+
+/** How many rows a `deleteDocument` call removed, per table. Kept as
+ *  a summary rather than a boolean so the UI can tell the user what
+ *  is gone (e.g. "3 highlights and 1 bookmark will be deleted too")
+ *  and so tests can assert the cascade without reading IndexedDB. */
+export interface DeleteDocumentSummary {
+	readonly documentId: DocumentId;
+	readonly sources: number;
+	readonly blobs: number;
+	readonly bookmarks: number;
+	readonly highlights: number;
+	readonly notes: number;
+	readonly readingProgress: number;
+}
+
+/**
+ * Delete a Document and everything that belongs to it, in ONE
+ * transaction.
+ *
+ * Why the cascade is mandatory (ADR-0002):
+ *   - Reading state is keyed by `DocumentId` + `SourceFingerprint`.
+ *     Leaving `bookmarks` / `highlights` / `notes` /
+ *     `readingProgress` rows behind would orphan them: the
+ *     `documentId` they point at no longer exists, so nothing could
+ *     ever list or resolve them, and the rows would accumulate
+ *     forever in IndexedDB. The MVP writes none of these rows yet
+ *     (the tables exist so future tickets need no schema bump), but
+ *     the repository already has to be correct once they do.
+ *   - `documentBlobs` is keyed by `SourceFingerprint`, not by
+ *     `DocumentId`, so we must read the Document's sources first and
+ *     then delete the matching blobs. The bytes are the whole point
+ *     of the delete (quota), so a metadata-only delete would be a
+ *     silent no-op for the user's disk usage.
+ *
+ * Returns `null` when the Document does not exist. The caller
+ * distinguishes "already gone" from "deleted" without a second
+ * read, and maps `null` to a typed `not-found` error.
+ *
+ * Deletion is intentionally NOT undoable in the MVP. ADR-0002
+ * treats reading state as cheap and re-derivable-by-reimport only
+ * for bytes; restoring highlights from a deleted document would
+ * require an undo buffer we do not have. The UI must confirm first.
+ */
+export async function deleteDocument(id: DocumentId): Promise<DeleteDocumentSummary | null> {
+	const db = getDb();
+
+	return await db.transaction(
+		'rw',
+		// Array form: Dexie's positional overload tops out at five
+		// tables, and the cascade needs eight.
+		[
+			db.documents,
+			db.documentSources,
+			db.documentBlobs,
+			db.bookmarks,
+			db.highlights,
+			db.notes,
+			db.readingProgress,
+		],
+		async () => {
+			const document = await db.documents.get(id);
+			if (!document) return null;
+
+			// Blobs are keyed by fingerprint, so read the sources
+			// before deleting anything.
+			const sources = await db.documentSources.where('documentId').equals(id).toArray();
+
+			const [sourcesRemoved, bookmarks, highlights, notes, readingProgress] = await Promise.all([
+				db.documentSources.where('documentId').equals(id).delete(),
+				db.bookmarks.where('documentId').equals(id).delete(),
+				db.highlights.where('documentId').equals(id).delete(),
+				db.notes.where('documentId').equals(id).delete(),
+				db.readingProgress.where('documentId').equals(id).delete(),
+			]);
+
+			// One indexed delete over the primary keys, not
+			// `Table.delete()` per source: `Table.delete` resolves to
+			// `void` in Dexie 4 while `Collection.delete` returns the
+			// row count, and the summary needs that count. MVP is 1:1
+			// (one source per document), so the array holds a single
+			// key in practice; it only grows with multi-source.
+			const fingerprints = sources.map((source) => source.sourceFingerprint);
+			const blobsRemoved =
+				fingerprints.length > 0
+					? await db.documentBlobs.where(':id').anyOf(fingerprints).delete()
+					: 0;
+
+			await db.documents.delete(id);
+
+			return {
+				documentId: id,
+				sources: sourcesRemoved,
+				blobs: blobsRemoved,
+				bookmarks,
+				highlights,
+				notes,
+				readingProgress,
+			};
+		},
+	);
 }

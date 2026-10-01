@@ -10,9 +10,13 @@
 #   on solo; no-op gate today).
 # - Concurrency: per-workflow + per-ref; in-progress runs cancel on
 #   new pushes (same pattern as rebuildup/my-web-2026 ci.yml).
-# - mise: install with --locked. If mise.toml or bun.lock drift, the
-#   workflow fails loudly.
-# - bun install: --frozen-lockfile. Same idea.
+# - mise: install without --locked. mise.toml is the source of truth
+#   for toolchain versions (exact pins); we do not commit a mise
+#   lockfile because the project-init convention is "use --locked
+#   only when the lockfile is part of the reproducibility contract."
+#   Adding one is a separate ticket.
+# - bun install: --frozen-lockfile. bun.lock IS committed and IS the
+#   reproducibility contract for JS dependencies.
 # - validate:fast: typecheck + lint + test. Build is excluded to keep
 #   PR feedback < 60s; release PRs additionally run validate locally.
 
@@ -44,7 +48,7 @@ jobs:
         uses: jdx/mise-action@v2
 
       - name: Toolchain check
-        run: mise install --locked
+        run: mise install
 
       - name: Cache bun install
         uses: actions/cache@v4
