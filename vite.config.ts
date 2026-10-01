@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { cp } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
 
@@ -92,13 +92,40 @@ export function pdfjsSupportTables(): Plugin {
 				const match = url.match(/^\/assets\/pdfjs\/([a-z_]+)\//);
 				if (!match) return next();
 				const dir = match[1];
+				// Unreachable: the pattern has one capture group and it is
+				// inside a `+` quantifier, so a match means a capture. The
+				// check is here because `noUncheckedIndexedAccess` cannot
+				// see that, and an impossible state should fall through to
+				// the dev server rather than be assumed away.
+				if (dir === undefined) return next();
 				if (!DIRECTORIES.includes(dir as (typeof DIRECTORIES)[number])) return next();
 				const rest = decodeURIComponent(url.slice(`/assets/pdfjs/${dir}/`.length));
 				const dirRoot = resolve(pdfjsRoot, dir);
 				// Resolve under the directory, then re-check: the URL
 				// is attacker-controllable and must not escape it.
+				//
+				// Containment is asked of `relative()` rather than of a
+				// string prefix, because `resolve()` hands back the
+				// platform's separator: on Windows `dirRoot` ends in
+				// `\`, so a prefix built from a literal `/` matches
+				// nothing and every legitimate request falls through to
+				// the 404 that follows. The bug is invisible on CI,
+				// which is Linux-only, and it costs a Windows developer
+				// every CMap — that is, no glyphs on a Japanese PDF.
+				//
+				// `isAbsolute` is not redundant: `rest` is attacker-
+				// controlled, and `resolve(dirRoot, 'D:/Windows')` lands
+				// on another drive, where `relative` returns an absolute
+				// path rather than a `..`-prefixed one.
+				//
+				// The `..` test is spelled out rather than a bare
+				// `startsWith('..')` so a file whose name genuinely
+				// begins with two dots is not caught by the guard.
 				const file = resolve(dirRoot, rest);
-				if (file !== dirRoot && !file.startsWith(`${dirRoot}/`)) return next();
+				const rel = relative(dirRoot, file);
+				if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+					return next();
+				}
 				if (!existsSync(file)) return next();
 				res.setHeader(
 					'Content-Type',
