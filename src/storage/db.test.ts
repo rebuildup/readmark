@@ -35,9 +35,9 @@
  * primary key, and it recognises nothing else.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { DATABASE_NAME, ReadmarkDatabase, recoverUnmigratableDatabase } from './db.ts';
+import { DATABASE_NAME, getDb, ReadmarkDatabase, recoverUnmigratableDatabase } from './db.ts';
 
 describe('ReadmarkDatabase schema', () => {
 	it('declares exactly one version', () => {
@@ -93,5 +93,157 @@ describe('recoverUnmigratableDatabase', () => {
 		} finally {
 			globalThis.indexedDB = original;
 		}
+	});
+});
+
+/**
+ * How the delete ends. `blocked-forever` is the case the browser
+ * produces when another tab keeps a connection open: the request never
+ * settles, so it is the only one that can hang.
+ */
+type DeleteOutcome = 'success' | 'error' | 'blocked-forever';
+
+/** The primary keys `main` shipped, which is what makes the recovery
+ *  fire at all. */
+const PRE_SPLIT_KEY_PATHS: Readonly<Record<string, string>> = {
+	documents: 'fingerprint',
+	documentBlobs: 'fingerprint',
+	readingProgress: 'documentFingerprint',
+};
+
+/** The subset of `IDBRequest` the recovery touches. */
+interface FakeRequest {
+	onsuccess?: (() => void) | null;
+	onerror?: (() => void) | null;
+	onblocked?: (() => void) | null;
+	result?: unknown;
+	error?: unknown;
+}
+
+/**
+ * A fake `indexedDB` that reports the given schema and lets the test
+ * choose how the delete ends, recording an ordered event log.
+ *
+ * Callbacks are fired on a microtask, not a timer: the recovery assigns
+ * its handlers inside the promise executor, so anything later than that
+ * is safe, and microtasks stay real under fake timers.
+ */
+function installFakeIndexedDB(options: {
+	readonly keyPaths: Readonly<Record<string, string>>;
+	readonly outcome: DeleteOutcome;
+	readonly events: string[];
+}): void {
+	const { keyPaths, outcome, events } = options;
+	vi.stubGlobal('indexedDB', {
+		open: (): FakeRequest => {
+			const request: FakeRequest = {
+				result: {
+					objectStoreNames: { contains: (table: string) => table in keyPaths },
+					transaction: (table: string) => ({
+						objectStore: () => ({ keyPath: keyPaths[table] }),
+					}),
+					close: () => {
+						events.push('raw-close');
+					},
+				},
+			};
+			queueMicrotask(() => {
+				request.onsuccess?.();
+			});
+			return request;
+		},
+		deleteDatabase: (): FakeRequest => {
+			events.push('delete-requested');
+			const request: FakeRequest =
+				outcome === 'error' ? { error: new Error('delete refused') } : {};
+			if (outcome === 'success') {
+				queueMicrotask(() => {
+					request.onsuccess?.();
+				});
+			} else if (outcome === 'error') {
+				queueMicrotask(() => {
+					request.onerror?.();
+				});
+			} else {
+				// `blocked` fires, and then nothing. This is the shape
+				// that used to resolve as a success.
+				queueMicrotask(() => {
+					request.onblocked?.();
+				});
+			}
+			return request;
+		},
+	});
+}
+
+describe('recoverUnmigratableDatabase / how the delete ends', () => {
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	it('resolves true when the delete lands', async () => {
+		const events: string[] = [];
+		installFakeIndexedDB({ keyPaths: PRE_SPLIT_KEY_PATHS, outcome: 'success', events });
+		await expect(recoverUnmigratableDatabase()).resolves.toBe(true);
+		expect(events).toContain('delete-requested');
+	});
+
+	it('rejects when the delete fails instead of claiming the repair', async () => {
+		// The whole point: `main.tsx` mounts the app on a resolved
+		// promise, so resolving here after a failed delete walks the
+		// reader straight back into the `UpgradeError` this function
+		// exists to prevent — with the app apparently healthy until the
+		// first query throws.
+		const events: string[] = [];
+		installFakeIndexedDB({ keyPaths: PRE_SPLIT_KEY_PATHS, outcome: 'error', events });
+		await expect(recoverUnmigratableDatabase()).rejects.toThrow('delete refused');
+	});
+
+	it('gives up on a delete that stays blocked', async () => {
+		// `blocked` is a notification, not a verdict — the delete lands
+		// when the other tab closes. But the request never settles on its
+		// own, and an unsettled promise means `main.tsx` never renders at
+		// all, which is worse than a message the reader can act on.
+		vi.useFakeTimers();
+		const events: string[] = [];
+		installFakeIndexedDB({ keyPaths: PRE_SPLIT_KEY_PATHS, outcome: 'blocked-forever', events });
+		const recovery = recoverUnmigratableDatabase();
+		// Attached before advancing so the rejection is never unhandled.
+		const settled = expect(recovery).rejects.toThrow(/still not deleted after/);
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settled;
+	});
+
+	it('closes its own connection before asking for the delete', async () => {
+		// A `deleteDatabase` request is blocked by every open connection,
+		// including this module's cached handle. Requesting the delete
+		// first means the request waits on this module to do the thing
+		// that unblocks it — and it also drops a handle that would throw
+		// `DatabaseClosedError` if anything reopened it afterwards.
+		const events: string[] = [];
+		installFakeIndexedDB({ keyPaths: PRE_SPLIT_KEY_PATHS, outcome: 'success', events });
+		const handle = getDb();
+		vi.spyOn(handle, 'close').mockImplementation(() => {
+			events.push('own-close');
+		});
+
+		await recoverUnmigratableDatabase();
+
+		expect(events).toContain('own-close');
+		expect(events.indexOf('own-close')).toBeLessThan(events.indexOf('delete-requested'));
+	});
+
+	it('leaves a database it does not recognise completely alone', async () => {
+		// Deleting is irreversible. The only shape it is allowed to
+		// touch is the one it can name.
+		const events: string[] = [];
+		installFakeIndexedDB({
+			keyPaths: { documents: 'id', readingProgress: 'documentId' },
+			outcome: 'success',
+			events,
+		});
+		await expect(recoverUnmigratableDatabase()).resolves.toBe(false);
+		expect(events).not.toContain('delete-requested');
 	});
 });
