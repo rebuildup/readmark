@@ -182,6 +182,23 @@ function openRawDatabase(name: string): Promise<IDBDatabase | null> {
 	});
 }
 
+/** How long to wait for the delete to land before reporting failure.
+ *
+ *  `blocked` is a notification, not a verdict: it fires while some
+ *  other connection to the database is still open, and the delete
+ *  completes as soon as that connection closes. Waiting is therefore
+ *  the right response to it — and the only safe one, because
+ *  `IDBDatabase.close()` returns before the connection is actually
+ *  closed (it waits for outstanding transactions), so our *own* just-
+ *  closed handle can raise `blocked` on a perfectly healthy run.
+ *  Failing on `blocked` would reject the normal case.
+ *
+ *  The wait is bounded because the request otherwise never settles at
+ *  all, and a blank page is a worse outcome than an error the reader
+ *  can act on. `main.tsx` turns a rejection into a terminal render
+ *  that tells them to close other tabs and reload. */
+const DELETE_TIMEOUT_MS = 5_000;
+
 /**
  * Clear a database Dexie cannot upgrade, so the app becomes usable.
  *
@@ -255,15 +272,46 @@ export async function recoverUnmigratableDatabase(): Promise<boolean> {
 	// Not the one unrepairable shape → leave the user's data alone.
 	if (!isPreSplit) return false;
 
-	await new Promise<void>((resolve) => {
-		const request = indexedDB.deleteDatabase(DATABASE_NAME);
-		request.onsuccess = request.onerror = request.onblocked = () => resolve();
-	});
-
-	// Drop the cached handle. A `ReadmarkDatabase` constructed against
-	// the deleted database carries a closed connection, and reusing it
-	// would hand callers a handle that throws `DatabaseClosedError`.
+	// Release our own connection *before* asking for the delete.
+	//
+	// A `deleteDatabase` request is blocked by every open connection to
+	// the database, and ours is one of them. Issuing the delete first
+	// means the request sits waiting on this very module to do the thing
+	// that unblocks it — which is the state the old code was in, and is
+	// why resolving on `blocked` used to appear to work. Closing first
+	// also drops a handle that would throw `DatabaseClosedError` if
+	// anything reopened it once the database was gone.
 	_db?.close();
 	_db = null;
+
+	// Three outcomes, and they are not the same. Resolving on all of
+	// them claimed a repair that may not have happened, and `main.tsx`
+	// mounts the app on a resolved promise — so a failed delete led
+	// straight into the `UpgradeError` this function exists to prevent.
+	await new Promise<void>((resolve, reject) => {
+		const request = indexedDB.deleteDatabase(DATABASE_NAME);
+		const timer = setTimeout(() => {
+			reject(
+				new Error(
+					`readmark: the unrecoverable database was still not deleted after ${DELETE_TIMEOUT_MS}ms; another tab is probably holding it open`,
+				),
+			);
+		}, DELETE_TIMEOUT_MS);
+		request.onsuccess = () => {
+			clearTimeout(timer);
+			resolve();
+		};
+		request.onerror = () => {
+			clearTimeout(timer);
+			reject(
+				request.error ?? new Error('readmark: the unrecoverable database could not be deleted'),
+			);
+		};
+		// `onblocked` is intentionally left unhandled. It reports that
+		// the delete is waiting on a connection, not that it failed, and
+		// the timeout above is the bound on that wait. See
+		// `DELETE_TIMEOUT_MS`.
+	});
+
 	return true;
 }
