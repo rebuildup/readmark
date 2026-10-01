@@ -159,10 +159,15 @@ export async function jumpToPage(request: PageJumpRequest): Promise<PageJumpOutc
 	// Phase 2: wait for the page to be rendered and measured.
 	for (let frame = 0; frame < MAX_WAIT_FRAMES; frame++) {
 		if (abort()) return 'aborted';
-		const h = measuredHeight(pageIndex);
-		if (h !== undefined) {
-			apply(h);
-			return 'applied';
+		if (measuredHeight(pageIndex) !== undefined) {
+			// The page now has its real height — but that is the *least*
+			// of what settling needs. Scrolling it into range is what
+			// made it render, and it renders last, so the pages above it
+			// are still holding reserved boxes. Its offset is their sum.
+			// Hand over to `settle()` exactly as the already-measured
+			// path does, or this jump applies an offset it knows to be
+			// about to invalidate and calls it done.
+			return await settle();
 		}
 		await nextFrame();
 	}
