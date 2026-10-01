@@ -1233,13 +1233,21 @@ export function ReaderView({
 				// header's button: the header is "back to this page", this is
 				// "back to these words". Two overlapping ways to mark a page is
 				// a choice the reader makes for no gain.
-				await addBookmark({
+				const added = await addBookmark({
 					documentId,
 					sourceFingerprint,
 					pageIndex: snapshot.page,
 					anchor: created.anchor,
 					position: null,
 				});
+				// The panel is opened on the next line and renders
+				// `bookmarks`, so without this the reader is shown a list
+				// that is missing the mark they just made. It stays
+				// missing until the document is reopened: the list is read
+				// once per open and reconciled locally after every add
+				// (see the effect above), so this is not a cache that
+				// refills itself. Same shape as `handleConfirmAdd` below.
+				setBookmarks((previous) => [...previous, added]);
 				setSidePanel('bookmarks');
 			} catch (error: unknown) {
 				console.error('readmark: could not save the selection bookmark', error);

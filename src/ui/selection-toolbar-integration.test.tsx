@@ -27,7 +27,7 @@
  * real position is not under test here — the smoke covers that.
  */
 
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -464,6 +464,36 @@ describe('the bookmark action', () => {
 
 		expect(addedBookmarks).toHaveLength(1);
 		expect(addedBookmarks[0]?.anchor).not.toBeNull();
+	});
+
+	it('shows the mark in the panel it just opened', async () => {
+		// The row is written and the panel is opened in the same handler,
+		// so if the write is not reflected in state the reader is shown
+		// the list they were already looking at: the mark is in IndexedDB
+		// and nowhere they can see or undo it. Nothing refills the list
+		// either — it is read once per open, not watched.
+		//
+		// Asserted on the rendered panel rather than on `bookmarks`, so
+		// this also covers the panel rendering what it was handed.
+		renderReader();
+		await settle();
+
+		selectSpan();
+		fireEvent.mouseUp(screen.getByTestId('rm-reader-scroll'));
+		await screen.findByTestId('rm-selection-toolbar');
+
+		nextCreated = {
+			anchor: { format: 'pdf', payload: { page: asPageIndex(1) } },
+			selectedText: 'a select',
+		};
+		await act(async () => {
+			fireEvent.click(screen.getByTestId('rm-selection-bookmark'));
+		});
+		await settle();
+
+		const panel = await screen.findByTestId('rm-bookmarks-panel');
+		expect(within(panel).getAllByTestId('rm-bookmark-jump')).toHaveLength(1);
+		expect(within(panel).queryByTestId('rm-bookmarks-empty-panel')).toBeNull();
 	});
 
 	it('stores a page bookmark with anchor=null when the dialog is confirmed', async () => {
