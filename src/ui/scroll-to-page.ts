@@ -18,7 +18,9 @@
  *   1. Coarse. Scroll the target into the prefetch band using its
  *      reserved box. Cheap, always available, not committed.
  *   2. Exact. Wait for the page to render, then apply the offset to
- *      its measured height.
+ *      its measured height — and keep applying until it stops moving,
+ *      because bringing the page into range resizes the pages above
+ *      it and moves the target again. See `settle`.
  *
  * The wait is a bounded frame poll rather than a promise from the
  * renderer: the page that has to render is the one the scroll itself
@@ -157,11 +159,9 @@ export async function jumpToPage(request: PageJumpRequest): Promise<PageJumpOutc
 	// Phase 2: wait for the page to be rendered and measured.
 	for (let frame = 0; frame < MAX_WAIT_FRAMES; frame++) {
 		if (abort()) return 'aborted';
-		const height = measuredHeight(pageIndex);
-		if (height !== undefined) {
-			// The page is now as tall as its content, so the offset is
-			// applied to a height that is really its own.
-			apply(height);
+		const h = measuredHeight(pageIndex);
+		if (h !== undefined) {
+			apply(h);
 			return 'applied';
 		}
 		await nextFrame();
