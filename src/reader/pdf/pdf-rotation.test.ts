@@ -30,7 +30,7 @@
  * test in this file cannot see a glyph.
  */
 
-import { PDFDocument, degrees } from 'pdf-lib';
+import { degrees, PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
 import { loadPdfDocument } from './pdf-document.ts';
 import { composePageRotation, normalizePageRotation, type PageRotation } from './pdf-rotation.ts';
