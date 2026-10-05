@@ -800,3 +800,78 @@ pre {
 	white-space: nowrap;
 	max-width: 100%;
 }
+
+/* --- notes -------------------------------------------------------------- */
+
+/* A note is prose, so a row is its body — and a body that contains
+ * line breaks has to *show* them. `pre-wrap` is the whole reason
+ * `src/ui/note-editor.tsx` writes what the reader wrote: without it
+ * the stored text is intact and the display collapses every newline to
+ * a space, which looks like a working feature and is not one.
+ *
+ * `pre-wrap` rather than `pre`: a note with a long unbroken line (a
+ * URL, a file name) has to wrap inside a 200px panel, and `pre` would
+ * push the row's own width out instead. `break-word` covers a single
+ * word too long to break on its own. */
+.rm-note__body {
+	display: block;
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
+	font-size: 14px;
+	line-height: 1.5;
+}
+
+/* A note row is two lines tall by nature — a body and a location — so
+ * the body sits on its own line rather than beside the buttons. */
+.rm-panel__item--stacked {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 0;
+	padding: 4px;
+}
+
+.rm-panel__jump--static {
+	cursor: default;
+}
+
+.rm-panel__jump--static:hover {
+	background: transparent;
+}
+
+.rm-note__row-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 4px;
+}
+
+.rm-note__editor-shell {
+	display: flex;
+	flex-direction: column;
+	padding: 4px 8px 8px;
+}
+
+.rm-note__editor-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+.rm-note__field {
+	margin-bottom: 8px;
+}
+
+.rm-note__editor {
+	width: 100%;
+	resize: vertical;
+	padding: 6px 10px;
+	border: 1px solid var(--rm-border);
+	border-radius: var(--rm-radius-md);
+	background: var(--rm-bg-surface);
+	color: var(--rm-fg);
+	font-family: inherit;
+	font-size: 14px;
+	line-height: 1.5;
+	/* Same reason as `.rm-note__body`: the value in this box is the
+	 * value that will be stored. */
+	white-space: pre-wrap;
+}

@@ -80,6 +80,67 @@ describe('ReadmarkDatabase schema', () => {
 	});
 });
 
+/**
+ * Every index a repository actually reads has to be declared.
+ *
+ * The failure is not a wrong answer, which is what makes it worth a
+ * test. Dexie can serve a compound equality on `[a+b]` off two
+ * single-column indexes with a filter over the result, so a repository
+ * reading an undeclared prefix still returns the right rows — it just
+ * narrows the read to a whole document where the question was about
+ * one source of it, and gets worse with every row the document
+ * accumulates. That is invisible in a unit test with a faked database
+ * and invisible in a small fixture, so the index list is pinned here
+ * instead: this is the only place that knows both halves, the schema
+ * and the queries.
+ *
+ * ## The pre-existing gap, deliberately not pinned
+ *
+ * `bookmarks` and `highlights` both declare
+ * `[documentId+sourceFingerprint+pageIndex]` and are read with
+ * `[documentId+sourceFingerprint]` by `listBookmarks` /
+ * `listHighlights` — the same shape, and it predates `notes`. It is
+ * reported as a defect rather than asserted here, because a test that
+ * fails when someone *fixes* the schema is a test that has to be
+ * deleted in the same commit that fixes the thing, which is how tests
+ * end up asserting that a bug is still present.
+ */
+describe('declared indexes', () => {
+	/** Every `where(...)` index the notes repository reads. */
+	const NOTES_INDEXES = [
+		'[documentId+kind]',
+		'[documentId+sourceFingerprint+pageIndex]',
+		'highlightId',
+	] as const;
+
+	function declared(tableName: string): string[] {
+		const table = new ReadmarkDatabase().tables.find((candidate) => candidate.name === tableName);
+		const schema = table?.schema as { indexes?: readonly { name: string }[] } | undefined;
+		return (schema?.indexes ?? []).map((index) => index.name);
+	}
+
+	it.each(NOTES_INDEXES)('notes declares %s, which the notes repository reads', (index) => {
+		expect(declared('notes')).toContain(index);
+	});
+
+	it('declares no notes index the repository does not read', () => {
+		// The other direction. An index nothing queries is a write the
+		// reader pays for on every note, and it is invisible from the
+		// repository — this is the only place both are visible.
+		expect(declared('notes').sort()).toEqual(
+			[
+				'[documentId+kind]',
+				'[documentId+sourceFingerprint+pageIndex]',
+				'documentId',
+				'highlightId',
+				'kind',
+				'sourceFingerprint',
+				'updatedAt',
+			].sort(),
+		);
+	});
+});
+
 describe('recoverUnmigratableDatabase', () => {
 	it('is a no-op without IndexedDB rather than throwing', async () => {
 		// The function runs before the app mounts. Throwing here would
