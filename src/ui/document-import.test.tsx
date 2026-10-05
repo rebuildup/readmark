@@ -12,6 +12,9 @@
  *   - On a quota-exceeded import failure, `requestPersistenceIfNeeded`
  *     is NOT called — we only ask for persistence when we actually
  *     committed a write.
+ *   - The persistence *answer* is reported to the parent only after
+ *     the browser has actually answered, and is reported identically
+ *     whether the browser grants or denies the request.
  *
  * Why the file picker is mocked, not rendered:
  *   - The `<input type="file">` opens the OS picker, which is not
@@ -56,9 +59,16 @@ function makeSuccess(): ImportSuccess {
 	};
 }
 
-function renderImport(onImported?: (result: ImportSuccess) => void) {
-	const props: { onImported?: (result: ImportSuccess) => void } = {};
+function renderImport(
+	onImported?: (result: ImportSuccess) => void,
+	onPersistenceSettled?: () => void,
+) {
+	const props: {
+		onImported?: (result: ImportSuccess) => void;
+		onPersistenceSettled?: () => void;
+	} = {};
 	if (onImported !== undefined) props.onImported = onImported;
+	if (onPersistenceSettled !== undefined) props.onPersistenceSettled = onPersistenceSettled;
 	return render(
 		<MemoryRouter>
 			<DocumentImport {...props} />
@@ -165,5 +175,65 @@ describe('DocumentImport — #10 wiring', () => {
 
 		await screen.findByRole('alert');
 		expect(mockRequestPersistence).not.toHaveBeenCalled();
+	});
+});
+
+describe('DocumentImport — persistence outcome is reported, not assumed', () => {
+	it('signals the parent only after the browser has answered persist()', async () => {
+		// The badge must not re-read `persisted()` before the browser
+		// answers. Hold the request open and assert the signal has
+		// NOT fired, so the badge cannot render a stale verdict.
+		let answerPersist: ((granted: boolean) => void) | undefined;
+		mockRequestPersistence.mockReturnValue(
+			new Promise<boolean>((resolve) => {
+				answerPersist = resolve;
+			}),
+		);
+		mockImportPdfDocument.mockResolvedValueOnce({ ok: true, value: makeSuccess() });
+
+		const onImported = vi.fn();
+		const onPersistenceSettled = vi.fn();
+		renderImport(onImported, onPersistenceSettled);
+		pickFile(makeFile());
+
+		// The list refresh is not blocked on the answer — `persist()`
+		// may show a prompt, and the reader's new row should appear
+		// without waiting for it.
+		await waitFor(() => expect(onImported).toHaveBeenCalledTimes(1));
+		// ...but the persistence verdict has not been delivered yet.
+		expect(onPersistenceSettled).not.toHaveBeenCalled();
+
+		answerPersist?.(true);
+		await waitFor(() => expect(onPersistenceSettled).toHaveBeenCalledTimes(1));
+	});
+
+	it('still signals the parent when the browser denies persistence', async () => {
+		// A denial is the common case (headless Chromium denies it
+		// outright). It must be reported the same way as a grant —
+		// the callback carries no opinion, and the badge re-reads
+		// `persisted()` to learn the truth.
+		mockRequestPersistence.mockResolvedValueOnce(false);
+		mockImportPdfDocument.mockResolvedValueOnce({ ok: true, value: makeSuccess() });
+
+		const onPersistenceSettled = vi.fn();
+		renderImport(vi.fn(), onPersistenceSettled);
+		pickFile(makeFile());
+
+		await waitFor(() => expect(onPersistenceSettled).toHaveBeenCalledTimes(1));
+	});
+
+	it('does not signal the parent when the import never succeeded', async () => {
+		mockRequestPersistence.mockResolvedValueOnce(true);
+		mockImportPdfDocument.mockResolvedValueOnce({
+			ok: false,
+			error: { kind: 'invalid-pdf', cause: new Error('corrupt') },
+		});
+
+		const onPersistenceSettled = vi.fn();
+		renderImport(vi.fn(), onPersistenceSettled);
+		pickFile(makeFile());
+
+		await screen.findByRole('alert');
+		expect(onPersistenceSettled).not.toHaveBeenCalled();
 	});
 });

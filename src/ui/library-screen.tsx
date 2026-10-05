@@ -100,6 +100,19 @@ export function LibraryScreen() {
 		[refresh],
 	);
 
+	// The persistence request is answered by the browser
+	// asynchronously, and that answer is what `<QuotaBadge>` renders.
+	// `handleImported` already bumps `quotaRefreshKey`, but it fires
+	// in the same tick as the request and would therefore read
+	// `persisted()` before the request resolves — showing an eviction
+	// warning even when the browser grants persistence. Bumping the
+	// key again once the answer lands makes the badge re-read the
+	// settled truth. Bumping the key only re-runs the badge's read;
+	// it does not re-list the library.
+	const handlePersistenceSettled = useCallback(() => {
+		setQuotaRefreshKey((key) => key + 1);
+	}, []);
+
 	// The dialog needs the whole row (for its title and size), but
 	// the click handler only has the id. Resolve at click time
 	// instead of keeping a second copy of the row in state.
@@ -232,7 +245,10 @@ export function LibraryScreen() {
 							import ボタンから PDF を追加してください。ファイルはこのブラウザの IndexedDB
 							にのみ保存され、外部へ送信されません。
 						</p>
-						<DocumentImport onImported={handleImported} />
+						<DocumentImport
+							onImported={handleImported}
+							onPersistenceSettled={handlePersistenceSettled}
+						/>
 					</section>
 				</>
 			);
@@ -267,7 +283,10 @@ export function LibraryScreen() {
 					<p className="rm-muted">
 						ローカルに保持された文書のリスト。import で追加、読むで読書状態を復元します。
 					</p>
-					<DocumentImport onImported={handleImported} />
+					<DocumentImport
+						onImported={handleImported}
+						onPersistenceSettled={handlePersistenceSettled}
+					/>
 				</section>
 
 				{loadError !== null && (
