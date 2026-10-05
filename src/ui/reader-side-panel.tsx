@@ -85,12 +85,13 @@ const FOCUSABLE_SELECTOR = [
  * the first read seeds state so the panel does not open at the wide
  * layout and snap to the overlay a frame later.
  *
- * The `typeof` guard is not defensive padding. The test environment
- * (happy-dom) does not implement `matchMedia` at all, and a component
- * that assumed it existed would make every test of the panel fail on a
- * missing global rather than on anything about panels. Where there is
- * no query to ask, the answer is "not narrow" — which is also the
- * truthful one, because nothing has said the viewport is small.
+ * The `typeof` guard is for renderers that do not implement
+ * `matchMedia` at all — an older embedded WebView, or a non-browser
+ * host. A component that assumed it existed would throw on mount there,
+ * taking the whole reader with it over a question about the panel's
+ * layout. Where there is no query to ask, the answer is "not narrow",
+ * which is also the truthful one: nothing has said the viewport is
+ * small, and the column is the layout that works everywhere.
  */
 function useNarrowViewport(): boolean {
 	const [narrow, setNarrow] = useState<boolean>(() => readNarrowQuery());
