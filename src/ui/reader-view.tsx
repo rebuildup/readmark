@@ -1191,9 +1191,11 @@ export function ReaderView({
 	 *   - a page disagreement between the row and the resolution is
 	 *     an integrity failure, detectable without reading the
 	 *     payload. Nothing is written and the note stays.
-	 *   - a write-back that reports `false` means the repository
-	 *     knows the row is gone. Nothing is resurrected from a list
-	 *     that is already stale.
+	 *   - a write-back that reports `false` means the repository knows
+	 *     the row is gone. Nothing is painted and nothing is written,
+	 *     because a note that is no longer on disk has no business in
+	 *     the list — and the panel is the reader's only way back to
+	 *     what they wrote, so it is left showing what storage says.
 	 *
 	 *  Best-effort by design: it returns nothing because a note that
 	 *  could not be refreshed is still a note the reader can read,
@@ -1222,9 +1224,22 @@ export function ReaderView({
 				return;
 			}
 			if (resolved.updatedAnchor === null) return;
-			await replaceNoteAnchor(note.id, resolved.updatedAnchor);
+			// The write-back is the last thing that happens here, and it
+			// is caught on its own. A rejected IndexedDB write would
+			// otherwise reject the `Promise.all` below, and one row's
+			// failed write would take the whole list down with it — the
+			// reader would open the panel to an empty book they had
+			// written notes in. The stored anchor is unchanged, so the
+			// note is exactly as recoverable on the next open.
+			await replaceNoteAnchor(note.id, resolved.updatedAnchor).catch((error: unknown) => {
+				console.error('readmark: could not store a refreshed note anchor', {
+					id: note.id,
+					pageIndex: note.pageIndex,
+					error,
+				});
+			});
 		},
-		[handle],
+		[handle.resolveAnchor],
 	);
 
 	// The note list is read once per open and reconciled locally after

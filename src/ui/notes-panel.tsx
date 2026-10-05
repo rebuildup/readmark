@@ -103,14 +103,24 @@ export function NotesPanel({
 				</span>
 			</header>
 
-			<Button
-				variant="secondary"
-				onClick={onStartCreate}
-				data-testid="rm-note-create"
-				aria-label="メモを追加"
-			>
-				＋メモ
-			</Button>
+			{/*
+			 * Hidden while an editor is open. Pressing it then would
+			 * silently retarget a half-written note — from a place on a
+			 * page to no place at all — and the reader would only find
+			 * out on save, after the text they just wrote went to the
+			 * wrong note. One editor at a time is also what keeps
+			 * "which note am I writing" a question with one answer.
+			 */}
+			{editor.kind === 'closed' && (
+				<Button
+					variant="secondary"
+					onClick={onStartCreate}
+					data-testid="rm-note-create"
+					aria-label="メモを追加"
+				>
+					＋メモ
+				</Button>
+			)}
 
 			{/*
 			 * The empty state and the creating editor are exclusive,
@@ -206,13 +216,11 @@ function NoteRow({
 							data-testid="rm-note-jump"
 							aria-label={label === '' ? 'メモの位置へ移動' : `「${label}」の位置へ移動`}
 						>
-							<NoteBody note={note} />
-							<span className="rm-panel__jump-hint">{noteHint(note, documentTitle)}</span>
+							<NoteContents note={note} documentTitle={documentTitle} />
 						</button>
 					) : (
 						<div className="rm-panel__jump rm-panel__jump--static">
-							<NoteBody note={note} />
-							<span className="rm-panel__jump-hint">{noteHint(note, documentTitle)}</span>
+							<NoteContents note={note} documentTitle={documentTitle} />
 						</div>
 					)}
 					<div className="rm-note__row-actions">
@@ -240,17 +248,33 @@ function NoteRow({
 }
 
 /**
- * The body, as written.
+ * A row's content: the body as written, and where it is.
  *
- * `pre-wrap` on `.rm-note__body` is what preserves the line breaks. A
- * `<p>` without it renders a two-line note as one run-on line, and
- * everything else about this row still looks right.
+ * One component for both the jumpable and the static wrapper, because
+ * the two must not be able to drift: a note that shows a different
+ * body depending on whether it can be jumped to is a bug waiting for
+ * the second row type to be added.
  */
-function NoteBody({ note }: { readonly note: Note }) {
+function NoteContents({
+	note,
+	documentTitle,
+}: {
+	readonly note: Note;
+	readonly documentTitle: string;
+}) {
 	return (
-		<span className="rm-note__body" data-testid="rm-note-body">
-			{note.body}
-		</span>
+		<>
+			{/*
+			 * `pre-wrap` on `.rm-note__body` is what preserves the line
+			 * breaks. Without it a two-line note renders as one run-on
+			 * line, and everything else about this row still looks
+			 * right.
+			 */}
+			<span className="rm-note__body" data-testid="rm-note-body">
+				{note.body}
+			</span>
+			<span className="rm-panel__jump-hint">{noteHint(note, documentTitle)}</span>
+		</>
 	);
 }
 

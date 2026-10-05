@@ -343,6 +343,23 @@ describe('the panel list', () => {
 		expect(props.onDelete).toHaveBeenCalledWith(note);
 	});
 
+	it('hides ＋メモ while an editor is open, so a save cannot be retargeted', () => {
+		const note = positioned({ body: 'being edited' });
+		renderPanel({ notes: [note], editor: { kind: 'editing', note } });
+		expect(screen.queryByTestId('rm-note-create')).toBeNull();
+		expect(screen.getByTestId('rm-note-editor')).toBeTruthy();
+	});
+
+	it('hides ＋メモ while a create is open, for the same reason', () => {
+		renderPanel({ notes: [], editor: { kind: 'creating' } });
+		expect(screen.queryByTestId('rm-note-create')).toBeNull();
+	});
+
+	it('brings ＋メモ back when the editor closes', () => {
+		renderPanel({ notes: [positioned({ body: 'x' })], editor: { kind: 'closed' } });
+		expect(screen.getByTestId('rm-note-create')).toBeTruthy();
+	});
+
 	it('reports the ask to create a note', () => {
 		const props = renderPanel({ notes: [] });
 		fireEvent.click(screen.getByTestId('rm-note-create'));

@@ -891,6 +891,38 @@ describe('an anchor survives a re-open', () => {
 		expect(repo.replaceNoteAnchor).not.toHaveBeenCalled();
 	});
 
+	it('keeps the list when one row’s write-back fails', async () => {
+		notes = [
+			stored({ body: 'first note', pageIndex: 1, anchor: STORED_ANCHOR }),
+			stored({ body: 'second note', pageIndex: 2, anchor: STORED_ANCHOR }),
+		];
+		// A rejected IndexedDB write on the second row. Left
+		// unhandled it would reject the `Promise.all` the load effect
+		// uses, and the reader would open the panel to an empty book
+		// they had written two notes in.
+		repo.replaceNoteAnchor.mockImplementation(async (id: string) => {
+			if (notes.find((note) => note.id === id)?.body === 'first note') {
+				throw new Error('IndexedDB write failed');
+			}
+			return true;
+		});
+		nextResolution = {
+			format: 'pdf',
+			page: asPageIndex(1),
+			freshness: 'fresh',
+			selectedText: 'the words',
+			display: { x: 0, y: 0, width: 1, height: 1 },
+			updatedAnchor: REFRESHED_ANCHOR,
+		};
+		renderReader();
+		await settle();
+		await openPanel();
+
+		const bodies = screen.getAllByTestId('rm-note-body').map((node) => node.textContent);
+		expect(bodies).toContain('first note');
+		expect(bodies).toContain('second note');
+	});
+
 	it('leaves a positioned note with no anchor alone', async () => {
 		notes = [stored({ body: 'about page 5', pageIndex: 5, anchor: null })];
 		renderReader();
