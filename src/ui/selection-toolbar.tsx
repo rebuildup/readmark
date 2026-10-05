@@ -194,6 +194,24 @@ export interface SelectionToolbarProps {
 	readonly highlightLabel: string;
 	readonly onHighlight: (snapshot: SelectionSnapshot) => void;
 	readonly onBookmark: (snapshot: SelectionSnapshot) => void;
+	/**
+	 * Write a note about *this* selection — which the caller turns
+	 * into a note on the selection's highlight, creating the highlight
+	 * if the words are not marked yet.
+	 *
+	 * A third button rather than a fourth mode of the highlight button
+	 * for the same reason the highlight button is a button: each of
+	 * these is a different thing the reader wants to do to a
+	 * selection, and folding "mark the words" and "write about the
+	 * words" into one control makes the reader choose the right
+	 * outcome before they know which they want.
+	 *
+	 * The label is not a prop because it does not toggle the way
+	 * `highlightLabel` does. Marking is a state the words can be in
+	 * and be taken out of; a note is written either way, and a second
+	 * note on a highlight is a second note rather than a replacement.
+	 */
+	readonly onNote: (snapshot: SelectionSnapshot) => void;
 }
 
 export function SelectionToolbar({
@@ -203,6 +221,7 @@ export function SelectionToolbar({
 	highlightLabel,
 	onHighlight,
 	onBookmark,
+	onNote,
 }: SelectionToolbarProps) {
 	const toolbarRef = useRef<HTMLDivElement | null>(null);
 	const [placement, setPlacement] = useState<Placement | null>(null);
@@ -294,6 +313,14 @@ export function SelectionToolbar({
 				onClick={() => onBookmark(snapshot)}
 			>
 				選択範囲を栞
+			</button>
+			<button
+				type="button"
+				className="rm-button"
+				data-testid="rm-selection-note"
+				onClick={() => onNote(snapshot)}
+			>
+				メモ
 			</button>
 		</div>
 	);

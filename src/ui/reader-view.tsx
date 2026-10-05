@@ -32,9 +32,9 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-
+import type { Anchor } from '../domain/annotation/index.ts';
 import type { DocumentId, SourceFingerprint } from '../domain/document.ts';
-import type { Bookmark, Highlight, PageIndex } from '../domain/reading-state.ts';
+import type { Bookmark, Highlight, Note, PageIndex } from '../domain/reading-state.ts';
 import { nextRotation, PDF_PAGE_CLASS, viewportSize } from '../reader/pdf/index.ts';
 import { currentPositionFrom, type PageExtent, type ScrollPosition } from '../reader/position.ts';
 import type {
@@ -50,9 +50,19 @@ import {
 	listHighlights,
 	replaceHighlightAnchor,
 } from '../storage/highlights-repo.ts';
+import {
+	addNote,
+	compareNotes,
+	deleteNote,
+	listNotes,
+	type NoteTarget,
+	replaceNoteAnchor,
+	updateNote,
+} from '../storage/notes-repo.ts';
 import { saveReadingPosition } from '../storage/reading-state-repo.ts';
 import { useUiStore } from '../stores/ui-store.ts';
 import { AddBookmarkDialog, BookmarkDeleteDialog, BookmarksPanel } from './bookmarks-panel.tsx';
+import { NoteDeleteDialog, type NoteEditorState, NotesPanel } from './notes-panel.tsx';
 import { Button } from './primitives/button.tsx';
 import { LibraryLink } from './primitives/library-link.tsx';
 import { jumpToPage } from './scroll-to-page.ts';
@@ -566,6 +576,20 @@ export function ReaderView({
 	 *  fresh open of the dialog so a previous failure does not
 	 *  reappear over a new attempt. */
 	const [bookmarkError, setBookmarkError] = useState<string | null>(null);
+	const [notes, setNotes] = useState<readonly Note[]>([]);
+	/** Which note the panel's editor is open on. `creating` carries no
+	 *  note because the *position* of a new note is the parent's
+	 *  business — a free one, or one on a highlight the reader just
+	 *  made — and the panel only needs to know that an editor is up. */
+	const [noteEditor, setNoteEditor] = useState<NoteEditorState>({ kind: 'closed' });
+	/** What a save writes. Set when the editor opens and cleared when
+	 *  it closes, so a save can never be aimed at a target the reader
+	 *  has since changed their mind about. */
+	const [pendingNote, setPendingNote] = useState<NoteTarget | null>(null);
+	const [pendingNoteDelete, setPendingNoteDelete] = useState<Note | null>(null);
+	/** Inline error for an open note editor. Cleared on each fresh
+	 *  open, for the same reason `bookmarkError` is. */
+	const [noteError, setNoteError] = useState<string | null>(null);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
 	// The sticky header, so the selection toolbar knows the one thing it
 	// can land underneath.
@@ -1147,6 +1171,91 @@ export function ReaderView({
 	}, [documentId, sourceFingerprint]);
 
 	/**
+	 * Refresh a note's stored anchor against the file in front of us.
+	 *
+	 *  This is the note half of the highlight recovery above, and it
+	 *  exists for the same reason: rects were measured against
+	 *  whichever copy of the file the reader had when they wrote the
+	 *  note, and the file in front of them now may lay the same words
+	 *  out differently. `ResolvedAnchor.updatedAnchor` is what
+	 *  recovery measured; somebody has to store it, and the reader
+	 *  cannot (ADR-0007 — `src/reader/` does not import storage).
+	 *
+	 *  Everything that can go wrong here keeps the note:
+	 *   - a `null` resolution says this reader cannot find the words
+	 *     *in this file*, which is a fact about a file the reader may
+	 *     not hold the whole of. Deleting a reader's writing over it
+	 *     is the one outcome ADR-0007 rules out for highlights, and
+	 *     it is worse for a note, because a note is words the reader
+	 *     typed rather than a colour band.
+	 *   - a page disagreement between the row and the resolution is
+	 *     an integrity failure, detectable without reading the
+	 *     payload. Nothing is written and the note stays.
+	 *   - a write-back that reports `false` means the repository
+	 *     knows the row is gone. Nothing is resurrected from a list
+	 *     that is already stale.
+	 *
+	 *  Best-effort by design: it returns nothing because a note that
+	 *  could not be refreshed is still a note the reader can read,
+	 *  edit and jump to.
+	 */
+	const recoverNoteAnchor = useCallback(
+		async (note: Note): Promise<void> => {
+			if (note.kind !== 'positioned' || note.anchor === null) return;
+			const resolved = await handle.resolveAnchor(note.anchor).catch((error: unknown) => {
+				// The id, never the body: a note is the reader's own
+				// writing, and a stack trace is not a place for it.
+				console.error('readmark: could not resolve a note anchor', {
+					id: note.id,
+					pageIndex: note.pageIndex,
+					error,
+				});
+				return null;
+			});
+			if (resolved === null) return;
+			if (resolved.page !== note.pageIndex) {
+				console.error('readmark: note page mismatch', {
+					id: note.id,
+					storedPage: note.pageIndex,
+					resolvedPage: resolved.page,
+				});
+				return;
+			}
+			if (resolved.updatedAnchor === null) return;
+			await replaceNoteAnchor(note.id, resolved.updatedAnchor);
+		},
+		[handle],
+	);
+
+	// The note list is read once per open and reconciled locally after
+	// every add or delete, exactly as the bookmark list is: opening the
+	// panel is then instant, and a second tab's changes arrive the next
+	// time the document is opened. A live cross-tab sync is out of
+	// scope.
+	useEffect(() => {
+		let cancelled = false;
+		void listNotes({ documentId, sourceFingerprint })
+			.then(async (rows) => {
+				// Recovery is per row and independent: one note whose
+				// words cannot be found must not hold up the list the
+				// reader is waiting for. `Promise.all` settles
+				// everything before the first is shown, which is the
+				// price of not showing a note whose anchor has not
+				// been refreshed yet.
+				await Promise.all(rows.map((row) => recoverNoteAnchor(row)));
+				if (!cancelled) setNotes(rows);
+			})
+			.catch((error: unknown) => {
+				// A failed read leaves the panel empty rather than
+				// blocking the reader; the notes are still on disk.
+				console.error('readmark: could not read notes', error);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [documentId, recoverNoteAnchor, sourceFingerprint]);
+
+	/**
 	 * The highlight the reader's current selection already has, if any.
 	 *
 	 *  Matched on `selectedText`, which is a generic field — comparing
@@ -1308,23 +1417,38 @@ export function ReaderView({
 		[documentId, pendingAdd, setSidePanel, sourceFingerprint],
 	);
 
-	const handleJump = useCallback(
-		async (bookmark: Bookmark) => {
+	/**
+	 * Take the reader to a place: a page, and optionally the words on
+	 * it and how far down.
+	 *
+	 *  Shared by every jump in the reader, because the parts that are
+	 *  easy to get wrong are not per-annotation-type: resolving the
+	 *  anchor, retiring the jump in flight, and refusing to leave the
+	 *  document. A note jump that grew its own copy of this is how the
+	 *  two drift.
+	 *
+	 *  Resolving the anchor confirms the words are still where the
+	 *  reader left them, and picks the page they belong to now (the
+	 *  file may have grown, or the mark outlived the original page).
+	 *  A target with no anchor is a page pin and goes straight to the
+	 *  jump.
+	 *
+	 *  A resolver failure is not a refusal: the target stays. A stored
+	 *  anchor that the reader cannot find in *this* file may yet be the
+	 *  place they were looking at in the file they had when they wrote
+	 *  it.
+	 */
+	const jumpToPlace = useCallback(
+		async (target: {
+			readonly pageIndex: PageIndex;
+			readonly anchor: Anchor | null;
+			readonly position: Bookmark['position'];
+		}) => {
 			const scroller = scrollRef.current;
 			if (scroller === null) return;
-			// Selection bookmarks carry an anchor; resolving it confirms
-			// the words are still where the reader left them, and picks
-			// the page they belong to now (the file may have grown, or
-			// the mark outlived the original page). A page pin has no
-			// anchor to resolve and goes straight to the jump.
-			//
-			// A resolver failure is not a refusal: the row stays. A
-			// stored anchor that the reader cannot find in *this* file
-			// may yet be the row the reader was looking at in the file
-			// they had when they wrote it.
-			let targetPage = bookmark.pageIndex;
-			if (bookmark.anchor !== null) {
-				const resolved = await handle.resolveAnchor(bookmark.anchor).catch(() => null);
+			let targetPage = target.pageIndex;
+			if (target.anchor !== null) {
+				const resolved = await handle.resolveAnchor(target.anchor).catch(() => null);
 				if (resolved !== null) {
 					targetPage = resolved.page;
 				}
@@ -1340,14 +1464,215 @@ export function ReaderView({
 				// A mark with no usable stored offset jumps to the top of
 				// its page, which is the honest thing to do with
 				// "somewhere on this page".
-				position: storedOffset(bookmark.position),
+				position: storedOffset(target.position),
 				pageCount,
 				measuredHeight: (pageIndex) => footprintsRef.current.get(pageIndex)?.height,
 				shouldAbort: () => takeoverCountRef.current !== takeover,
 			});
 		},
-		[pageCount, registerTakeover],
+		// `handle.resolveAnchor` rather than `handle`: the resolver is
+		// the only part of the handle this reaches for, and naming it
+		// keeps the callback from being re-created on every open.
+		[handle.resolveAnchor, pageCount, registerTakeover],
 	);
+
+	const handleJump = useCallback(
+		async (bookmark: Bookmark) => {
+			await jumpToPlace(bookmark);
+		},
+		[jumpToPlace],
+	);
+
+	/**
+	 * Take the reader to what a note is about.
+	 *
+	 *  A note on a highlight jumps to the *highlight*, not to the
+	 *  note's own copy of the anchor. The highlight is the row the
+	 *  reader pointed at, and it is the one whose anchor is
+	 *  re-resolved on every open; the note's copy is a snapshot taken
+	 *  when the note was written, and a note edited months later
+	 *  should still land on the words rather than on where they used
+	 *  to be. A dangling `highlightId` — a highlight removed in
+	 *  another tab — falls back to the note's own position rather
+	 *  than refusing, because the note is still about a place.
+	 */
+	const handleJumpToNote = useCallback(
+		async (note: Note) => {
+			if (note.highlightId !== null) {
+				const highlight = highlights.find((row) => row.row.id === note.highlightId);
+				if (highlight !== undefined) {
+					await jumpToPlace({
+						pageIndex: highlight.row.pageIndex,
+						anchor: highlight.row.anchor,
+						position: null,
+					});
+					return;
+				}
+			}
+			if (note.kind === 'positioned') {
+				await jumpToPlace({ pageIndex: note.pageIndex, anchor: note.anchor, position: null });
+			}
+		},
+		[highlights, jumpToPlace],
+	);
+
+	/**
+	 * Write a note about the words the reader just selected.
+	 *
+	 *  A note on a highlight is a note *about something they marked*,
+	 *  so the mark has to exist. Re-using an existing one is the same
+	 *  text match the highlight button uses; creating one when the
+	 *  words are unmarked is what makes this button work on a plain
+	 *  selection, and it is not a surprise: the reader asked for a
+	 *  note about these words, and a note with nothing to point at
+	 *  would be a note about nothing.
+	 *
+	 *  The editor opens in the notes panel rather than in a dialog
+	 *  over the page. A note lives in that list for its whole life, so
+	 *  that is where it should be written — and opening the panel is
+	 *  how the reader finds the note they just made.
+	 */
+	const handleNoteSelection = useCallback(
+		async (snapshot: SelectionSnapshot) => {
+			setActionError(null);
+			try {
+				let highlight = selectionHighlight(snapshot);
+				if (highlight === null) {
+					const page = await handle.page(snapshot.page);
+					const created = await page.createAnchorFromSelection(snapshot.selection);
+					if (created === null) return;
+					const added = await addHighlight({
+						documentId,
+						sourceFingerprint,
+						pageIndex: snapshot.page,
+						anchor: created.anchor,
+						selectedText: created.selectedText,
+					});
+					// The same reconciliation the highlight button
+					// does, through the same gates: the new mark is
+					// resolved and painted on the same terms as one
+					// that was already stored.
+					const resolvedRow = await resolveRow(added);
+					setHighlights((previous) => [...previous, resolvedRow]);
+					highlight = added;
+				}
+				setPendingNote({
+					kind: 'positioned',
+					documentId,
+					sourceFingerprint,
+					pageIndex: snapshot.page,
+					anchor: highlight.anchor,
+					highlightId: highlight.id,
+				});
+				setNoteError(null);
+				setNoteEditor({ kind: 'creating' });
+				setSidePanel('notes');
+			} catch (error: unknown) {
+				console.error('readmark: could not open the note editor for a selection', error);
+				setActionError('メモを準備できませんでした。もう一度お試しください。');
+			}
+		},
+		[documentId, handle, resolveRow, selectionHighlight, setSidePanel, sourceFingerprint],
+	);
+
+	/** Open the editor for a free note — one about the book rather
+	 *  than about a place on a page. */
+	const handleStartCreateNote = useCallback(() => {
+		setPendingNote({ kind: 'free', documentId });
+		setNoteError(null);
+		setNoteEditor({ kind: 'creating' });
+	}, [documentId]);
+
+	const handleStartEditNote = useCallback((note: Note) => {
+		setPendingNote(null);
+		setNoteError(null);
+		setNoteEditor({ kind: 'editing', note });
+	}, []);
+
+	const handleCancelNoteEditor = useCallback(() => {
+		setPendingNote(null);
+		setNoteError(null);
+		setNoteEditor({ kind: 'closed' });
+	}, []);
+
+	/**
+	 * Write what the editor is holding.
+	 *
+	 *  A create writes `pendingNote`'s position; an edit writes the
+	 *  body and nothing else, so an edit can never move a note to a
+	 *  different page or page of a different book.
+	 */
+	const handleSubmitNote = useCallback(
+		async (body: string) => {
+			setNoteError(null);
+			try {
+				if (noteEditor.kind === 'editing') {
+					const saved = await updateNote(noteEditor.note.id, body);
+					// `null` means the row was not there. The list is
+					// already stale in that case, and keeping the note
+					// on screen would show writing that is not stored.
+					if (saved === null) {
+						setNotes((previous) => previous.filter((row) => row.id !== noteEditor.note.id));
+					} else {
+						setNotes((previous) =>
+							previous.map((row) => (row.id === saved.id ? saved : row)).sort(compareNotes),
+						);
+					}
+					setNoteEditor({ kind: 'closed' });
+					return;
+				}
+				const target = pendingNote;
+				if (target === null) {
+					// The editor was opened by a path that set no
+					// target. Closing it is the honest response: there
+					// is nothing to save, and leaving it open over a
+					// button that does nothing is worse.
+					setNoteEditor({ kind: 'closed' });
+					return;
+				}
+				// Spreading a `NoteTarget` distributes over the union, so
+				// the argument is `NewFreeNote | NewPositionedNote` — a
+				// target can only ever be saved as the kind of note it
+				// was opened for.
+				const saved = await addNote({ ...target, body });
+				setNotes((previous) => [...previous, saved].sort(compareNotes));
+				setPendingNote(null);
+				setNoteEditor({ kind: 'closed' });
+				setSidePanel('notes');
+			} catch (error: unknown) {
+				// Left open with an inline message: the reader wrote
+				// something, and a silent close throws it away.
+				// The body is not in the log — it is the reader's own
+				// writing, and a stack trace is not a place for it.
+				console.error('readmark: could not save a note', error);
+				setNoteError('メモを保存できませんでした。もう一度お試しください。');
+			}
+		},
+		[noteEditor, pendingNote, setSidePanel],
+	);
+
+	const handleConfirmDeleteNote = useCallback(async () => {
+		const target = pendingNoteDelete;
+		if (target === null) return;
+		setPendingNoteDelete(null);
+		try {
+			// `false` means the row was already gone. Either way there
+			// is nothing on disk to reconcile with, so the row leaves
+			// the list in both cases.
+			await deleteNote(target.id);
+			setNotes((previous) => previous.filter((row) => row.id !== target.id));
+			// An editor open on the note that just went would save into
+			// nothing.
+			setNoteEditor((previous) =>
+				previous.kind === 'editing' && previous.note.id === target.id
+					? { kind: 'closed' }
+					: previous,
+			);
+		} catch (error: unknown) {
+			console.error('readmark: could not delete a note', { id: target.id, error });
+			setActionError('メモを削除できませんでした。もう一度お試しください。');
+		}
+	}, [pendingNoteDelete]);
 
 	const handleConfirmDelete = useCallback(async () => {
 		if (pendingDelete === null) return;
@@ -1443,6 +1768,14 @@ export function ReaderView({
 					>
 						栞
 					</Button>
+					<Button
+						variant="ghost"
+						onClick={() => setSidePanel(sidePanel === 'notes' ? 'none' : 'notes')}
+						data-testid="rm-toggle-notes"
+						aria-pressed={sidePanel === 'notes'}
+					>
+						メモ
+					</Button>
 					<span className="rm-reader-zoom" data-testid="rm-reader-page-indicator">
 						{currentPage === null ? `- / ${pageCount}` : `${currentPage} / ${pageCount}`}
 					</span>
@@ -1462,6 +1795,7 @@ export function ReaderView({
 				}
 				onHighlight={(snapshot) => void handleHighlightSelection(snapshot)}
 				onBookmark={(snapshot) => void handleBookmarkSelection(snapshot)}
+				onNote={(snapshot) => void handleNoteSelection(snapshot)}
 			/>
 			{actionError !== null && (
 				<p
@@ -1480,6 +1814,20 @@ export function ReaderView({
 					onDelete={(bookmark) => setPendingDelete(bookmark)}
 				/>
 			)}
+			{sidePanel === 'notes' && (
+				<NotesPanel
+					notes={notes}
+					documentTitle={title}
+					editor={noteEditor}
+					error={noteError}
+					onStartCreate={handleStartCreateNote}
+					onEdit={handleStartEditNote}
+					onCancelEdit={handleCancelNoteEditor}
+					onSubmit={(body) => void handleSubmitNote(body)}
+					onJump={(note) => void handleJumpToNote(note)}
+					onDelete={(note) => setPendingNoteDelete(note)}
+				/>
+			)}
 			{pendingAdd !== null && (
 				<AddBookmarkDialog
 					pageIndex={pendingAdd.pageIndex}
@@ -1493,6 +1841,13 @@ export function ReaderView({
 					label={`${pendingDelete.pageIndex} ページ`}
 					onConfirm={() => void handleConfirmDelete()}
 					onCancel={() => setPendingDelete(null)}
+				/>
+			)}
+			{pendingNoteDelete !== null && (
+				<NoteDeleteDialog
+					note={pendingNoteDelete}
+					onConfirm={() => void handleConfirmDeleteNote()}
+					onCancel={() => setPendingNoteDelete(null)}
 				/>
 			)}
 
