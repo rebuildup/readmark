@@ -32,24 +32,56 @@ import type { BookmarkScope } from './scope.ts';
  *  without changing their call sites. */
 export type { BookmarkScope } from './scope.ts';
 
-/** Every bookmark in a source, oldest first. Uses the compound
- *  `[documentId+sourceFingerprint+pageIndex]` index plus an in-memory
- *  sort by `createdAt` so the panel reads as a history. */
+/**
+ * The one order every bookmark list is returned in, and the reason it
+ * is a *total* order.
+ *
+ * `createdAt` first, because the panel is a history of where the
+ * reader has been. It is a millisecond clock, so two marks made inside
+ * the same tick tie — and a tie hands the ordering to whatever row
+ * order the storage engine happened to walk, which is not a contract
+ * anything may rely on. The panel renders each mark's position as an
+ * ordinal (`bookmarkLabels` in `src/ui/bookmarks-panel.tsx`), so an
+ * order that moved between two reads renumbers rows a reader had
+ * already learned.
+ *
+ * `id` breaks the tie. It is the primary key, so it is unique and
+ * never rewritten: it makes the order total, and because it is
+ * *stored*, the same saved state returns the same order on every read
+ * — this session, the next one, another device. A `id` is a v4 UUID
+ * and carries no time, so this does not recover which of two marks
+ * the reader made first; nothing that is stored could. It only stops
+ * the list reshuffling, which is the guarantee the panel actually
+ * needs. See Issue #32.
+ *
+ * Compared as UTF-16 code units rather than with `localeCompare`: a
+ * locale-sensitive comparison would make a *stored* order depend on
+ * the reader's ICU settings, which is the same instability in a
+ * different costume.
+ *
+ * One comparator, shared by the whole-source read and the page-scoped
+ * one, so a reader who jumps from the panel to the painter cannot see
+ * two different orders for the same rows.
+ */
+function compareBookmarksByCreation(a: Bookmark, b: Bookmark): number {
+	if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+	return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/** Every bookmark in a source, oldest first, ties broken on `id`.
+ *  A scoped read plus an in-memory sort by
+ *  {@link compareBookmarksByCreation}, so the panel reads as a
+ *  history. */
 export async function listBookmarks(scope: BookmarkScope): Promise<readonly Bookmark[]> {
 	const rows = await getDb()
 		.bookmarks.where('[documentId+sourceFingerprint]')
 		.equals([scope.documentId, scope.sourceFingerprint])
 		.toArray();
-	// Tie-break on `id` so two bookmarks with the same millisecond
-	// `createdAt` (or a clock that has jumped) come back in the same
-	// order on every read. A panel that re-renders is a panel that
-	// flickers otherwise.
-	return [...rows].sort(
-		(a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
-	);
+	return [...rows].sort(compareBookmarksByCreation);
 }
 
-/** Bookmarks on one page, oldest first. Hits the
+/** Bookmarks on one page, oldest first, ties broken on `id` — the
+ *  same order {@link listBookmarks} returns. Hits the
  *  `[documentId+sourceFingerprint+pageIndex]` compound index directly
  *  so the painter's query is a single indexed read. */
 export async function listBookmarksOnPage(
@@ -60,9 +92,7 @@ export async function listBookmarksOnPage(
 		.bookmarks.where('[documentId+sourceFingerprint+pageIndex]')
 		.equals([scope.documentId, scope.sourceFingerprint, pageIndex])
 		.toArray();
-	return [...rows].sort(
-		(a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
-	);
+	return [...rows].sort(compareBookmarksByCreation);
 }
 
 /** What the caller supplies to mark a place. The generated fields

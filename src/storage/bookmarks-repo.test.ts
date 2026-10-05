@@ -21,11 +21,86 @@ import { asPageIndex } from '../domain/reading-state.ts';
 const rows = new Map<string, Record<string, unknown>>();
 let sequence = 0;
 
+/**
+ * The order a read hands rows back in.
+ *
+ * IndexedDB promises the *set* of rows a query matches; it does not
+ * promise the order it walks them. A scan follows whichever index the
+ * engine picked, and that order changes with compaction, with the
+ * index chosen, and between a fresh read and a re-read. So the fake
+ * takes its order from here rather than from the insertion order a
+ * `Map` happens to iterate in.
+ *
+ * That distinction is the whole point: with a `Map`, "read it twice,
+ * get the same order" is true by construction, so an assertion built
+ * on it passes whether or not the repository sorted anything. Reading
+ * the same rows back through two different orders and getting one
+ * answer can only mean the repository decided it.
+ */
+type ReadOrder = 'inserted' | 'byId' | 'reverseInserted';
+
+let readOrder: ReadOrder = 'inserted';
+
+function setReadOrder(order: ReadOrder): void {
+	readOrder = order;
+}
+
+/** Ascending comparison of two ids, as UTF-16 code units — the same
+ *  rule the repository's comparator uses, and deliberately *not*
+ *  `localeCompare`, whose result depends on the ambient locale. */
+function compareIds(a: unknown, b: unknown): number {
+	const left = String(a);
+	const right = String(b);
+	if (left === right) return 0;
+	return left < right ? -1 : 1;
+}
+
+/** The matching rows, in the order the current read hands them over. */
+function readMatching(tuple: readonly unknown[], segments: readonly string[], index: string) {
+	const matched = Array.from(rows.values()).filter((row) =>
+		tuple.every((v, i) => row[segments[i] ?? index] === v),
+	);
+	if (readOrder === 'byId') {
+		return matched.sort((a, b) => compareIds(a.id, b.id));
+	}
+	if (readOrder === 'reverseInserted') return matched.reverse();
+	return matched;
+}
+
+/**
+ * The ids the current read order would hand back for {@link SCOPE},
+ * unsorted by the repository.
+ *
+ * Test-only, and the reason the ordering tests below can be trusted
+ * not to go stale: it lets a test assert that the storage order it is
+ * reacting to is genuinely *different* from the order the repository
+ * returned. A fake that stopped varying would make every "stable
+ * across reads" assertion pass for free, which is exactly how the
+ * tie-break came to be untested in the first place.
+ */
+function storageOrderForScope(): readonly string[] {
+	return readMatching(
+		[SCOPE.documentId, SCOPE.sourceFingerprint],
+		['documentId', 'sourceFingerprint'],
+		'[documentId+sourceFingerprint]',
+	).map((row) => String(row.id));
+}
+
+/** Ids a test wants the next `addBookmark` calls to receive, in order.
+ *  Anything past the end falls back to the sequential default, so a
+ *  test can pin only the ids its ordering assertion depends on. */
+let queuedIds: string[] = [];
+
+function useIds(...ids: string[]): void {
+	queuedIds = [...ids];
+}
+
 /** A `crypto.randomUUID` that is stable, so ids can be asserted. */
 function useDeterministicIds(): void {
 	vi.stubGlobal('crypto', {
 		...globalThis.crypto,
-		randomUUID: () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, '0')}`,
+		randomUUID: () =>
+			queuedIds.shift() ?? `00000000-0000-4000-8000-${String(++sequence).padStart(12, '0')}`,
 	});
 }
 
@@ -47,21 +122,16 @@ vi.mock('./db.ts', () => {
 						return {
 							filter: (predicate: (row: Record<string, unknown>) => boolean) => ({
 								async sortBy(key: string) {
-									return Array.from(rows.values())
-										.filter((row) => tuple.every((v, i) => row[segments[i] ?? index] === v))
+									return readMatching(tuple, segments, index)
 										.filter(predicate)
 										.sort((a, b) => Number(a[key]) - Number(b[key]));
 								},
 								async toArray() {
-									return Array.from(rows.values())
-										.filter((row) => tuple.every((v, i) => row[segments[i] ?? index] === v))
-										.filter(predicate);
+									return readMatching(tuple, segments, index).filter(predicate);
 								},
 							}),
 							async toArray() {
-								return Array.from(rows.values()).filter((row) =>
-									tuple.every((v, i) => row[segments[i] ?? index] === v),
-								);
+								return readMatching(tuple, segments, index);
 							},
 						};
 					},
@@ -104,9 +174,25 @@ const DOC_B = asDocumentId('00000000-0000-4000-8000-00000000000b');
 const FINGERPRINT_A = asSourceFingerprint('a'.repeat(64));
 const FINGERPRINT_B = asSourceFingerprint('b'.repeat(64));
 
+const SCOPE = { documentId: DOC_A, sourceFingerprint: FINGERPRINT_A };
+
+/** Bookmark ids the ordering tests pin, in ascending id order. They
+ *  are separate from the sequential default so a test can hand them
+ *  out in any sequence — which is how a tie-break becomes testable:
+ *  ids that run *against* the write order make "the repository sorted
+ *  this" and "the storage happened to return it sorted" two different
+ *  answers, and only one of them can pass. */
+const ID_0 = '00000000-0000-4000-8000-000000000000';
+const ID_1 = '00000000-0000-4000-8000-000000000001';
+const ID_2 = '00000000-0000-4000-8000-000000000002';
+const ID_3 = '00000000-0000-4000-8000-000000000003';
+const ID_9 = '00000000-0000-4000-8000-000000000009';
+
 beforeEach(() => {
 	rows.clear();
 	sequence = 0;
+	queuedIds = [];
+	readOrder = 'inserted';
 	useDeterministicIds();
 	vi.unstubAllGlobals();
 	useDeterministicIds();
@@ -208,24 +294,163 @@ describe('listBookmarks', () => {
 	});
 
 	it('breaks ties on id, so two marks in the same millisecond do not flicker', async () => {
-		const a = await add({ pageIndex: 5, createdAt: 1000 });
-		const b = await add({ pageIndex: 5, createdAt: 1000 });
-		const c = await add({ pageIndex: 5, createdAt: 1000 });
+		// The ids here run *against* the order the rows are written in,
+		// and that is the only reason this test can fail. A tie-break
+		// that the repository did not apply would leave the read order
+		// standing, and the read order is `ID_3, ID_1, ID_2`.
+		useIds(ID_3, ID_1, ID_2);
+		await add({ pageIndex: 5, createdAt: 1000 });
+		await add({ pageIndex: 5, createdAt: 1000 });
+		await add({ pageIndex: 5, createdAt: 1000 });
 
-		const scope = { documentId: DOC_A, sourceFingerprint: FINGERPRINT_A };
-		const first = await listBookmarks(scope);
-		const second = await listBookmarks(scope);
-		// A panel that re-renders is a panel that flickers otherwise:
-		// an order that changes between two reads is an order that
-		// means nothing to the reader.
-		expect(first.map((row) => row.id)).toEqual(second.map((row) => row.id));
-		expect([first[0]?.id, first[1]?.id, first[2]?.id]).toEqual([a.id, b.id, c.id]);
+		const listed = await listBookmarks(SCOPE);
+		expect(listed.map((row) => row.id)).toEqual([ID_1, ID_2, ID_3]);
 	});
 
 	it('is empty for a source that was never marked', async () => {
 		expect(await listBookmarks({ documentId: DOC_A, sourceFingerprint: FINGERPRINT_A })).toEqual(
 			[],
 		);
+	});
+
+	/**
+	 * Issue #32 — the order is a total order, and it is the *stored*
+	 * order.
+	 *
+	 * `createdAt` is a millisecond clock, so two marks made inside one
+	 * tick tie. Without a tie-break the list came back in whatever row
+	 * order the engine walked, and the panel — which renders each
+	 * mark's position as an ordinal — renumbered itself between reads.
+	 *
+	 * Every test here hands out ids in an order that disagrees with
+	 * the order the rows are written in, and checks the answer against
+	 * a *named* expectation rather than against a second read. That
+	 * combination is what makes them able to fail: an earlier version
+	 * of this suite compared two reads of a `Map`, which returns
+	 * insertion order both times, so it passed with the tie-break
+	 * deleted outright.
+	 */
+	describe('a total order for tied marks (Issue #32)', () => {
+		it('orders tied marks by id, not by the order the rows were written in', async () => {
+			useIds(ID_3, ID_1, ID_2);
+			await add({ pageIndex: 5, createdAt: 1000 });
+			await add({ pageIndex: 5, createdAt: 1000 });
+			await add({ pageIndex: 5, createdAt: 1000 });
+
+			// Written `ID_3, ID_1, ID_2`; the answer is `ID_1, ID_2, ID_3`.
+			// Anything that does not break the tie returns the first.
+			expect(storageOrderForScope()).toEqual([ID_3, ID_1, ID_2]);
+			expect((await listBookmarks(SCOPE)).map((row) => row.id)).toEqual([ID_1, ID_2, ID_3]);
+		});
+
+		it('gives the same order back when a fresh read walks the rows differently', async () => {
+			useIds(ID_3, ID_1, ID_2);
+			await add({ pageIndex: 5, createdAt: 1000 });
+			await add({ pageIndex: 5, createdAt: 1000 });
+			await add({ pageIndex: 5, createdAt: 1000 });
+
+			// Three reads of the same saved state. IndexedDB does not
+			// promise the order it walks rows in, so the answer must
+			// come from the sort and not from the read. The first and
+			// third of these are reverses of one another, so a pass
+			// here cannot be an artefact of a stable read.
+			setReadOrder('inserted');
+			const asWritten = await listBookmarks(SCOPE);
+			setReadOrder('reverseInserted');
+			const reversed = await listBookmarks(SCOPE);
+			setReadOrder('byId');
+			const viaKeyWalk = await listBookmarks(SCOPE);
+
+			expect(storageOrderForScope()).toEqual([ID_1, ID_2, ID_3]);
+			const ids = asWritten.map((row) => row.id);
+			expect(ids).toEqual([ID_1, ID_2, ID_3]);
+			expect(reversed.map((row) => row.id)).toEqual(ids);
+			expect(viaKeyWalk.map((row) => row.id)).toEqual(ids);
+		});
+
+		it('keeps createdAt the deciding key, even when the ids point the other way', async () => {
+			// Written `ID_2, ID_1, ID_3` with the clock running the other
+			// way, so the newest mark carries the *lowest* id of the
+			// three. An id-first sort would return the rows in the
+			// order they were written; only `createdAt` puts ID_3 first
+			// and ID_2 last.
+			useIds(ID_2, ID_1, ID_3);
+			await add({ pageIndex: 5, createdAt: 3000 });
+			await add({ pageIndex: 5, createdAt: 2000 });
+			await add({ pageIndex: 5, createdAt: 1000 });
+
+			expect(storageOrderForScope()).toEqual([ID_2, ID_1, ID_3]);
+			const listed = await listBookmarks(SCOPE);
+			expect(listed.map((row) => row.createdAt)).toEqual([1000, 2000, 3000]);
+			expect(listed.map((row) => row.id)).toEqual([ID_3, ID_1, ID_2]);
+		});
+
+		it('leaves the ties alone and puts the later mark after them', async () => {
+			useIds(ID_3, ID_1, ID_2);
+			await add({ pageIndex: 5, createdAt: 1000 });
+			await add({ pageIndex: 5, createdAt: 1000 });
+			await add({ pageIndex: 5, createdAt: 1000 });
+			// The new mark is one millisecond later and carries the
+			// *lowest* id of the four, so "sorted by id" would put it
+			// first and "newest last" is a real claim about
+			// `createdAt`, not a coincidence.
+			useIds(ID_0);
+			const later = await add({ pageIndex: 5, createdAt: 2000 });
+
+			const listed = await listBookmarks(SCOPE);
+			// The tie among the first three is settled by id and is
+			// untouched by the new arrival.
+			expect(listed.map((row) => row.id)).toEqual([ID_1, ID_2, ID_3, later.id]);
+			expect(later.id).toBe(ID_0);
+			expect(listed.map((row) => row.createdAt)).toEqual([1000, 1000, 1000, 2000]);
+		});
+
+		it('slots a mark that ties into its id position, and only moves what it must', async () => {
+			useIds(ID_1, ID_2);
+			await add({ pageIndex: 5, createdAt: 1000 });
+			await add({ pageIndex: 5, createdAt: 1000 });
+			expect((await listBookmarks(SCOPE)).map((row) => row.id)).toEqual([ID_1, ID_2]);
+
+			// A third mark in the same millisecond, with an id *below*
+			// both. It takes the first slot — the specified position is
+			// "wherever its id sorts", not "at the end" — and it pushes
+			// the two existing marks down by exactly one.
+			useIds(ID_0);
+			await add({ pageIndex: 5, createdAt: 1000 });
+			const listed = await listBookmarks(SCOPE);
+			expect(listed.map((row) => row.id)).toEqual([ID_0, ID_1, ID_2]);
+			// The pair that was already there keeps its relative order,
+			// which is the part a reader has already memorised from the
+			// panel's ordinals.
+			expect(listed.slice(1).map((row) => row.id)).toEqual([ID_1, ID_2]);
+
+			// And a tie with an id *above* both appends instead, so the
+			// two marks already on the page do not move at all.
+			useIds(ID_9);
+			const high = await add({ pageIndex: 5, createdAt: 1000 });
+			const afterHigh = await listBookmarks(SCOPE);
+			expect(afterHigh.map((row) => row.id)).toEqual([ID_0, ID_1, ID_2, high.id]);
+			expect(afterHigh.slice(0, 3).map((row) => row.id)).toEqual([ID_0, ID_1, ID_2]);
+		});
+
+		it('numbers tied marks the same way on every read, which is what the panel shows', async () => {
+			// The panel's ordinal comes from list position
+			// (`bookmarkLabels`, src/ui/bookmarks-panel.tsx), so the
+			// number a reader sees is this order and nothing else.
+			useIds(ID_3, ID_1, ID_2);
+			await add({ pageIndex: 5, createdAt: 1000 });
+			await add({ pageIndex: 5, createdAt: 1000 });
+			await add({ pageIndex: 5, createdAt: 1000 });
+
+			const ordinals = async () => {
+				setReadOrder(readOrder === 'inserted' ? 'reverseInserted' : 'inserted');
+				return (await listBookmarks(SCOPE)).map((row) => row.id);
+			};
+			// `ordinals()` flips the read order on every call, so the
+			// two calls below are not reading the rows the same way.
+			expect(await ordinals()).toEqual([ID_1, ID_2, ID_3]);
+			expect(await ordinals()).toEqual([ID_1, ID_2, ID_3]);
+		});
 	});
 });
 
@@ -240,6 +465,29 @@ describe('listBookmarksOnPage', () => {
 			asPageIndex(2),
 		);
 		expect(onPageTwo.map((row) => row.createdAt)).toEqual([100, 300]);
+	});
+
+	it('breaks ties on id in the same order the whole-source list does', async () => {
+		// Issue #32: the page-scoped read is a different query, so
+		// "inherits the same order" has to be true of the code and not
+		// of a copy that happens to agree today.
+		useIds(ID_3, ID_1, ID_2);
+		await add({ pageIndex: 5, createdAt: 1000 });
+		await add({ pageIndex: 5, createdAt: 1000 });
+		await add({ pageIndex: 5, createdAt: 1000 });
+		// A fourth mark on another page, sharing the millisecond and
+		// sorting first by id — it must not appear, and it must not
+		// change the order of the three.
+		useIds(ID_0);
+		await add({ pageIndex: 6, createdAt: 1000 });
+
+		setReadOrder('inserted');
+		const whole = await listBookmarks(SCOPE);
+		setReadOrder('reverseInserted');
+		const onPage = await listBookmarksOnPage(SCOPE, asPageIndex(5));
+
+		expect(whole.map((row) => row.id)).toEqual([ID_0, ID_1, ID_2, ID_3]);
+		expect(onPage.map((row) => row.id)).toEqual([ID_1, ID_2, ID_3]);
 	});
 });
 
