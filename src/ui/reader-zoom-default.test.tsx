@@ -93,18 +93,29 @@ let scrollerWidthPx = SCROLLER_WIDTH_PX;
 
 // --- the fakes ---------------------------------------------------------
 
-/** Live ResizeObserver callbacks, so a test can resize the container
- *  the way a browser does: change the measured width, then notify. */
-const liveResizeCallbacks = new Set<ResizeObserverCallback>();
+/** Live ResizeObservers, so a test can resize the container the way a
+ *  browser does: change the measured width, then notify. Holding the
+ *  instances rather than bare callbacks keeps the notification properly
+ *  typed — a ResizeObserverCallback is handed the observer that fired. */
+const liveResizeObservers = new Set<FakeResizeObserver>();
 
 class FakeResizeObserver {
-	constructor(private readonly callback: ResizeObserverCallback) {
-		liveResizeCallbacks.add(callback);
+	private readonly callback: ResizeObserverCallback;
+
+	constructor(callback: ResizeObserverCallback) {
+		this.callback = callback;
+		liveResizeObservers.add(this);
 	}
+
+	/** Runs the callback the way the browser does, as a type. */
+	notify(): void {
+		this.callback([], this as unknown as ResizeObserver);
+	}
+
 	observe(): void {}
 	unobserve(): void {}
 	disconnect(): void {
-		liveResizeCallbacks.delete(this.callback);
+		liveResizeObservers.delete(this);
 	}
 }
 
@@ -180,7 +191,7 @@ afterAll(() => {
 beforeEach(() => {
 	vi.clearAllMocks();
 	scrollerWidthPx = SCROLLER_WIDTH_PX;
-	liveResizeCallbacks.clear();
+	liveResizeObservers.clear();
 	// A fresh profile. Any test that wants an existing preference files
 	// one itself, so no test can pass on a neighbour's leftover.
 	useUiStore.setState({ readerZoom: {} });
@@ -195,7 +206,7 @@ afterEach(() => {
 async function resizeContainerTo(widthPx: number): Promise<void> {
 	scrollerWidthPx = widthPx;
 	await act(async () => {
-		for (const callback of [...liveResizeCallbacks]) callback([], null as never);
+		for (const observer of [...liveResizeObservers]) observer.notify();
 	});
 }
 
@@ -314,7 +325,7 @@ describe('a zoom the reader already chose', () => {
 		expect(chosen).toBeGreaterThan(Math.round(READER_CHOICE * 100));
 
 		first.unmount();
-		liveResizeCallbacks.clear();
+		liveResizeObservers.clear();
 		renderReader();
 
 		await waitFor(() => {

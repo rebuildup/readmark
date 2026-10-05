@@ -769,15 +769,11 @@ export function ReaderView({
 	//
 	// Seeded from the store, so a choice made BEFORE this mount — the
 	// reader left the document and came back — already counts as theirs
-	// and the fit never gets a chance to overwrite it.
+	// and the fit never gets a chance to overwrite it. That seed is the
+	// only thing that has to be right: the only other writer of the store
+	// is `changeOptions` below, which sets this ref synchronously, so no
+	// effect is needed to keep the two in step.
 	const userZoomedRef = useRef(storedZoom !== undefined);
-
-	// A zoom filed while this view is mounted (a second reader instance on
-	// the same document, say) has to disarm the fit as soon as it lands,
-	// or the next resize would quietly take the scale back.
-	useEffect(() => {
-		if (storedZoom !== undefined) userZoomedRef.current = true;
-	}, [storedZoom]);
 
 	useEffect(() => {
 		const scroller = scrollRef.current;

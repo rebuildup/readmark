@@ -43,6 +43,13 @@ export function readerZoomKey(
 
 interface UiState {
 	readonly sidePanel: ReaderSidePanel;
+	// `zoom` and `rotation` below predate the reader's own zoom model and
+	// are not read by anything: `ReaderView` keeps its zoom and rotation
+	// in component state. They are left alone here rather than deleted,
+	// so this change stays a fix rather than a cleanup — but do not read
+	// `zoom` as the reader's scale. It is 1.0 and it is dead; the live
+	// per-document answer is `readerZoom`, and an absent key there means
+	// "fit-width", not "100%".
 	readonly zoom: number;
 	readonly rotation: 0 | 90 | 180 | 270;
 	/**
