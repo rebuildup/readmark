@@ -175,11 +175,12 @@ function errorMessage(err: ImportError): string {
 		case 'quota-exceeded':
 			return 'ストレージの容量が不足しています。既存の文書を削除してから再度お試しください。';
 		case 'unsupported-format':
-			// Reserved for the post-MVP formats. Today the picker
-			// already filters by accept="application/pdf", so
-			// this branch should not be reachable — surface a
-			// generic message anyway.
-			return 'この形式はサポートされていません。';
+			// Reachable: the picker's `accept` is a hint, not a gate.
+			// A renamed `.pdf`, a drag-drop, or an "All files"
+			// selection all land here, and the advice differs from
+			// the invalid-pdf branch — this file is not a damaged
+			// PDF, it is not a PDF at all.
+			return 'この形式はサポートされていません。PDF ファイルを選択してください。';
 		case 'unknown':
 			return '取り込みに失敗しました。時間をおいて再度お試しください。';
 		default: {
