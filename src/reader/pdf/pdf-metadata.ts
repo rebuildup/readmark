@@ -37,7 +37,29 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 
 import type { SourceMetadata } from '../../domain/document.ts';
 import { loadPdfDocument } from './pdf-document.ts';
-import { isPdfJsInvalidException, PdfInvalidError } from './pdf-errors.ts';
+import {
+	isPdfJsInvalidException,
+	PdfInvalidError,
+	PdfUnsupportedFormatError,
+} from './pdf-errors.ts';
+
+/** `%PDF-` — the file signature every conforming PDF carries. */
+const PDF_HEADER = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+
+/** How far into the file we look for `%PDF-`.
+ *
+ *  The PDF spec (ISO 32000-1 §7.5.2) says the header "shall appear
+ *  within the first 1024 bytes of the file" precisely because
+ *  producers prepend junk: a UTF-8 BOM, a stray newline from a text
+ *  editor, a mail gateway's preamble. Requiring offset 0 exactly
+ *  would reject real books.
+ *
+ *  Reading a window rather than a fixed offset is also the safe
+ *  direction: a false positive (finding the signature inside, say,
+ *  a JPEG's first kilobyte) falls through to pdf.js, which either
+ *  parses it or raises `PdfInvalidError` — the same outcome as
+ *  today. A false negative would be a regression. */
+const PDF_HEADER_SEARCH_WINDOW = 1024;
 
 /** PDF metadata that flows into `DocumentSource.metadata` (and
  *  mirrored into `Document.metadata`) via the library import flow.
@@ -57,8 +79,14 @@ export interface PdfMetadata {
 /**
  * Read intrinsic metadata from a PDF `Blob`.
  *
+ * Throws `PdfUnsupportedFormatError` on:
+ *   - bytes with no `%PDF-` header in the first 1 KiB. Caught by our
+ *     own sniff, before pdf.js is called, so the failure is specific
+ *     ("that is not a PDF") and no worker is opened.
+ *
  * Throws `PdfInvalidError` on:
- *   - non-PDF bytes (pdf.js `InvalidPDFException`).
+ *   - bytes that claim to be a PDF but do not parse
+ *     (pdf.js `InvalidPDFException`).
  *   - corrupt / truncated PDFs (pdf.js `MissingPDFException`).
  *   - password-protected PDFs (pdf.js `PasswordException`,
  *     unsupported in MVP).
@@ -67,8 +95,9 @@ export interface PdfMetadata {
  * network errors when fetching a remote PDF, though MVP is
  * local-first so this should not happen). Callers in the
  * library import flow catch `PdfInvalidError` and translate
- * to `ImportError.kind = 'invalid-pdf'`; anything else becomes
- * `ImportError.kind = 'unknown'`.
+ * to `ImportError.kind = 'invalid-pdf'`, catch
+ * `PdfUnsupportedFormatError` for `'unsupported-format'`, and
+ * anything else becomes `ImportError.kind = 'unknown'`.
  *
  * Side effects:
  *   - Reads the entire blob into memory. PDF parsing is not
@@ -90,9 +119,22 @@ export interface PdfMetadata {
  *     internals.
  */
 export async function extractPdfMetadata(blob: Blob): Promise<PdfMetadata> {
+	const bytes = new Uint8Array(await blob.arrayBuffer());
+
+	// Sniff BEFORE pdf.js. pdf.js reports "not a PDF" and "broken
+	// PDF" with the same `InvalidPDFException` and an opaque message;
+	// if we let it decide, every wrong file type reaches the user as
+	// "your PDF is corrupt or password-protected", which is false for
+	// a photo, a zip, or an EPUB. Rejecting here also means a
+	// non-PDF never opens a pdf.js worker.
+	if (!hasPdfHeader(bytes)) {
+		throw new PdfUnsupportedFormatError(
+			'The bytes do not contain a %PDF- header, so they are not a PDF document',
+		);
+	}
+
 	let doc: PDFDocumentProxy;
 	try {
-		const bytes = new Uint8Array(await blob.arrayBuffer());
 		doc = await loadPdfDocument(bytes);
 	} catch (cause: unknown) {
 		// `loadPdfDocument` already cleans up the loading task
@@ -156,4 +198,28 @@ export function pdfMetadataToSourceMetadata(meta: PdfMetadata): SourceMetadata {
  *  can fall back to "(タイトルなし)". */
 function nonEmptyString(value: unknown): string | undefined {
 	return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/** Does `bytes` carry the `%PDF-` signature anywhere in its first
+ *  {@link PDF_HEADER_SEARCH_WINDOW} bytes?
+ *
+ *  Private to this module on purpose: the signature is PDF-specific,
+ *  and this is the only reader of it. Exporting it would push a
+ *  format detail up into `library/`, which is where ADR-0004's
+ *  boundary says it must not live. */
+function hasPdfHeader(bytes: Uint8Array): boolean {
+	// The window is the number of bytes we are allowed to LOOK at,
+	// so a header that would start inside it must also END inside it.
+	const windowEnd = Math.min(bytes.length, PDF_HEADER_SEARCH_WINDOW);
+	for (let offset = 0; offset + PDF_HEADER.length <= windowEnd; offset += 1) {
+		let matches = true;
+		for (let i = 0; i < PDF_HEADER.length; i += 1) {
+			if (bytes[offset + i] !== PDF_HEADER[i]) {
+				matches = false;
+				break;
+			}
+		}
+		if (matches) return true;
+	}
+	return false;
 }

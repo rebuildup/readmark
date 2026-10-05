@@ -43,7 +43,7 @@
 
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
-import { PdfInvalidError } from './pdf-errors.ts';
+import { PdfInvalidError, PdfUnsupportedFormatError } from './pdf-errors.ts';
 import { extractPdfMetadata, pdfMetadataToSourceMetadata } from './pdf-metadata.ts';
 
 async function makeTwoPagePdfBytes(): Promise<Uint8Array> {
@@ -68,6 +68,22 @@ async function makeTwoPagePdfBytes(): Promise<Uint8Array> {
  *  bytes with "Invalid PDF structure". Passing the view works. */
 function bytesToBlob(bytes: Uint8Array): Blob {
 	return new Blob([bytes as unknown as ArrayBuffer], { type: 'application/pdf' });
+}
+
+/** A file that CLAIMS to be a PDF (real `%PDF-` header) and then
+ *  stops halfway through its body.
+ *
+ *  This is the fixture the "corrupt PDF" tests must use, and it used
+ *  to not be: they passed plain text, which is not a corrupt PDF at
+ *  all, it is a non-PDF. Now that the boundary tells those two apart
+ *  (`PdfUnsupportedFormatError` vs `PdfInvalidError`), a plain-text
+ *  fixture would silently stop testing the corrupt-PDF path.
+ *
+ *  pdf.js raises `InvalidPDFException` for these bytes, which
+ *  `isPdfJsInvalidException` recognizes, so they exercise the real
+ *  wrap-to-`PdfInvalidError` path rather than a mock. */
+function corruptPdfBytes(): Uint8Array {
+	return new TextEncoder().encode('%PDF-1.7\n1 0 obj\n<< /Type /Catalog');
 }
 
 describe('extractPdfMetadata (real PDF integration smoke)', () => {
@@ -106,12 +122,33 @@ describe('extractPdfMetadata (real PDF integration smoke)', () => {
 		expect(meta2.pageCount).toBe(2);
 	});
 
-	it('throws PdfInvalidError for non-PDF bytes (boundary class, not a raw pdf.js exception)', async () => {
-		const blob = new Blob(['this is plain text, not a pdf'], {
-			type: 'application/pdf',
-		});
+	it('throws PdfInvalidError for a PDF whose body is corrupt (boundary class, not a raw pdf.js exception)', async () => {
+		// Renamed from "...for non-PDF bytes", which was wrong about its
+		// own fixture: plain text is a non-PDF, and it now takes the
+		// `PdfUnsupportedFormatError` path (see the next test). The
+		// assertion is unchanged — it still pins "we hand upstream our
+		// class, never pdf.js's exception".
+		const blob = bytesToBlob(corruptPdfBytes());
 
 		await expect(extractPdfMetadata(blob)).rejects.toBeInstanceOf(PdfInvalidError);
+	});
+
+	it('throws PdfUnsupportedFormatError (not PdfInvalidError) for non-PDF bytes', async () => {
+		// The boundary has two "no" answers, and they are not the same
+		// one. Real pdf.js raises `InvalidPDFException` for a PNG, which
+		// we would wrap as `PdfInvalidError` — telling the user their
+		// PDF is corrupt. We sniff the header first so the caller can
+		// say "that is not a PDF" instead.
+		const png = new Uint8Array(32);
+		png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+		const blob = new Blob([png as unknown as ArrayBuffer], { type: 'image/png' });
+
+		const thrown = await extractPdfMetadata(blob).catch((e: unknown) => e);
+
+		expect(thrown).toBeInstanceOf(PdfUnsupportedFormatError);
+		// Must NOT be the corrupt-PDF class — the two are exclusive so
+		// `library/` can map them to different messages.
+		expect(thrown).not.toBeInstanceOf(PdfInvalidError);
 	});
 
 	it('recovers from a bad-PDF load — next valid import still works', async () => {
@@ -121,7 +158,11 @@ describe('extractPdfMetadata (real PDF integration smoke)', () => {
 		// rethrow. A leaked loading task would stall subsequent
 		// imports in the same session; here we prove that a bad
 		// import does NOT corrupt state for the next one.
-		const badBlob = new Blob(['not a pdf'], { type: 'application/pdf' });
+		// The bad blob must reach `loadPdfDocument` for this to test
+		// what it says it tests — the loading task's failure cleanup.
+		// A non-PDF would now be rejected by the header sniff and
+		// never open a task at all.
+		const badBlob = bytesToBlob(corruptPdfBytes());
 		await expect(extractPdfMetadata(badBlob)).rejects.toBeInstanceOf(PdfInvalidError);
 
 		const goodBytes = await makeTwoPagePdfBytes();

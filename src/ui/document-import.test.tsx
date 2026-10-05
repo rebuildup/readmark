@@ -166,4 +166,34 @@ describe('DocumentImport — #10 wiring', () => {
 		await screen.findByRole('alert');
 		expect(mockRequestPersistence).not.toHaveBeenCalled();
 	});
+
+	it('shows a format-specific message for unsupported-format', async () => {
+		mockImportPdfDocument.mockResolvedValueOnce({
+			ok: false,
+			error: { kind: 'unsupported-format', cause: new Error('png') } satisfies ImportError,
+		});
+
+		renderImport();
+		pickFile(makeFile());
+
+		const alert = await screen.findByRole('alert');
+		// It must NOT reuse the invalid-pdf copy: "your PDF is corrupt
+		// or password-protected" is a false statement about a JPEG.
+		expect(alert.textContent).toContain('サポートされていません');
+		expect(alert.textContent).not.toContain('破損');
+	});
+
+	it('shows a different message for invalid-pdf than for unsupported-format', async () => {
+		mockImportPdfDocument.mockResolvedValueOnce({
+			ok: false,
+			error: { kind: 'invalid-pdf', cause: new Error('broken') } satisfies ImportError,
+		});
+
+		renderImport();
+		pickFile(makeFile());
+
+		const alert = await screen.findByRole('alert');
+		expect(alert.textContent).toContain('破損');
+		expect(alert.textContent).not.toContain('サポートされていません');
+	});
 });
