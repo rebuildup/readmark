@@ -50,10 +50,18 @@
  * load-bearing, and what this module exists to pin:
  *
  *   1. **Native is the base, runtime composes on top of it.** Not two
- *      `getViewport` calls, and — the mistake this replaces — not a CSS
- *      `rotate()` applied to a canvas that pdf.js already painted at the
- *      native orientation. That would double-rotate, and a page with
- *      `/Rotate 90` would come out at 0 in the reader's hands.
+ *      `getViewport` calls, and not a CSS `rotate()` layered over the
+ *      canvas afterwards. The reason is not that a CSS overlay would
+ *      visibly double-rotate — for a page whose box is already sized to
+ *      match, it would not. It is that the canvas is only *one* of the
+ *      three things positioned in viewport coordinates: the text layer's
+ *      spans and the highlight fragments are placed in CSS pixels from
+ *      this same `PageViewport` (`cssRectsFor` converts through it), and
+ *      a transform the viewport does not know about is a transform
+ *      those two would not follow. The result is not a rotated page, it
+ *      is a rotated canvas under an unrotated text layer — precisely
+ *      the "highlight sits next to the text" failure the text layer
+ *      exists to prevent.
  *   2. **One absolute value goes into one viewport.** Canvas, text
  *      layer and highlight paint all derive from that single
  *      `PageViewport`, so they cannot disagree about orientation.

@@ -85,6 +85,21 @@ const CORNER_SAMPLE = 0.3;
  *  page background the reader paints. */
 const INK_THRESHOLD = 200;
 
+/** Dark pixels a corner must contain before it counts as holding the
+ *  marker. Low on purpose, for one reason: it only has to reject stray
+ *  anti-aliased edge pixels, not to identify the marker. The
+ *  assertions that actually decide the reading are "exactly one corner
+ *  is inked" and "it is this one", and the marker fills roughly 64% of
+ *  its corner box, so this floor is three orders of magnitude below the
+ *  signal it guards.
+ *
+ *  A low floor is safe here because of where the fixture puts things:
+ *  the marker is the only ink within reach of any corner box. The text
+ *  sits in the middle of the page, and a quarter turn maps a middle-ish
+ *  region to a middle-ish region, so no rotation puts a glyph in a
+ *  corner. */
+const MIN_CORNER_INK = 200;
+
 async function makeFixturePdf() {
 	const pdf = await PDFDocument.create();
 	for (let index = 1; index <= PAGE_COUNT; index++) {
@@ -135,7 +150,7 @@ async function materialize(page, index) {
 		});
 		await wait(200);
 		const orientation = await readOrientation(page, index);
-		if (orientation !== null && orientation.totalInk > 0) return orientation;
+		if (orientation !== null && orientation.cornerInk > 0) return orientation;
 	}
 	return await readOrientation(page, index);
 }
@@ -148,7 +163,7 @@ async function materialize(page, index) {
  */
 async function readOrientation(page, index) {
 	return await pageHost(page, index).evaluate(
-		(host, { sample, threshold }) => {
+		(host, { sample, threshold, minInk }) => {
 			const canvas = host.querySelector('canvas');
 			if (canvas === null) return null;
 			const context = canvas.getContext('2d');
@@ -179,7 +194,7 @@ async function readOrientation(page, index) {
 				'bottom-left': sampleBox('left', 'bottom'),
 				'bottom-right': sampleBox('right', 'bottom'),
 			};
-			const inked = Object.entries(corners).filter(([, count]) => count > 200);
+			const inked = Object.entries(corners).filter(([, count]) => count > minInk);
 			return {
 				canvasWidth: canvas.width,
 				canvasHeight: canvas.height,
@@ -189,10 +204,14 @@ async function readOrientation(page, index) {
 				// than of the reader — and a smoke that cannot tell
 				// which way the page is facing must not report a pass.
 				inkedCorners: inked.map(([name]) => name).sort(),
-				totalInk: Object.values(corners).reduce((sum, count) => sum + count, 0),
+				// Ink across all four corners. Zero means the canvas
+				// has not been painted yet, which is a timing fact
+				// rather than a rotation one — callers use it to know
+				// a reading is not yet meaningful.
+				cornerInk: Object.values(corners).reduce((sum, count) => sum + count, 0),
 			};
 		},
-		{ sample: CORNER_SAMPLE, threshold: INK_THRESHOLD },
+		{ sample: CORNER_SAMPLE, threshold: INK_THRESHOLD, minInk: MIN_CORNER_INK },
 	);
 }
 
@@ -204,7 +223,7 @@ async function waitForOrientationChange(page, index, previous) {
 		const next = await readOrientation(page, index);
 		if (
 			next !== null &&
-			next.totalInk > 0 &&
+			next.cornerInk > 0 &&
 			(next.canvasWidth !== previous.canvasWidth ||
 				next.canvasHeight !== previous.canvasHeight ||
 				next.inkedCorners.join() !== previous.inkedCorners.join())
@@ -288,7 +307,7 @@ async function main() {
 		// the bottom-left and the content sideways inside it.
 		const atRuntimeZero = await readOrientation(page, 1);
 		if (atRuntimeZero === null) fail('page 1 has no canvas');
-		if (atRuntimeZero.totalInk === 0) fail('page 1 painted no marker at all');
+		if (atRuntimeZero.cornerInk === 0) fail('page 1 painted no ink in any corner');
 		check(
 			atRuntimeZero,
 			{ canvasWidth: 595, canvasHeight: 420, inkedCorners: ['top-left'] },
@@ -308,7 +327,7 @@ async function main() {
 		for (const index of [2, 3]) {
 			const plain = await materialize(page, index);
 			if (plain === null) fail(`page ${index} has no canvas`);
-			if (plain.totalInk === 0) fail(`page ${index} painted no marker at all`);
+			if (plain.cornerInk === 0) fail(`page ${index} painted no ink in any corner`);
 			check(
 				plain,
 				{ canvasWidth: 420, canvasHeight: 595, inkedCorners: ['bottom-left'] },
@@ -333,7 +352,7 @@ async function main() {
 		// Scrolling back to page 1 for the rotation walk, since the
 		// reader only keeps what is near the viewport materialised.
 		const backOnPageOne = await materialize(page, 1);
-		if (backOnPageOne === null || backOnPageOne.totalInk === 0) {
+		if (backOnPageOne === null || backOnPageOne.cornerInk === 0) {
 			fail('page 1 did not come back after scrolling to it');
 		}
 		check(

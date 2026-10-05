@@ -112,10 +112,12 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 		// rotation, as one absolute quarter turn. Not `options.rotation`:
 		// `getViewport` falls back to the page's native rotation only
 		// when `rotation` is *omitted*, so passing the runtime value
-		// through unchanged discards a native rotation and renders a
-		// sideways page upright-but-wrong. See `pdf-rotation.ts` for why
-		// the sum is the composition and why it has to happen here,
-		// before the viewport, rather than as a transform on top of it.
+		// through unchanged discards a native rotation entirely — a page
+		// the producer stored sideways comes out in a portrait box with
+		// its content turned the wrong way, which is what a reader sees
+		// as a book on its side. See `pdf-rotation.ts` for why the sum
+		// is the composition, and why it has to happen here, before the
+		// viewport, rather than as a transform layered over the result.
 		//
 		// Read, never written: `pdfPage.rotate` is pdf.js's own view of
 		// the page dictionary, and the reader has no business editing it.
