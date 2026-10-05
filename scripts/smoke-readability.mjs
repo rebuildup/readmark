@@ -37,6 +37,12 @@ import { fail, launchBrowser, PREVIEW_URL, withPreview } from './smoke-harness.m
 /** A real book: 717 pages, non-embedded CID fonts, ~515pt wide. */
 const BOOK = process.env.RM_BOOK ?? '/mnt/d/3_docs/books/プログラミングのための数学.pdf';
 
+/** The book's page width in PDF points. The one number that makes a
+ *  scale legible: at 100% a 515pt page draws its body text at ~10px,
+ *  which is what issue #35 is about. Used to turn a percentage back
+ *  into the width a reader should actually be seeing. */
+const BOOK_WIDTH_PT = 515;
+
 /** A laptop viewport, which is where "too small to read" bites hardest. */
 const VIEWPORT = { width: 1280, height: 800 };
 
@@ -270,7 +276,7 @@ await withPreview(async () => {
 	if (afterReopen.canvasCssWidth <= 0) {
 		fail('the re-opened document reported no page width; nothing was measured');
 	}
-	const expectedWidth = Math.round(515 * (zoomedIn.zoom / 100));
+	const expectedWidth = Math.round(BOOK_WIDTH_PT * (zoomedIn.zoom / 100));
 	if (Math.abs(afterReopen.canvasCssWidth - expectedWidth) > expectedWidth * 0.05) {
 		fail(
 			`the re-opened page is ${afterReopen.canvasCssWidth}px wide, but ` +
