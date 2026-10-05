@@ -45,15 +45,23 @@ function setReadOrder(order: ReadOrder): void {
 	readOrder = order;
 }
 
+/** Ascending comparison of two ids, as UTF-16 code units — the same
+ *  rule the repository's comparator uses, and deliberately *not*
+ *  `localeCompare`, whose result depends on the ambient locale. */
+function compareIds(a: unknown, b: unknown): number {
+	const left = String(a);
+	const right = String(b);
+	if (left === right) return 0;
+	return left < right ? -1 : 1;
+}
+
 /** The matching rows, in the order the current read hands them over. */
 function readMatching(tuple: readonly unknown[], segments: readonly string[], index: string) {
 	const matched = Array.from(rows.values()).filter((row) =>
 		tuple.every((v, i) => row[segments[i] ?? index] === v),
 	);
 	if (readOrder === 'byId') {
-		return matched.sort((a, b) =>
-			String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0,
-		);
+		return matched.sort((a, b) => compareIds(a.id, b.id));
 	}
 	if (readOrder === 'reverseInserted') return matched.reverse();
 	return matched;
@@ -361,15 +369,20 @@ describe('listBookmarks', () => {
 		});
 
 		it('keeps createdAt the deciding key, even when the ids point the other way', async () => {
-			// Written in id order, so an id-first sort would reproduce
-			// the read order. The latest mark carries the *lowest* id,
-			// which only a createdAt-first sort puts last.
-			useIds(ID_1, ID_2, ID_3);
-			await add({ pageIndex: 5, createdAt: 1000 });
-			await add({ pageIndex: 5, createdAt: 2000 });
+			// Written `ID_2, ID_1, ID_3` with the clock running the other
+			// way, so the newest mark carries the *lowest* id of the
+			// three. An id-first sort would return the rows in the
+			// order they were written; only `createdAt` puts ID_3 first
+			// and ID_2 last.
+			useIds(ID_2, ID_1, ID_3);
 			await add({ pageIndex: 5, createdAt: 3000 });
+			await add({ pageIndex: 5, createdAt: 2000 });
+			await add({ pageIndex: 5, createdAt: 1000 });
 
-			expect((await listBookmarks(SCOPE)).map((row) => row.createdAt)).toEqual([1000, 2000, 3000]);
+			expect(storageOrderForScope()).toEqual([ID_2, ID_1, ID_3]);
+			const listed = await listBookmarks(SCOPE);
+			expect(listed.map((row) => row.createdAt)).toEqual([1000, 2000, 3000]);
+			expect(listed.map((row) => row.id)).toEqual([ID_3, ID_1, ID_2]);
 		});
 
 		it('leaves the ties alone and puts the later mark after them', async () => {
@@ -377,19 +390,19 @@ describe('listBookmarks', () => {
 			await add({ pageIndex: 5, createdAt: 1000 });
 			await add({ pageIndex: 5, createdAt: 1000 });
 			await add({ pageIndex: 5, createdAt: 1000 });
-			useIds(ID_9);
+			// The new mark is one millisecond later and carries the
+			// *lowest* id of the four, so "sorted by id" would put it
+			// first and "newest last" is a real claim about
+			// `createdAt`, not a coincidence.
+			useIds(ID_0);
 			const later = await add({ pageIndex: 5, createdAt: 2000 });
 
-			// A new mark with a later `createdAt` — and the highest id
-			// there is, so "sorted by id" and "newest last" happen to
-			// agree. The tie order among the first three is the part
-			// under test, and it is unchanged.
-			expect((await listBookmarks(SCOPE)).map((row) => row.id)).toEqual([
-				ID_1,
-				ID_2,
-				ID_3,
-				later.id,
-			]);
+			const listed = await listBookmarks(SCOPE);
+			// The tie among the first three is settled by id and is
+			// untouched by the new arrival.
+			expect(listed.map((row) => row.id)).toEqual([ID_1, ID_2, ID_3, later.id]);
+			expect(later.id).toBe(ID_0);
+			expect(listed.map((row) => row.createdAt)).toEqual([1000, 1000, 1000, 2000]);
 		});
 
 		it('slots a mark that ties into its id position, and only moves what it must', async () => {
