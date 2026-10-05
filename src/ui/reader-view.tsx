@@ -63,12 +63,16 @@ import {
 import { saveReadingPosition } from '../storage/reading-state-repo.ts';
 import { useUiStore } from '../stores/ui-store.ts';
 import { AddBookmarkDialog, BookmarkDeleteDialog, BookmarksPanel } from './bookmarks-panel.tsx';
-import { HighlightDeleteDialog, type HighlightPanelEntry, HighlightsPanel } from './highlights-panel.tsx';
+import {
+	HighlightDeleteDialog,
+	type HighlightPanelEntry,
+	HighlightsPanel,
+} from './highlights-panel.tsx';
 import { NoteDeleteDialog, type NoteEditorState, NotesPanel } from './notes-panel.tsx';
-import { type PanelEntryState } from './panel-entry.ts';
+import type { PanelEntryState } from './panel-entry.ts';
 import { Button } from './primitives/button.tsx';
-import { ReaderSidePanel } from './reader-side-panel.tsx';
 import { LibraryLink } from './primitives/library-link.tsx';
+import { ReaderSidePanel } from './reader-side-panel.tsx';
 import { jumpToPage } from './scroll-to-page.ts';
 import {
 	type SelectionSnapshot,
@@ -662,9 +666,7 @@ export function ReaderView({
 	 * and because a single shared message would overwrite itself as
 	 * the reader tries one after another.
 	 */
-	const [jumpFailures, setJumpFailures] = useState<ReadonlyMap<string, string>>(
-		() => new Map(),
-	);
+	const [jumpFailures, setJumpFailures] = useState<ReadonlyMap<string, string>>(() => new Map());
 	/** Inline error for the add-bookmark dialog. Cleared on each
 	 *  fresh open of the dialog so a previous failure does not
 	 *  reappear over a new attempt. */
@@ -1715,10 +1717,7 @@ export function ReaderView({
 	const isNoteReachable = useCallback(
 		(note: Note): boolean => {
 			if (note.kind === 'positioned') return true;
-			return (
-				note.highlightId !== null &&
-				highlights.some((row) => row.row.id === note.highlightId)
-			);
+			return note.highlightId !== null && highlights.some((row) => row.row.id === note.highlightId);
 		},
 		[highlights],
 	);

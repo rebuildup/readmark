@@ -89,11 +89,7 @@ export function HighlightsPanel({
 	const reachable = entries.filter((entry) => panelEntryIsJumpable(entry.state)).length;
 
 	return (
-		<section
-			className="rm-panel__body"
-			data-testid="rm-highlights-panel"
-			aria-label="ハイライト"
-		>
+		<section className="rm-panel__body" data-testid="rm-highlights-panel" aria-label="ハイライト">
 			<header className="rm-panel__header">
 				<h2 className="rm-panel__title">ハイライト</h2>
 				<span className="rm-muted" data-testid="rm-highlights-count">
@@ -145,13 +141,7 @@ interface HighlightRowProps {
 	readonly onDelete: (highlight: Highlight) => void;
 }
 
-function HighlightRow({
-	entry,
-	documentTitle,
-	failure,
-	onJump,
-	onDelete,
-}: HighlightRowProps) {
+function HighlightRow({ entry, documentTitle, failure, onJump, onDelete }: HighlightRowProps) {
 	const { highlight, state } = entry;
 	const jumpable = panelEntryIsJumpable(state);
 	const label = highlightLabel(highlight);
@@ -166,11 +156,7 @@ function HighlightRow({
 					data-testid="rm-highlight-jump"
 					aria-label={`「${label}」の位置へ移動`}
 				>
-					<HighlightContents
-						entry={entry}
-						documentTitle={documentTitle}
-						notice={null}
-					/>
+					<HighlightContents entry={entry} documentTitle={documentTitle} notice={null} />
 				</button>
 			) : (
 				/*
@@ -251,7 +237,8 @@ function HighlightContents({
 			 */}
 			{entry.notes.length > 0 && (
 				<span className="rm-panel__jump-hint" data-testid="rm-highlight-notes">
-					メモ {entry.notes.length} 件 · {entry.notes.map((note) => noteFirstLine(note.body)).join(' / ')}
+					メモ {entry.notes.length} 件 ·{' '}
+					{entry.notes.map((note) => noteFirstLine(note.body)).join(' / ')}
 				</span>
 			)}
 			{notice !== null && (
@@ -282,10 +269,7 @@ export function highlightLabel(highlight: Highlight): string {
  *  row names the book — a panel is a list of one document, and saying
  *  so costs one clause and answers the question a reader has when a
  *  row looks unfamiliar. */
-export function highlightHint(
-	entry: HighlightPanelEntry,
-	documentTitle: string,
-): string {
+export function highlightHint(entry: HighlightPanelEntry, documentTitle: string): string {
 	return `${entry.highlight.pageIndex} ページ · ${documentTitle}`;
 }
 
@@ -319,9 +303,13 @@ export function HighlightDeleteDialog({
 	const text = highlightLabel(highlight);
 	return (
 		<ConfirmDialog
-			title={text === '' ? 'このハイライトを削除しますか？' : `「${text}」のハイライトを削除しますか？`}
+			title={
+				text === '' ? 'このハイライトを削除しますか？' : `「${text}」のハイライトを削除しますか？`
+			}
 			description={
-				<p>ハイライトだけを削除します。このハイライトに書いたメモは残ります。栞や読書位置には影響しません。</p>
+				<p>
+					ハイライトだけを削除します。このハイライトに書いたメモは残ります。栞や読書位置には影響しません。
+				</p>
 			}
 			confirmLabel="削除する"
 			busyLabel="削除中…"

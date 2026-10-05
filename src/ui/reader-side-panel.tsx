@@ -40,7 +40,11 @@
  */
 
 import { type ReactNode, useEffect, useRef, useState } from 'react';
-import type { ReaderSidePanel } from '../stores/ui-store.ts';
+// Aliased, because the component below is called `ReaderSidePanel` and a
+// same-named type import would shadow it in this file's own scope. The
+// two are unrelated: this is the store's union of which panel is open,
+// and the component is the shell that renders whichever one is.
+import type { ReaderSidePanel as ReaderSidePanelId } from '../stores/ui-store.ts';
 
 /**
  * Below this width the panel cannot have a column of its own.
@@ -53,11 +57,12 @@ import type { ReaderSidePanel } from '../stores/ui-store.ts';
 export const SIDE_PANEL_NARROW_QUERY = '(max-width: 720px)';
 
 /** The three lists, in the order they are offered. */
-const TABS: readonly { readonly id: Exclude<ReaderSidePanel, 'none'>; readonly label: string }[] = [
-	{ id: 'bookmarks', label: '栞' },
-	{ id: 'highlights', label: 'ハイライト' },
-	{ id: 'notes', label: 'メモ' },
-];
+const TABS: readonly { readonly id: Exclude<ReaderSidePanelId, 'none'>; readonly label: string }[] =
+	[
+		{ id: 'bookmarks', label: '栞' },
+		{ id: 'highlights', label: 'ハイライト' },
+		{ id: 'notes', label: 'メモ' },
+	];
 
 /** Controls that can hold focus, for the overlay's Tab cycle.
  *
@@ -113,15 +118,15 @@ export interface ReaderSidePanelProps {
 	/** Which list is showing. Never `'none'` — the parent unmounts the
 	 *  shell entirely when the panel is closed, so this shell does not
 	 *  have to model a closed state and cannot disagree with one. */
-	readonly active: Exclude<ReaderSidePanel, 'none'>;
-	readonly onSelect: (panel: Exclude<ReaderSidePanel, 'none'>) => void;
+	readonly active: Exclude<ReaderSidePanelId, 'none'>;
+	readonly onSelect: (panel: Exclude<ReaderSidePanelId, 'none'>) => void;
 	/** Closes the panel. The overlay's Escape key and its scrim both
 	 *  come through here, so there is one way to close and not several
 	 *  that can drift apart. */
 	readonly onClose: () => void;
 	/** How many entries each list holds. Each number is the length of
 	 *  the array that list renders — see the file header. */
-	readonly counts: Readonly<Record<Exclude<ReaderSidePanel, 'none'>, number>>;
+	readonly counts: Readonly<Record<Exclude<ReaderSidePanelId, 'none'>, number>>;
 	readonly children: ReactNode;
 }
 
@@ -142,14 +147,13 @@ export function ReaderSidePanel({
 	// meant to keep reaching the document beside it.
 	useEffect(() => {
 		if (!narrow) return;
-		const opener =
-			document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 		sheetRef.current?.focus();
 		return () => {
 			// Only if it is still in the document: an opener that was
 			// itself removed (a tab that is no longer the active one)
 			// must not have focus pushed at a detached node.
-			if (opener !== null && opener.isConnected) opener.focus();
+			if (opener?.isConnected === true) opener.focus();
 		};
 	}, [narrow]);
 
@@ -249,7 +253,7 @@ export function ReaderSidePanel({
 	);
 }
 
-function activeTabLabel(active: Exclude<ReaderSidePanel, 'none'>): string {
+function activeTabLabel(active: Exclude<ReaderSidePanelId, 'none'>): string {
 	return TABS.find((tab) => tab.id === active)?.label ?? '';
 }
 
@@ -258,9 +262,9 @@ function PanelTabs({
 	counts,
 	onSelect,
 }: {
-	readonly active: Exclude<ReaderSidePanel, 'none'>;
-	readonly counts: Readonly<Record<Exclude<ReaderSidePanel, 'none'>, number>>;
-	readonly onSelect: (panel: Exclude<ReaderSidePanel, 'none'>) => void;
+	readonly active: Exclude<ReaderSidePanelId, 'none'>;
+	readonly counts: Readonly<Record<Exclude<ReaderSidePanelId, 'none'>, number>>;
+	readonly onSelect: (panel: Exclude<ReaderSidePanelId, 'none'>) => void;
 }) {
 	return (
 		<div className="rm-side-panel__tabs" role="tablist" aria-label="サイドパネルの切り替え">
@@ -276,9 +280,7 @@ function PanelTabs({
 						aria-controls="rm-side-panel-body"
 						tabIndex={selected ? 0 : -1}
 						className={
-							selected
-								? 'rm-side-panel__tab rm-side-panel__tab--active'
-								: 'rm-side-panel__tab'
+							selected ? 'rm-side-panel__tab rm-side-panel__tab--active' : 'rm-side-panel__tab'
 						}
 						onClick={() => onSelect(tab.id)}
 						data-testid={`rm-side-tab-${tab.id}`}
