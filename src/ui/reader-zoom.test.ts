@@ -22,6 +22,7 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { useUiStore } from '../stores/ui-store.ts';
 import {
 	clampZoom,
 	FIT_WIDTH_PADDING_PX,
@@ -91,6 +92,36 @@ describe('fitWidthScale', () => {
 		expect(fitWidthScale(1280, 0)).toBe(1);
 		expect(fitWidthScale(Number.NaN, 515)).toBe(1);
 	});
+
+	it('never returns NaN or Infinity, whatever it is handed', () => {
+		// A page that has not measured itself yet, and a scroller that
+		// has not been laid out, both report zero or undefined — and an
+		// unmeasured page is exactly the state the reader opens in. A
+		// scale of NaN here is not a cosmetic slip: it reaches the
+		// renderer, and the toolbar would read "NaN%".
+		const unusable: readonly (readonly [number, number])[] = [
+			[0, 0],
+			[0, Number.NaN],
+			[Number.NaN, 0],
+			[Number.NaN, Number.NaN],
+			[Number.POSITIVE_INFINITY, 515],
+			[1280, Number.POSITIVE_INFINITY],
+			[Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY],
+			[Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY],
+			[-1280, 515],
+			[1280, -515],
+			// `undefined` is what a caller that has not measured yet
+			// actually holds, and TypeScript does not stop it at runtime.
+			[undefined as unknown as number, 515],
+			[1280, undefined as unknown as number],
+		];
+		for (const [available, pageWidth] of unusable) {
+			const scale = fitWidthScale(available, pageWidth);
+			expect(Number.isFinite(scale)).toBe(true);
+			expect(scale).toBeGreaterThanOrEqual(MIN_ZOOM);
+			expect(scale).toBeLessThanOrEqual(MAX_ZOOM);
+		}
+	});
 });
 
 describe('clampZoom', () => {
@@ -107,5 +138,18 @@ describe('clampZoom', () => {
 		for (const level of ZOOM_LEVELS) {
 			expect(clampZoom(level)).toBe(level);
 		}
+	});
+
+	it('agrees with the range the zoom store files a preference in', () => {
+		// The store holds its own copy of these bounds, because it cannot
+		// import a React screen. A drift between the two would let a
+		// reader file a preference the toolbar cannot reach — and the
+		// only symptom would be a document that opens at a scale they
+		// cannot zoom back out of.
+		const set = useUiStore.getState().setReaderZoom;
+		set('at-max', MAX_ZOOM);
+		set('at-min', MIN_ZOOM);
+		expect(useUiStore.getState().readerZoom).toEqual({ 'at-max': MAX_ZOOM, 'at-min': MIN_ZOOM });
+		useUiStore.setState({ readerZoom: {} });
 	});
 });

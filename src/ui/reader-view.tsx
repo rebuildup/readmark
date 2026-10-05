@@ -51,7 +51,7 @@ import {
 	replaceHighlightAnchor,
 } from '../storage/highlights-repo.ts';
 import { saveReadingPosition } from '../storage/reading-state-repo.ts';
-import { useUiStore } from '../stores/ui-store.ts';
+import { readerZoomKey, useUiStore } from '../stores/ui-store.ts';
 import { AddBookmarkDialog, BookmarkDeleteDialog, BookmarksPanel } from './bookmarks-panel.tsx';
 import { Button } from './primitives/button.tsx';
 import { LibraryLink } from './primitives/library-link.tsx';
@@ -537,10 +537,28 @@ export function ReaderView({
 	sourceFingerprint,
 	initialPosition,
 }: ReaderViewProps) {
+	// Where this reader's own zoom is filed, and whether one is already
+	// there from earlier in this session.
+	//
+	// The precedence is the whole of issue #35: a scale the reader picked
+	// is THEIRS and opens the document at that value; with nothing filed,
+	// the document opens fit-width. "Default" has to mean default — a
+	// fresh profile fits the page, and a choice made before this mount
+	// is never silently overwritten by the fit.
+	const zoomKey = readerZoomKey(documentId, sourceFingerprint);
+	const storedZoom = useUiStore((state) => state.readerZoom[zoomKey]);
+	const setReaderZoom = useUiStore((state) => state.setReaderZoom);
+
 	// `null` means "not chosen yet" and lets the fit-width effect below
 	// pick the opening zoom once a page and a viewport both exist. A
 	// number means the reader (or a restored preference) has taken over.
-	const [zoom, setZoom] = useState<number | null>(null);
+	//
+	// Seeded from the store so the very first frame already shows the
+	// reader's own scale. Reading it in an effect instead would show
+	// 100% for a tick and then jump — a restored 150% would briefly be
+	// reported as 100%, which is the exact "too small to read" state
+	// this change exists to remove.
+	const [zoom, setZoom] = useState<number | null>(storedZoom ?? null);
 	const [rotation, setRotation] = useState<0 | 90 | 180 | 270>(0);
 	const [footprints, setFootprints] = useState<ReadonlyMap<PageIndex, PageFootprint>>(
 		() => new Map(),
@@ -748,7 +766,14 @@ export function ReaderView({
 	// theirs, and re-fitting on every resize would throw that away.
 	// `userZoomedRef` is the whole of that state — a ref, not a second
 	// `useState`, so it cannot trigger a render or drift from `zoom`.
-	const userZoomedRef = useRef(false);
+	//
+	// Seeded from the store, so a choice made BEFORE this mount — the
+	// reader left the document and came back — already counts as theirs
+	// and the fit never gets a chance to overwrite it. That seed is the
+	// only thing that has to be right: the only other writer of the store
+	// is `changeOptions` below, which sets this ref synchronously, so no
+	// effect is needed to keep the two in step.
+	const userZoomedRef = useRef(storedZoom !== undefined);
 
 	useEffect(() => {
 		const scroller = scrollRef.current;
@@ -1389,7 +1414,12 @@ export function ReaderView({
 		// resize that follows, which is the whole point of choosing.
 		if (next.zoom !== undefined) {
 			userZoomedRef.current = true;
-			setZoom(clampZoom(next.zoom));
+			const chosen = clampZoom(next.zoom);
+			// Filed so the choice outlives this mount: the reader can go
+			// back to the library and reopen the document, and it opens
+			// where they left it instead of snapping back to fit-width.
+			setReaderZoom(zoomKey, chosen);
+			setZoom(chosen);
 		}
 		if (next.rotation !== undefined) setRotation(next.rotation);
 		setFootprints(new Map());
