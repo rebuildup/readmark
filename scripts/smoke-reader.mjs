@@ -1002,7 +1002,15 @@ async function main() {
 		const panel = page.locator('[data-testid="rm-bookmarks-panel"]');
 		await panel.waitFor({ state: 'visible' });
 		const panelShape = await page.evaluate(() => {
-			const aside = document.querySelector('[data-testid="rm-bookmarks-panel"]');
+			// The grid item is the panel *shell*, not the list inside it.
+			// Since #9 the bookmarks list is one of three lists that share
+			// the shell, so `rm-bookmarks-panel` is the body of the column
+			// and sits below the tab bar — measuring it would read that
+			// offset as the column having been auto-placed into the
+			// toolbar's grid row, which is the failure this check exists
+			// to catch. The shell is the thing that has to run the full
+			// height of the reading column.
+			const aside = document.querySelector('[data-testid="rm-side-panel"]');
 			const scroller = document.querySelector('[data-testid="rm-reader-scroll"]');
 			if (aside === null || scroller === null) return null;
 			const asideBox = aside.getBoundingClientRect();

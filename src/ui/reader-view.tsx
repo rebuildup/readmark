@@ -54,6 +54,7 @@ import {
 	addNote,
 	compareNotes,
 	deleteNote,
+	isHighlightLinked,
 	listNotes,
 	type NoteTarget,
 	replaceNoteAnchor,
@@ -62,9 +63,16 @@ import {
 import { saveReadingPosition } from '../storage/reading-state-repo.ts';
 import { useUiStore } from '../stores/ui-store.ts';
 import { AddBookmarkDialog, BookmarkDeleteDialog, BookmarksPanel } from './bookmarks-panel.tsx';
+import {
+	HighlightDeleteDialog,
+	type HighlightPanelEntry,
+	HighlightsPanel,
+} from './highlights-panel.tsx';
 import { NoteDeleteDialog, type NoteEditorState, NotesPanel } from './notes-panel.tsx';
+import type { PanelEntryState } from './panel-entry.ts';
 import { Button } from './primitives/button.tsx';
 import { LibraryLink } from './primitives/library-link.tsx';
+import { ReaderSidePanel } from './reader-side-panel.tsx';
 import { jumpToPage } from './scroll-to-page.ts';
 import {
 	type SelectionSnapshot,
@@ -260,9 +268,81 @@ interface HighlightRow {
 	readonly state: HighlightState;
 }
 
+/**
+ * What a jump actually did.
+ *
+ * The three answers are not decoration. A jump that silently lands on
+ * the top of a page is indistinguishable, to a reader, from one that
+ * found the exact line they marked — and the difference is the whole
+ * reason the panel lists these things. So the outcome travels back to
+ * the caller and becomes a message on the row.
+ *
+ * `nowhere` is not a scroll failure: it is "there was no place to go
+ * to", which is a different thing and needs different words.
+ */
+type JumpOutcome =
+	| { readonly kind: 'exact' }
+	| { readonly kind: 'page-only'; readonly pageIndex: PageIndex }
+	| { readonly kind: 'nowhere' };
+
+/**
+ * What a row says when its jump was not an exact landing.
+ *
+ * Two sentences' worth of honesty, and both halves matter. A message
+ * that only said 「見つかりませんでした」 would leave the reader unsure
+ * whether the press did anything at all — so the page they ended up on
+ * is named. A message that only said the page number would be a lie
+ * about precision.
+ *
+ * Takes the outcomes that are not `exact` on purpose: a caller that
+ * could hand this an exact landing would be able to put a "could not
+ * find it" message on a row that found it perfectly well.
+ */
+function jumpFailureMessage(outcome: Exclude<JumpOutcome, { readonly kind: 'exact' }>): string {
+	if (outcome.kind === 'nowhere') {
+		return '移動できる位置がありません。対象が削除されている可能性があります。';
+	}
+	return `正確な位置は見つかりませんでした。${outcome.pageIndex} ページに移動しました。`;
+}
+
 /** A shared empty list, so a page with no highlights keeps the same
  *  prop identity across re-renders. */
 const NO_HIGHLIGHTS: readonly HighlightRow[] = [];
+
+/** A shared empty note list, for the same reason as `NO_HIGHLIGHTS`:
+ *  a highlight with no notes must not hand the panel a fresh array on
+ *  every render. */
+const NO_NOTES: readonly Note[] = [];
+
+/**
+ * The reader's resolution of a highlight, as the panel's own vocabulary.
+ *
+ * The four states the reader distinguishes become the panel's three, and
+ * two of them merge: `unresolved` (this reader cannot find the words)
+ * and `mismatch` (the row and the resolution disagree about the page)
+ * are both "this row is real, and the panel cannot take you to it". They
+ * are different failures and the reader logs them differently, but to
+ * a reader holding a list they would say the same thing, and inventing
+ * a fourth state to keep them apart would be a distinction the UI
+ * cannot make.
+ *
+ * `vanished` is the one that maps to `gone`, and it is worth naming: it
+ * is not a resolution failure at all. It is the repository saying the
+ * row is not on disk any more — another tab deleted it, or the reader
+ * did while this list was open. There is nothing to jump to because
+ * there is nothing there.
+ */
+function highlightEntryState(state: HighlightState): PanelEntryState {
+	switch (state.kind) {
+		case 'paintable':
+			return 'ready';
+		case 'vanished':
+			return 'gone';
+		case 'unresolved':
+		case 'mismatch':
+			return 'unresolved';
+	}
+}
 
 /** The paintable rows per page, in one pass.
  *
@@ -572,6 +652,21 @@ export function ReaderView({
 		readonly pageOffsetRatio: number;
 	} | null>(null);
 	const [pendingDelete, setPendingDelete] = useState<Bookmark | null>(null);
+	const [pendingHighlightDelete, setPendingHighlightDelete] = useState<Highlight | null>(null);
+	/**
+	 * What a jump did that was not an exact landing, by entry id.
+	 *
+	 * One map for all three panels, because the rule is one rule: a row
+	 * that did not land exactly says so, and a row that did is left
+	 * alone. Keyed by the row's own id so a message can never end up on
+	 * a row it was not written for.
+	 *
+	 * It is a map rather than a counter because these coexist — a
+	 * reader can have three rows that each fell back to their page —
+	 * and because a single shared message would overwrite itself as
+	 * the reader tries one after another.
+	 */
+	const [jumpFailures, setJumpFailures] = useState<ReadonlyMap<string, string>>(() => new Map());
 	/** Inline error for the add-bookmark dialog. Cleared on each
 	 *  fresh open of the dialog so a previous failure does not
 	 *  reappear over a new attempt. */
@@ -1453,19 +1548,39 @@ export function ReaderView({
 	 *  place they were looking at in the file they had when they wrote
 	 *  it.
 	 */
+	/**
+	 * Take the reader to a page, an anchor, or both.
+	 *
+	 * Resolving the anchor confirms the words are still where the
+	 * reader left them, and picks the page they belong to now (the
+	 * file may have grown, or the mark outlived the original page).
+	 * A target with no anchor is a page pin and goes straight to the
+	 * jump — which is why a page pin is never `page-only`: landing on
+	 * the page is landing on the mark.
+	 *
+	 * A resolver failure is not a refusal: the target stays, and the
+	 * reader lands on the stored page anyway. A stored anchor that the
+	 * reader cannot find in *this* file may yet be the place they were
+	 * looking at in the file they had when they wrote it. What changes
+	 * is that the caller is told, so the row can say so — see
+	 * `JumpOutcome` above and `reader-side-panel`'s failure map.
+	 */
 	const jumpToPlace = useCallback(
 		async (target: {
 			readonly pageIndex: PageIndex;
 			readonly anchor: Anchor | null;
 			readonly position: Bookmark['position'];
-		}) => {
+		}): Promise<JumpOutcome> => {
 			const scroller = scrollRef.current;
-			if (scroller === null) return;
+			if (scroller === null) return { kind: 'nowhere' };
 			let targetPage = target.pageIndex;
+			let exact = true;
 			if (target.anchor !== null) {
 				const resolved = await handle.resolveAnchor(target.anchor).catch(() => null);
 				if (resolved !== null) {
 					targetPage = resolved.page;
+				} else {
+					exact = false;
 				}
 			}
 			// Starting a jump retires the one in flight, if any: the
@@ -1484,6 +1599,7 @@ export function ReaderView({
 				measuredHeight: (pageIndex) => footprintsRef.current.get(pageIndex)?.height,
 				shouldAbort: () => takeoverCountRef.current !== takeover,
 			});
+			return exact ? { kind: 'exact' } : { kind: 'page-only', pageIndex: targetPage };
 		},
 		// `handle.resolveAnchor` rather than `handle`: the resolver is
 		// the only part of the handle this reaches for, and naming it
@@ -1491,11 +1607,45 @@ export function ReaderView({
 		[handle.resolveAnchor, pageCount, registerTakeover],
 	);
 
+	/**
+	 * Record what a jump did on the row that asked for it.
+	 *
+	 * A successful jump clears any earlier message, so a row does not
+	 * keep explaining a failure the reader has since worked around —
+	 * and a row that recovered says so by having nothing to say.
+	 */
+	const recordJump = useCallback((entryId: string, outcome: JumpOutcome) => {
+		setJumpFailures((previous) => {
+			const next = new Map(previous);
+			if (outcome.kind === 'exact') {
+				if (!next.has(entryId)) return previous;
+				next.delete(entryId);
+				return next;
+			}
+			next.set(entryId, jumpFailureMessage(outcome));
+			return next;
+		});
+	}, []);
+
 	const handleJump = useCallback(
 		async (bookmark: Bookmark) => {
-			await jumpToPlace(bookmark);
+			recordJump(bookmark.id, await jumpToPlace(bookmark));
 		},
-		[jumpToPlace],
+		[jumpToPlace, recordJump],
+	);
+
+	const handleJumpToHighlight = useCallback(
+		async (highlight: Highlight) => {
+			recordJump(
+				highlight.id,
+				await jumpToPlace({
+					pageIndex: highlight.pageIndex,
+					anchor: highlight.anchor,
+					position: null,
+				}),
+			);
+		},
+		[jumpToPlace, recordJump],
 	);
 
 	/**
@@ -1510,26 +1660,154 @@ export function ReaderView({
 	 *  to be. A dangling `highlightId` — a highlight removed in
 	 *  another tab — falls back to the note's own position rather
 	 *  than refusing, because the note is still about a place.
+	 *
+	 *  The one case with nowhere to fall back to is a note that hangs
+	 *  off a highlight which is gone *and* has no position of its own.
+	 *  A free note is exactly that: `kind: 'free'`, so no page, and a
+	 *  `highlightId` that no longer resolves to anything. This used to
+	 *  fall off the end of the function and do nothing at all, which
+	 *  to a reader pressing the row is indistinguishable from the app
+	 *  ignoring them. It now records the outcome like every other jump.
+	 *  The panel is expected not to offer the button in the first
+	 *  place — see `isNoteReachable` — and this is the belt to that
+	 *  braces.
 	 */
 	const handleJumpToNote = useCallback(
 		async (note: Note) => {
 			if (note.highlightId !== null) {
 				const highlight = highlights.find((row) => row.row.id === note.highlightId);
 				if (highlight !== undefined) {
-					await jumpToPlace({
-						pageIndex: highlight.row.pageIndex,
-						anchor: highlight.row.anchor,
-						position: null,
-					});
+					recordJump(
+						note.id,
+						await jumpToPlace({
+							pageIndex: highlight.row.pageIndex,
+							anchor: highlight.row.anchor,
+							position: null,
+						}),
+					);
 					return;
 				}
 			}
 			if (note.kind === 'positioned') {
-				await jumpToPlace({ pageIndex: note.pageIndex, anchor: note.anchor, position: null });
+				recordJump(
+					note.id,
+					await jumpToPlace({ pageIndex: note.pageIndex, anchor: note.anchor, position: null }),
+				);
+				return;
 			}
+			recordJump(note.id, { kind: 'nowhere' });
 		},
-		[highlights, jumpToPlace],
+		[highlights, jumpToPlace, recordJump],
 	);
+
+	/**
+	 * Whether a note has anywhere left to go.
+	 *
+	 *  The answer needs the highlights, and the highlights live here, so
+	 *  the panel asks. A positioned note always has its own page. A
+	 *  free note has nothing but the highlight it names, so it is
+	 *  reachable exactly while that highlight is in the open list.
+	 *
+	 *  Notes on a highlight this reader cannot *resolve* are still
+	 *  reachable: the mark is there, the jump falls back to the page,
+	 *  and the row says the exact spot was not found. That is a
+	 *  degraded jump, not a missing one, and the panel has words for
+	 *  the difference.
+	 */
+	const isNoteReachable = useCallback(
+		(note: Note): boolean => {
+			if (note.kind === 'positioned') return true;
+			return note.highlightId !== null && highlights.some((row) => row.row.id === note.highlightId);
+		},
+		[highlights],
+	);
+
+	/**
+	 * The notes written about each highlight, keyed by highlight id.
+	 *
+	 * Built from the note list this reader already holds rather than by
+	 * asking the repository once per highlight. The notes the panel
+	 * needs are a subset of what `listNotes` already returned — a note
+	 * on a highlight in this source is scoped to this source (or to the
+	 * document, if it is a free note) and so is in that list — so a
+	 * per-highlight query would be one more IndexedDB read per row to
+	 * arrive at an answer already in hand. `listNotesForHighlight` is
+	 * the indexed join for the question asked cold, against a highlight
+	 * id the panel does not already have a note list for.
+	 *
+	 * Memoised because it feeds the entries the panel renders, and a
+	 * fresh map per render would rebuild every entry object — which is
+	 * what makes a highlight row's props a new identity on every commit.
+	 */
+	const notesByHighlight = useMemo(() => {
+		const grouped = new Map<string, Note[]>();
+		for (const note of notes) {
+			// The repository owns the "is this note linked" rule, and
+			// answering it here by hand is how two surfaces end up
+			// disagreeing about which notes hang off a mark.
+			if (!isHighlightLinked(note)) continue;
+			// Narrowing, not a cast: `isHighlightLinked` answers a
+			// question about a trimmed value and does not narrow the
+			// type, so `highlightId` is still `string | null` here.
+			const highlightId = note.highlightId;
+			if (highlightId === null) continue;
+			const existing = grouped.get(highlightId);
+			if (existing === undefined) grouped.set(highlightId, [note]);
+			else existing.push(note);
+		}
+		return grouped;
+	}, [notes]);
+
+	/**
+	 * The highlights list, in the shape the panel reads.
+	 *
+	 * One pass, and the reader's own resolution is carried through
+	 * rather than re-derived: this is the same answer the painter uses
+	 * to decide whether to draw an overlay, so a highlight cannot be
+	 * painted on the page and simultaneously described in the list as
+	 * unplaceable.
+	 */
+	const highlightEntries = useMemo<readonly HighlightPanelEntry[]>(
+		() =>
+			highlights.map((row) => ({
+				highlight: row.row,
+				state: highlightEntryState(row.state),
+				notes: notesByHighlight.get(row.row.id) ?? NO_NOTES,
+			})),
+		[highlights, notesByHighlight],
+	);
+
+	/**
+	 * Remove a highlight from the panel.
+	 *
+	 *  `false` means the row was already gone — another tab, or the
+	 *  reader themselves. Either way there is nothing on disk to
+	 *  reconcile with, so the row leaves the list in both cases, which
+	 *  is the same rule the bookmark and note removals follow.
+	 */
+	const handleConfirmDeleteHighlight = useCallback(async () => {
+		const target = pendingHighlightDelete;
+		if (target === null) return;
+		setPendingHighlightDelete(null);
+		try {
+			await deleteHighlight(target.id);
+			setHighlights((previous) => previous.filter((row) => row.row.id !== target.id));
+			// The row is gone, so is anything said about jumping to it.
+			// Leaving the message behind would explain a jump for an
+			// entry that is no longer on screen.
+			setJumpFailures((previous) => {
+				if (!previous.has(target.id)) return previous;
+				const next = new Map(previous);
+				next.delete(target.id);
+				return next;
+			});
+		} catch (error: unknown) {
+			// The id, never the quote: the highlight's text is content
+			// the reader marked, and a stack trace is not a place for it.
+			console.error('readmark: could not delete a highlight', { id: target.id, error });
+			setActionError('ハイライトを削除できませんでした。もう一度お試しください。');
+		}
+	}, [pendingHighlightDelete]);
 
 	/**
 	 * Write a note about the words the reader just selected.
@@ -1785,6 +2063,14 @@ export function ReaderView({
 					</Button>
 					<Button
 						variant="ghost"
+						onClick={() => setSidePanel(sidePanel === 'highlights' ? 'none' : 'highlights')}
+						data-testid="rm-toggle-highlights"
+						aria-pressed={sidePanel === 'highlights'}
+					>
+						ハイライト
+					</Button>
+					<Button
+						variant="ghost"
 						onClick={() => setSidePanel(sidePanel === 'notes' ? 'none' : 'notes')}
 						data-testid="rm-toggle-notes"
 						aria-pressed={sidePanel === 'notes'}
@@ -1821,27 +2107,65 @@ export function ReaderView({
 					{actionError}
 				</p>
 			)}
-			{sidePanel === 'bookmarks' && (
-				<BookmarksPanel
-					bookmarks={bookmarks}
-					documentTitle={title}
-					onJump={(bookmark) => void handleJump(bookmark)}
-					onDelete={(bookmark) => setPendingDelete(bookmark)}
-				/>
-			)}
-			{sidePanel === 'notes' && (
-				<NotesPanel
-					notes={notes}
-					documentTitle={title}
-					editor={noteEditor}
-					error={noteError}
-					onStartCreate={handleStartCreateNote}
-					onEdit={handleStartEditNote}
-					onCancelEdit={handleCancelNoteEditor}
-					onSubmit={(body) => void handleSubmitNote(body)}
-					onJump={(note) => void handleJumpToNote(note)}
-					onDelete={(note) => setPendingNoteDelete(note)}
-				/>
+			{/*
+			 * One shell, three lists. The panel is unmounted entirely
+			 * when it is closed rather than rendered empty, so there
+			 * is no closed state for the shell to disagree with — and
+			 * so the notes editor, which lives in its panel, is gone
+			 * with it.
+			 *
+			 * Every count below is the length of the array that list
+			 * renders, which is the invariant the whole surface rests
+			 * on: see `panel-entry.ts`. The tab number, the panel's own
+			 * header number, and the rows on screen are three readings
+			 * of one list.
+			 */}
+			{sidePanel !== 'none' && (
+				<ReaderSidePanel
+					active={sidePanel}
+					counts={{
+						bookmarks: bookmarks.length,
+						highlights: highlightEntries.length,
+						notes: notes.length,
+					}}
+					onSelect={setSidePanel}
+					onClose={() => setSidePanel('none')}
+				>
+					{sidePanel === 'bookmarks' && (
+						<BookmarksPanel
+							bookmarks={bookmarks}
+							documentTitle={title}
+							jumpFailures={jumpFailures}
+							onJump={(bookmark) => void handleJump(bookmark)}
+							onDelete={(bookmark) => setPendingDelete(bookmark)}
+						/>
+					)}
+					{sidePanel === 'highlights' && (
+						<HighlightsPanel
+							entries={highlightEntries}
+							documentTitle={title}
+							jumpFailures={jumpFailures}
+							onJump={(highlight) => void handleJumpToHighlight(highlight)}
+							onDelete={(highlight) => setPendingHighlightDelete(highlight)}
+						/>
+					)}
+					{sidePanel === 'notes' && (
+						<NotesPanel
+							notes={notes}
+							documentTitle={title}
+							editor={noteEditor}
+							error={noteError}
+							isReachable={isNoteReachable}
+							jumpFailures={jumpFailures}
+							onStartCreate={handleStartCreateNote}
+							onEdit={handleStartEditNote}
+							onCancelEdit={handleCancelNoteEditor}
+							onSubmit={(body) => void handleSubmitNote(body)}
+							onJump={(note) => void handleJumpToNote(note)}
+							onDelete={(note) => setPendingNoteDelete(note)}
+						/>
+					)}
+				</ReaderSidePanel>
 			)}
 			{pendingAdd !== null && (
 				<AddBookmarkDialog
@@ -1856,6 +2180,13 @@ export function ReaderView({
 					label={`${pendingDelete.pageIndex} ページ`}
 					onConfirm={() => void handleConfirmDelete()}
 					onCancel={() => setPendingDelete(null)}
+				/>
+			)}
+			{pendingHighlightDelete !== null && (
+				<HighlightDeleteDialog
+					highlight={pendingHighlightDelete}
+					onConfirm={() => void handleConfirmDeleteHighlight()}
+					onCancel={() => setPendingHighlightDelete(null)}
 				/>
 			)}
 			{pendingNoteDelete !== null && (
