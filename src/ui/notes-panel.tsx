@@ -45,6 +45,7 @@ import type { Note } from '../domain/reading-state.ts';
 import { isHighlightLinked } from '../storage/notes-repo.ts';
 import { ConfirmDialog } from './confirm-dialog.tsx';
 import { NoteEditor, noteFirstLine } from './note-editor.tsx';
+import { PANEL_ENTRY_NOTICE, panelCount } from './panel-entry.ts';
 import { Button } from './primitives/button.tsx';
 
 /** Which note the editor is open on, if any. The parent decides what
@@ -63,6 +64,31 @@ export interface NotesPanelProps {
 	readonly busy?: boolean;
 	/** Inline message for an open editor. */
 	readonly error?: string | null;
+	/**
+	 * Whether the parent can actually take the reader to this note.
+	 *
+	 * The panel cannot answer this on its own. A note's jumpable-ness
+	 * turns on whether the highlight it names is still there, and only
+	 * the parent holds the open reader's highlights. Left out — as it is
+	 * when this panel is rendered on its own — the panel falls back to
+	 * what the note itself says, which is right for every note whose
+	 * target cannot have gone missing.
+	 *
+	 * The case it exists for: a note that hangs off a highlight which
+	 * has since been deleted, written on a book rather than a page. Such
+	 * a note has no position of its own, so answering `true` renders a
+	 * jump button that goes nowhere at all — the reader presses it and
+	 * the note simply stays, with no outcome to read.
+	 */
+	readonly isReachable?: (note: Note) => boolean;
+	/**
+	 * A jump that was asked for and did not land exactly, by note id.
+	 *
+	 * A positioned note always lands on its page even when its anchor
+	 * will not resolve, so this is the panel saying *how* it moved. See
+	 * the same prop on `BookmarksPanel`.
+	 */
+	readonly jumpFailures?: ReadonlyMap<string, string>;
 	readonly onStartCreate: () => void;
 	readonly onCancelEdit: () => void;
 	readonly onSubmit: (body: string) => void;
@@ -87,6 +113,8 @@ export function NotesPanel({
 	editor,
 	busy = false,
 	error = null,
+	isReachable,
+	jumpFailures,
 	onStartCreate,
 	onCancelEdit,
 	onSubmit,
@@ -94,12 +122,17 @@ export function NotesPanel({
 	onJump,
 	onDelete,
 }: NotesPanelProps) {
+	// The panel's own rule first, narrowed by whatever the parent knows.
+	// Both have to say yes: a note that is not jumpable by shape is not
+	// jumpable just because a highlight with its id happens to exist.
+	const reachable = (note: Note): boolean => isJumpable(note) && (isReachable?.(note) ?? true);
+
 	return (
-		<aside className="rm-panel rm-panel--reader" data-testid="rm-notes-panel" aria-label="メモ">
+		<section className="rm-panel__body" data-testid="rm-notes-panel" aria-label="メモ">
 			<header className="rm-panel__header">
 				<h2 className="rm-panel__title">メモ</h2>
 				<span className="rm-muted" data-testid="rm-notes-count">
-					{notes.length} 件
+					{panelCount(notes.length)}
 				</span>
 			</header>
 
@@ -154,6 +187,8 @@ export function NotesPanel({
 							note={note}
 							documentTitle={documentTitle}
 							editing={editor.kind === 'editing' && editor.note.id === note.id}
+							reachable={reachable(note)}
+							failure={jumpFailures?.get(note.id) ?? null}
 							busy={busy}
 							error={error}
 							onCancelEdit={onCancelEdit}
@@ -165,7 +200,7 @@ export function NotesPanel({
 					))}
 				</ol>
 			)}
-		</aside>
+		</section>
 	);
 }
 
@@ -173,6 +208,10 @@ interface NoteRowProps {
 	readonly note: Note;
 	readonly documentTitle: string;
 	readonly editing: boolean;
+	/** False when the note names somewhere that is not there any more.
+	 *  A note the parent cannot place gets no jump button and says so. */
+	readonly reachable: boolean;
+	readonly failure: string | null;
 	readonly busy: boolean;
 	readonly error: string | null;
 	readonly onCancelEdit: () => void;
@@ -186,6 +225,8 @@ function NoteRow({
 	note,
 	documentTitle,
 	editing,
+	reachable,
+	failure,
 	busy,
 	error,
 	onCancelEdit,
@@ -208,7 +249,7 @@ function NoteRow({
 				/>
 			) : (
 				<>
-					{isJumpable(note) ? (
+					{reachable ? (
 						<button
 							type="button"
 							className="rm-panel__jump"
@@ -216,12 +257,34 @@ function NoteRow({
 							data-testid="rm-note-jump"
 							aria-label={label === '' ? 'メモの位置へ移動' : `「${label}」の位置へ移動`}
 						>
-							<NoteContents note={note} documentTitle={documentTitle} />
+							<NoteContents note={note} documentTitle={documentTitle} notice={null} />
 						</button>
 					) : (
+						/*
+						 * No button, and the reason on the row. A note
+						 * whose only position was a highlight that has
+						 * been deleted has nowhere to send the reader,
+						 * and a button that quietly does nothing is the
+						 * worst of the three options — it looks like
+						 * the app ignoring the press.
+						 *
+						 * The note itself stays readable, editable and
+						 * deletable. It is the reader's own writing and
+						 * the missing thing is a reference, not the
+						 * words.
+						 */
 						<div className="rm-panel__jump rm-panel__jump--static">
-							<NoteContents note={note} documentTitle={documentTitle} />
+							<NoteContents
+								note={note}
+								documentTitle={documentTitle}
+								notice={PANEL_ENTRY_NOTICE.gone}
+							/>
 						</div>
+					)}
+					{failure !== null && (
+						<p className="rm-alert" role="alert" data-testid="rm-note-jump-error">
+							{failure}
+						</p>
 					)}
 					<div className="rm-note__row-actions">
 						<Button
@@ -258,9 +321,11 @@ function NoteRow({
 function NoteContents({
 	note,
 	documentTitle,
+	notice,
 }: {
 	readonly note: Note;
 	readonly documentTitle: string;
+	readonly notice: string | null;
 }) {
 	return (
 		<>
@@ -274,6 +339,11 @@ function NoteContents({
 				{note.body}
 			</span>
 			<span className="rm-panel__jump-hint">{noteHint(note, documentTitle)}</span>
+			{notice !== null && (
+				<span className="rm-panel__notice" data-testid="rm-note-notice">
+					{notice}
+				</span>
+			)}
 		</>
 	);
 }

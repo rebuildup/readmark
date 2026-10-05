@@ -23,11 +23,24 @@ import { useState } from 'react';
 
 import type { Bookmark } from '../domain/reading-state.ts';
 import { ConfirmDialog } from './confirm-dialog.tsx';
+import { panelCount } from './panel-entry.ts';
 import { Button } from './primitives/button.tsx';
 
 interface BookmarksPanelProps {
 	readonly bookmarks: readonly Bookmark[];
 	readonly documentTitle: string;
+	/**
+	 * A jump that was asked for and did not land exactly, by bookmark id.
+	 *
+	 * A page-only bookmark always lands on its page, so this is not a
+	 * failure to move — it is the panel saying *how* it moved. A mark
+	 * that carried an anchor resolves it to find the exact spot; if the
+	 * file in front of the reader no longer lays those words out the way
+	 * it did when they marked it, the reader still ends up on the right
+	 * page, and the panel says so instead of letting the jump look
+	 * exactly like the successful ones.
+	 */
+	readonly jumpFailures?: ReadonlyMap<string, string>;
 	readonly onJump: (bookmark: Bookmark) => void;
 	readonly onDelete: (bookmark: Bookmark) => void;
 }
@@ -35,6 +48,7 @@ interface BookmarksPanelProps {
 export function BookmarksPanel({
 	bookmarks,
 	documentTitle,
+	jumpFailures,
 	onJump,
 	onDelete,
 }: BookmarksPanelProps) {
@@ -42,11 +56,11 @@ export function BookmarksPanel({
 	const hints = bookmarkHints(bookmarks, documentTitle);
 
 	return (
-		<aside className="rm-panel rm-panel--reader" data-testid="rm-bookmarks-panel" aria-label="栞">
+		<section className="rm-panel__body" data-testid="rm-bookmarks-panel" aria-label="栞">
 			<header className="rm-panel__header">
 				<h2 className="rm-panel__title">栞</h2>
 				<span className="rm-muted" data-testid="rm-bookmarks-count">
-					{bookmarks.length} 件
+					{panelCount(bookmarks.length)}
 				</span>
 			</header>
 
@@ -67,6 +81,28 @@ export function BookmarksPanel({
 								<span className="rm-panel__jump-label">{labels[index]}</span>
 								<span className="rm-panel__jump-hint">{hints[index]}</span>
 							</button>
+							{/*
+							 * The jump button stays. A mark that fell back
+							 * to its page *did* move the reader, so taking
+							 * the button away would overstate what went
+							 * wrong; the message is what makes the
+							 * difference between the two outcomes
+							 * legible.
+							 *
+							 * `flex: 0 0 100%` gives it a line of its own
+							 * inside the row's flex line, so a mark that
+							 * has a message under it does not squeeze
+							 * its own label and hint sideways.
+							 */}
+							{jumpFailures?.get(bookmark.id) !== undefined && (
+								<p
+									className="rm-alert rm-panel__jump-error"
+									role="alert"
+									data-testid="rm-bookmark-jump-error"
+								>
+									{jumpFailures.get(bookmark.id)}
+								</p>
+							)}
 							<Button
 								variant="ghost"
 								onClick={() => onDelete(bookmark)}
@@ -79,7 +115,7 @@ export function BookmarksPanel({
 					))}
 				</ol>
 			)}
-		</aside>
+		</section>
 	);
 }
 
