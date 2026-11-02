@@ -45,6 +45,7 @@ import {
 	selectVisibleLibrary,
 } from '../library/library-list.ts';
 import { removeDocument, removeErrorMessage } from '../library/remove-document.ts';
+import { isSessionOnlyStorage } from '../storage/db.ts';
 import type { LibraryEntry } from '../storage/documents-repo.ts';
 import { listLibrary } from '../storage/documents-repo.ts';
 import { ConfirmDialog } from './confirm-dialog.tsx';
@@ -269,6 +270,20 @@ export function LibraryScreen() {
 					</p>
 					<DocumentImport onImported={handleImported} />
 				</section>
+
+				{/* Session-only storage (Issue #83): shown whenever Dexie is
+				    running against the in-memory backend — i.e. the browser
+				    denied IndexedDB to this context (a sandboxed Tool
+				    frame). The import CTA below still works; what the
+				    reader must know is that it does not survive a reload.
+				    A local-first app that downgrades persistence silently
+				    would break its own promise. */}
+				{isSessionOnlyStorage() && (
+					<p className="rm-muted" data-testid="rm-session-storage-notice">
+						この環境ではブラウザの保存領域が使えないため、ライブラリはこのセッション内だけ保持されます。ページを再読み込むと、import
+						した文書は消えます。
+					</p>
+				)}
 
 				{loadError !== null && (
 					<p className="rm-alert" role="alert" data-testid="rm-library-load-error">
