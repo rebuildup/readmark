@@ -22,7 +22,7 @@
  *   - `extractPdfMetadata()` is called from the library import
  *     flow (#3) where a leaked worker would block subsequent
  *     imports in the same session. The fingerprint pipeline +
- *     IndexedDB write are fast; the worker is the slow part to
+ *     session write are fast; the worker is the slow part to
  *     clean up.
  *
  * In scope for #3:

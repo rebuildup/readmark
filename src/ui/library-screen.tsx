@@ -51,7 +51,6 @@ import { ConfirmDialog } from './confirm-dialog.tsx';
 import { DocumentImport } from './document-import.tsx';
 import { LibraryRow } from './library-row.tsx';
 import { Button } from './primitives/button.tsx';
-import { QuotaBadge } from './quota-badge.tsx';
 
 export function LibraryScreen() {
 	const [entries, setEntries] = useState<readonly LibraryEntry[] | null>(null);
@@ -61,11 +60,6 @@ export function LibraryScreen() {
 	const [pendingDelete, setPendingDelete] = useState<LibraryEntry | null>(null);
 	const [deleting, setDeleting] = useState(false);
 	const [deleteError, setDeleteError] = useState<string | null>(null);
-	// Bumped on every successful library refresh so `<QuotaBadge>` can
-	// re-read `navigator.storage.estimate()`. The badge is read-only
-	// presentation; this counter is the seam that keeps it in sync
-	// without the screen reaching into the platform layer.
-	const [quotaRefreshKey, setQuotaRefreshKey] = useState(0);
 
 	// The instant the relative dates ("3 日前") are measured against.
 	// Re-based on every successful fetch, never on a timer: it must
@@ -80,7 +74,6 @@ export function LibraryScreen() {
 				setEntries(rows);
 				setNow(Date.now());
 				setLoadError(null);
-				setQuotaRefreshKey((key) => key + 1);
 			})
 			.catch((err: unknown) => {
 				console.error('listLibrary failed', err);
@@ -229,8 +222,8 @@ export function LibraryScreen() {
 					<section className="rm-library-empty" data-testid="rm-library-empty">
 						<h3>まだ文書がありません</h3>
 						<p className="rm-muted">
-							import ボタンから PDF を追加してください。ファイルはこのブラウザの IndexedDB
-							にのみ保存され、外部へ送信されません。
+							import ボタンから PDF
+							を追加してください。ファイルはブラウザに保存されず、このセッションの間だけメモリに保持され、外部へ送信されません。
 						</p>
 						<DocumentImport onImported={handleImported} />
 					</section>
@@ -258,14 +251,21 @@ export function LibraryScreen() {
 		<div className="rm-app">
 			<header className="rm-library-header">
 				<h1>readmark</h1>
-				<QuotaBadge refreshKey={quotaRefreshKey} />
 			</header>
 
 			<main className="rm-shell">
+				{/* The one line that states the storage model (ADR-0008):
+				    nothing is written to the browser, so the reader knows
+				    before importing — not after a reload loses the file —
+				    that this session is all the keeping there is. */}
+				<p className="rm-muted" data-testid="rm-no-storage-notice">
+					この readmark は保存しません。文書はこのセッションの間だけ保持され、閉じたらもう一度
+					import してください。
+				</p>
 				<section className="rm-library-intro">
 					<h2>Library</h2>
 					<p className="rm-muted">
-						ローカルに保持された文書のリスト。import で追加、読むで読書状態を復元します。
+						このセッションの文書のリスト。import で追加、読むで読書状態を復元します。
 					</p>
 					<DocumentImport onImported={handleImported} />
 				</section>
@@ -286,7 +286,7 @@ export function LibraryScreen() {
 						<>
 							<p>
 								この文書とファイル本体（{formatByteSize(pendingDelete.primarySource.byteSize)}
-								）をブラウザから削除します。
+								）をこのセッションから削除します。
 							</p>
 							<p>
 								栞・ハイライト・メモ・読書進捗も同時に失われます。元に戻すことはできません。あとで

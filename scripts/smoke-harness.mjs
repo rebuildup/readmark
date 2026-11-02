@@ -188,7 +188,7 @@ export async function withPreview(fn) {
  * consecutive reads (200 ms apart).
  *
  * Why a settle loop instead of a one-shot count read:
- *   - React + Dexie + IndexedDB form an async chain. A single read
+ *   - React + the session store form an async chain. A single read
  *     after `waitFor` can land mid-render or mid-write and report a
  *     stale count.
  *   - Three consecutive identical reads at 200 ms intervals is a
@@ -234,54 +234,26 @@ export const fail = (msg) => {
 };
 
 /**
- * Per-store row counts for every IndexedDB database on the page.
+ * Per-store row counts for the session store on the page.
  *
  * The smokes assert on storage, not on the DOM: a row can disappear
  * from the list while still sitting in the store, and that is exactly
- * the bug a delete cascade can have. The page cannot know the Dexie
- * handle, so the stores are counted through `indexedDB.databases()`
- * by name.
+ * the bug a delete cascade can have. The page's app module exposes
+ * its store under `globalThis.readmarkSessionStore` (the smoke seam
+ * in `src/storage/session-store.ts`), so the counts are read from
+ * there — the shape returned is the same `{ dbName: { stores,
+ * counts } }` the IndexedDB version produced, so callers and
+ * `findStoreCount` did not change.
  */
 export async function readStoreCounts(page) {
-	return await page.evaluate(async () => {
-		const dbs = await indexedDB.databases();
-		const result = {};
-		for (const { name } of dbs) {
-			if (!name) continue;
-			result[name] = await new Promise((resolve) => {
-				const req = indexedDB.open(name);
-				req.onsuccess = () => {
-					const db = req.result;
-					const stores = Array.from(db.objectStoreNames);
-					const counts = {};
-					let pending = stores.length;
-					const settle = () => {
-						if (--pending === 0) {
-							db.close();
-							resolve({ stores, counts });
-						}
-					};
-					for (const store of stores) {
-						try {
-							const cr = db.transaction(store, 'readonly').objectStore(store).count();
-							cr.onsuccess = () => {
-								counts[store] = cr.result;
-								settle();
-							};
-							cr.onerror = settle;
-						} catch {
-							settle();
-						}
-					}
-					if (!pending) {
-						db.close();
-						resolve({ stores, counts });
-					}
-				};
-				req.onerror = () => resolve({ stores: [], counts: {} });
-			});
+	return await page.evaluate(() => {
+		const store = globalThis.readmarkSessionStore;
+		if (store === undefined) return {};
+		const counts = {};
+		for (const [name, map] of Object.entries(store)) {
+			counts[name] = map.size;
 		}
-		return result;
+		return { session: { stores: Object.keys(counts), counts } };
 	});
 }
 

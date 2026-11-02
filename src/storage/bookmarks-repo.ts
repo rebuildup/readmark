@@ -1,5 +1,5 @@
 /**
- * readmark — bookmarks repository.
+ * readmark — bookmarks repository (session-scoped, ADR-0008).
  *
  * A bookmark is "the reader marked this place in this source". The
  * MVP form is the one ADR-0002 insists the product must support: a
@@ -20,49 +20,51 @@
  *
  * Ordering is by creation time, so the panel reads as a history of
  * where the reader has been rather than as an index.
+ *
+ * ADR-0008: the rows live in `sessionStore.bookmarks` and die with
+ * the tab. The signatures are the database-backed repository's; only the
+ * backing store changed, and with it the failure modes — there is
+ * no quota, no schema version, and no second tab to race (the old
+ * transaction-wrapping was serialisation against interleaving that
+ * single-threaded map access cannot produce).
  */
 
 import type { Anchor } from '../domain/annotation/index.ts';
 import type { DocumentId, SourceFingerprint } from '../domain/document.ts';
 import type { Bookmark, PageIndex } from '../domain/reading-state.ts';
-import { getDb } from './db.ts';
 import type { BookmarkScope } from './scope.ts';
+import { sessionStore } from './session-store.ts';
 
 /** Re-exported so callers can keep importing from `./bookmarks-repo.ts`
  *  without changing their call sites. */
 export type { BookmarkScope } from './scope.ts';
 
-/** Every bookmark in a source, oldest first. Uses the compound
- *  `[documentId+sourceFingerprint+pageIndex]` index plus an in-memory
- *  sort by `createdAt` so the panel reads as a history. */
-export async function listBookmarks(scope: BookmarkScope): Promise<readonly Bookmark[]> {
-	const rows = await getDb()
-		.bookmarks.where('[documentId+sourceFingerprint]')
-		.equals([scope.documentId, scope.sourceFingerprint])
-		.toArray();
-	// Tie-break on `id` so two bookmarks with the same millisecond
-	// `createdAt` (or a clock that has jumped) come back in the same
-	// order on every read. A panel that re-renders is a panel that
-	// flickers otherwise.
-	return [...rows].sort(
-		(a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
-	);
+/** The sort every bookmark list shares: creation time, with `id` as
+ *  the tie-break so two marks in the same millisecond (or a clock
+ *  that has jumped) come back in the same order on every read. A
+ *  panel that re-renders is a panel that flickers otherwise. */
+function byCreationThenId(a: Bookmark, b: Bookmark): number {
+	return a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }
 
-/** Bookmarks on one page, oldest first. Hits the
- *  `[documentId+sourceFingerprint+pageIndex]` compound index directly
- *  so the painter's query is a single indexed read. */
+function inScope(scope: BookmarkScope): (row: Bookmark) => boolean {
+	return (row) =>
+		row.documentId === scope.documentId && row.sourceFingerprint === scope.sourceFingerprint;
+}
+
+/** Every bookmark in a source, oldest first. */
+export async function listBookmarks(scope: BookmarkScope): Promise<readonly Bookmark[]> {
+	return [...sessionStore.bookmarks.values()].filter(inScope(scope)).sort(byCreationThenId);
+}
+
+/** Bookmarks on one page, oldest first. */
 export async function listBookmarksOnPage(
 	scope: BookmarkScope,
 	pageIndex: PageIndex,
 ): Promise<readonly Bookmark[]> {
-	const rows = await getDb()
-		.bookmarks.where('[documentId+sourceFingerprint+pageIndex]')
-		.equals([scope.documentId, scope.sourceFingerprint, pageIndex])
-		.toArray();
-	return [...rows].sort(
-		(a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
-	);
+	return [...sessionStore.bookmarks.values()]
+		.filter((row) => inScope(scope)(row) && row.pageIndex === pageIndex)
+		.sort(byCreationThenId);
 }
 
 /** What the caller supplies to mark a place. The generated fields
@@ -88,10 +90,10 @@ export interface NewBookmark {
 	 * A name the reader gave the mark, or `''` for none.
 	 *
 	 * Asked for when the mark is made, not edited afterwards: the panel
-	 * has no rename affordance in the MVP, so a title that could only be
-	 * set later would be a field no reader could ever fill in. Trimmed
-	 * here rather than in the UI, because a row storing `'  '` renders
-	 * as a blank label in every list that reads it.
+	 * has no rename affordance in the MVP, so a title that could only
+	 * be set later would be a field no reader could ever fill in.
+	 * Trimmed here rather than in the UI, because a row storing `'  '`
+	 * renders as a blank label in every list that reads it.
 	 */
 	readonly title?: string;
 }
@@ -114,26 +116,12 @@ export async function addBookmark(input: NewBookmark): Promise<Bookmark> {
 		title: input.title?.trim() ?? '',
 		createdAt: Date.now(),
 	};
-	await getDb().bookmarks.put(bookmark);
+	sessionStore.bookmarks.set(bookmark.id, bookmark);
 	return bookmark;
 }
 
 /** Remove a bookmark. Returns whether the row was there, so the UI
- *  can tell "removed" from "already gone" (a second tab, or a
- *  re-render race).
- *
- *  Race: a `get` outside a transaction cannot answer the question
- *  "was there a row" atomically with the subsequent `delete` — two
- *  concurrent calls (a panel + a cross-tab sync) can both observe
- *  the row as present, both call `delete`, and both return `true`
- *  while only one is a real write. Wrapping in a `rw` transaction
- *  lets Dexie serialise the get-and-delete so the second caller
- *  reads `undefined` and returns `false`. */
+ *  can tell "removed" from "already gone" (a re-render race). */
 export async function deleteBookmark(id: string): Promise<boolean> {
-	return await getDb().transaction('rw', getDb().bookmarks, async () => {
-		const existing = await getDb().bookmarks.get(id);
-		if (existing === undefined) return false;
-		await getDb().bookmarks.delete(id);
-		return true;
-	});
+	return sessionStore.bookmarks.delete(id);
 }

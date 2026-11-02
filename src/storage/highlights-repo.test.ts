@@ -1,8 +1,8 @@
 /**
- * Unit tests for the highlights repository.
+ * Unit tests for the highlights repository (session store, ADR-0008).
  *
  * What is under test is the same as for bookmarks, plus the one rule
- * this table has that bookmarks does not: the anchor write-back.
+ * this store has that bookmarks does not: the anchor write-back.
  *
  *   - A list scoped to the wrong source shows a reader another file's
  *     highlights, which is the failure that is invisible until someone
@@ -13,10 +13,12 @@
  *     resolver that has just decided an anchor is still valid must not
  *     be able to report success for a highlight that no longer exists.
  *
- * `getDb` is faked with a table that behaves like Dexie's for the
- * operations used here. The end-to-end claims — a highlight made by
- * dragging, painted, recovered, and persisted after a reload — belong
- * to `scripts/smoke-reader.mjs`, once the reader calls any of this.
+ * These run against the real in-memory repository — no database, no
+ * fake, no "another tab" to simulate: two tabs hold two independent
+ * stores (ADR-0008), so the cross-tab write race these tests used to
+ * stage through the fake cannot exist. The end-to-end claim — a
+ * highlight made by dragging, painted, and jumped to — belongs to
+ * `scripts/smoke-reader.mjs`.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -24,10 +26,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Anchor } from '../domain/annotation/index.ts';
 import { asDocumentId, asSourceFingerprint, type DocumentId } from '../domain/document.ts';
 import { asPageIndex } from '../domain/reading-state.ts';
+import {
+	addHighlight,
+	DEFAULT_HIGHLIGHT_COLOR,
+	deleteHighlight,
+	listHighlights,
+	listHighlightsOnPage,
+	replaceHighlightAnchor,
+} from './highlights-repo.ts';
+import { _resetSessionStoreForTests } from './session-store.ts';
 
-const rows = new Map<string, Record<string, unknown>>();
-/** Ids a "second tab" deletes at the moment of the next write. */
-const deletedElsewhere = new Set<string>();
 let sequence = 0;
 
 function useDeterministicIds(): void {
@@ -37,95 +45,16 @@ function useDeterministicIds(): void {
 	});
 }
 
-vi.mock('./db.ts', () => {
-	let inflight: Promise<unknown> = Promise.resolve();
-	return {
-		getDb: () => ({
-			highlights: {
-				where: (index: string) => ({
-					equals: (value: unknown) => {
-						// Compound-index shape: equality against a tuple
-						// matches each position against the matching
-						// segment of the index name so a
-						// `[documentId+sourceFingerprint+pageIndex]` read
-						// narrows to one page of one document in one pass.
-						// Dexie's compound syntax wraps the index in
-						// `[...]`; strip the brackets before splitting.
-						const tuple = Array.isArray(value) ? value : [value];
-						const segments = index.replace(/[[\]]/g, '').split('+');
-						return {
-							filter: (predicate: (row: Record<string, unknown>) => boolean) => ({
-								async toArray() {
-									return Array.from(rows.values())
-										.filter((row) => tuple.every((v, i) => row[segments[i] ?? index] === v))
-										.filter(predicate);
-								},
-							}),
-							async toArray() {
-								return Array.from(rows.values()).filter((row) =>
-									tuple.every((v, i) => row[segments[i] ?? index] === v),
-								);
-							},
-						};
-					},
-				}),
-				get: async (id: string) => rows.get(id),
-				put: async (row: Record<string, unknown>) => {
-					rows.set(String(row.id), row);
-					return row.id;
-				},
-				update: async (id: string, changes: Record<string, unknown>) => {
-					// Another tab's delete, landing between a caller's
-					// decision and this write. Dexie reports the number of
-					// rows it modified, and that count is the only honest
-					// answer — which is what the fake has to be able to
-					// produce for the race to be testable at all.
-					if (deletedElsewhere.has(id)) {
-						deletedElsewhere.delete(id);
-						rows.delete(id);
-						return 0;
-					}
-					const row = rows.get(id);
-					if (row === undefined) return 0;
-					rows.set(id, { ...row, ...changes });
-					return 1;
-				},
-				delete: async (id: string) => {
-					rows.delete(id);
-				},
-			},
-			transaction: async <T>(_mode: string, _tables: unknown, fn: () => Promise<T>) => {
-				// Serialise concurrent transactions on this table so
-				// the delete race resolves deterministically.
-				const result = inflight.then(async () => await fn());
-				inflight = result.catch(() => undefined);
-				return result;
-			},
-		}),
-	};
-});
-
-const {
-	DEFAULT_HIGHLIGHT_COLOR,
-	addHighlight,
-	deleteHighlight,
-	listHighlights,
-	listHighlightsOnPage,
-	replaceHighlightAnchor,
-} = await import('./highlights-repo.ts');
-
 const DOC_A = asDocumentId('00000000-0000-4000-8000-00000000000a');
 const DOC_B = asDocumentId('00000000-0000-4000-8000-00000000000b');
 const FINGERPRINT_A = asSourceFingerprint('a'.repeat(64));
 const FINGERPRINT_B = asSourceFingerprint('b'.repeat(64));
 
 beforeEach(() => {
-	rows.clear();
-	deletedElsewhere.clear();
+	vi.unstubAllGlobals();
 	sequence = 0;
 	useDeterministicIds();
-	vi.unstubAllGlobals();
-	useDeterministicIds();
+	_resetSessionStoreForTests();
 });
 
 /** A PDF anchor, or as close as this layer can see one: the payload is
@@ -149,8 +78,11 @@ async function add(params: {
 		selectedText: params.quote ?? 'a quote',
 	});
 	if (params.createdAt !== undefined) {
-		const row = rows.get(highlight.id);
-		if (row !== undefined) row.createdAt = params.createdAt;
+		// `addHighlight` returns the very object it stored, so the
+		// test can backdate the row without a second write path —
+		// the ordering assertions need creation times the clock
+		// cannot produce on demand.
+		(highlight as { createdAt: number }).createdAt = params.createdAt;
 	}
 	return highlight;
 }
@@ -279,22 +211,16 @@ describe('replaceHighlightAnchor', () => {
 	});
 
 	it('reports that a highlight that is gone was not written', async () => {
+		// The honest-failure half of the resolver contract. The
+		// former companion case — a row deleted *between* the
+		// resolver's decision and the write, by "another tab" — was
+		// staged through the old database fake and cannot occur
+		// against a per-tab store (ADR-0008): nothing outside this
+		// tab can remove a row, and this tab's own deletions are
+		// visible to the very next statement.
 		await add({ pageIndex: 1 });
 
 		expect(await replaceHighlightAnchor('no-such-highlight', anchorFor('q'))).toBe(false);
-	});
-
-	it('reports failure when the row is deleted between the decision and the write', async () => {
-		// The race that a read-then-write cannot see: the resolver has
-		// decided the anchor is still valid, another tab removes the row,
-		// and the write then matches nothing. Saying "stored" would hide a
-		// highlight that is gone — from a resolver, which is the one caller
-		// with no way to notice for itself.
-		const highlight = await add({ pageIndex: 3, quote: 'the cat' });
-		deletedElsewhere.add(highlight.id);
-
-		expect(await replaceHighlightAnchor(highlight.id, anchorFor('the cat sat down'))).toBe(false);
-		expect(rows.has(highlight.id)).toBe(false);
 	});
 });
 
@@ -305,7 +231,7 @@ describe('deleteHighlight', () => {
 
 		expect(await deleteHighlight(highlight.id)).toBe(true);
 		// A second delete reports "already gone" rather than pretending:
-		// the difference is a second tab, or a re-render race.
+		// the difference is a re-render race.
 		expect(await deleteHighlight(highlight.id)).toBe(false);
 
 		const listed = await listHighlights({
@@ -315,9 +241,10 @@ describe('deleteHighlight', () => {
 		expect(listed.map((row) => row.pageIndex)).toEqual([2]);
 	});
 
-	it('atomically reports only one winner when two callers race', async () => {
-		// Same shape as `bookmarks-repo.deleteBookmark`: two
-		// concurrent calls cannot both observe the row as present.
+	it('reports only one winner when two callers race', async () => {
+		// Same shape as `bookmarks-repo.deleteBookmark`: the calls run
+		// one after the other, so the second one sees nothing to
+		// delete and says `false`.
 		const highlight = await add({ pageIndex: 1 });
 
 		const results = await Promise.all([

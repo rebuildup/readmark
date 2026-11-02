@@ -24,7 +24,7 @@
  *     Untitled documents sort last in every mode — they are the
  *     "needs attention" rows, not the reading list.
  *
- * No React, no DOM, no IndexedDB: this module is a projection of
+ * No React, no DOM, no storage: this module is a projection of
  * data the screen already holds.
  */
 

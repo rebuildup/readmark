@@ -3,7 +3,8 @@
  *
  * Single responsibility (AGENTS.md §3 boundary):
  *   - Take a `Blob` (PDF for MVP), read its intrinsic metadata,
- *     and persist it through the storage repository.
+ *     and hand it to the storage repository (session-scoped,
+ *     ADR-0008).
  *   - Return a `Result<T, E>` so the React UI can render
  *     typed errors without `try`/`catch` boilerplate.
  *
@@ -12,8 +13,8 @@
  *   - Import `pdfjs-dist` directly. The pdf.js adapter lives in
  *     `src/reader/pdf/pdf-metadata.ts` per ADR-0004 / Biome
  *     `noRestrictedImports` (#12).
- *   - Touch Dexie directly. The storage repository
- *     (`src/storage/documents-repo.ts`) owns IndexedDB.
+ *   - Touch the session store directly. The storage repository
+ *     (`src/storage/documents-repo.ts`) owns how bytes are held.
  *
  * Error layering:
  *
@@ -22,25 +23,22 @@
  *   reader/pdf/   | PdfInvalidError      | wraps pdf.js's three "not a
  *                 |                      | usable PDF" exceptions behind a
  *                 |                      | single class. Boundary-stable.
- *   storage/      | QuotaExceededError   | Dexie / IndexedDB raises this on
- *                 | (raw, by spec name)  | `transaction()` failure. The W3C
- *                 |                      | name is stable across browsers;
- *                 |                      | we discriminate by `name`.
- *   library/      | Result<…, ImportError> | Translates the two above into a
+ *   library/      | Result<…, ImportError> | Translates the above into a
  *                 |                      | single discriminated union.
  *
  * The UI never inspects raw exceptions from this layer — it
  * switches on `ImportError.kind`. New failure modes get a new
  * `kind` here, not a new try/catch in every screen.
  *
+ * ADR-0008 removed `quota-exceeded`: the import writes to memory,
+ * so there is no storage quota whose exhaustion could produce one.
+ * The only remaining failures are "not a PDF" and "unexpected".
+ *
  * Why pdf.js exceptions are wrapped at the reader boundary:
  *   - ADR-0004 §Boundary keeps pdf.js internals inside
  *     `src/reader/pdf/`. Wrapping once here means pdf.js version
  *     bumps (or a future fork) cannot leak new exception names
  *     into `library/`.
- *   - Quota is left as raw `QuotaExceededError` because its
- *     `name` is a W3C spec contract and it originates in the
- *     storage layer, not in pdf.js.
  */
 
 import type { DocumentId, SourceFingerprint, SourceMetadata } from '../domain/document.ts';
@@ -54,7 +52,6 @@ import type { Result } from './result.ts';
  *  leak raw exceptions through `unknown`. */
 export type ImportError =
 	| { readonly kind: 'invalid-pdf'; readonly cause: unknown }
-	| { readonly kind: 'quota-exceeded'; readonly cause: unknown }
 	| { readonly kind: 'unsupported-format'; readonly cause: unknown }
 	| { readonly kind: 'unknown'; readonly cause: unknown };
 
@@ -62,8 +59,8 @@ export type ImportError =
  *  `documentId` for navigation and `sourceFingerprint` /
  *  `pageCount` to show immediate feedback ("imported 234-page
  *  PDF, opening…"). `sourceFingerprint` comes from the storage
- *  layer's transaction — we do NOT re-hash the blob after
- *  commit. */
+ *  repository's identity pass — we do NOT re-hash the blob
+ *  afterwards. */
 export interface ImportSuccess {
 	readonly documentId: DocumentId;
 	readonly sourceFingerprint: SourceFingerprint;
@@ -80,15 +77,13 @@ export interface ImportSuccess {
  *      (pdf.js via `src/reader/pdf/pdf-metadata.ts`).
  *   2. Build `SourceMetadata` (page count) + `DocumentMetadata`
  *      (title, author from /Info dictionary).
- *   3. Hand off to `importDocument()` for the IndexedDB write.
- *      The storage layer returns both `documentId` and
- *      `sourceFingerprint` from the same transaction so we
- *      never re-hash the blob.
+ *   3. Hand off to `importDocument()` for the session write.
+ *      The repository returns both `documentId` and
+ *      `sourceFingerprint` from the same pass so we never
+ *      re-hash the blob.
  *
  * Errors are normalized to `ImportError`:
  *   - `PdfInvalidError` → `invalid-pdf`.
- *   - Dexie / IndexedDB `QuotaExceededError` (or Firefox's
- *     `NS_ERROR_DOM_QUOTA_REACHED`) → `quota-exceeded`.
  *   - Anything else → `unknown` (with the raw cause for logging).
  *
  * Note: this MVP only handles PDF. The discriminated union above
@@ -140,28 +135,8 @@ export async function importPdfDocument(blob: Blob): Promise<Result<ImportSucces
 
 		return { ok: true, value: success };
 	} catch (cause: unknown) {
-		if (isQuotaExceeded(cause)) {
-			return { ok: false, error: { kind: 'quota-exceeded', cause } };
-		}
+		// ADR-0008: the write is into memory, so there is no quota
+		// to exhaust — everything here is unexpected.
 		return { ok: false, error: { kind: 'unknown', cause } };
 	}
-}
-
-/**
- * Detect IndexedDB / Dexie quota errors. The W3C spec name is
- * `QuotaExceededError`; some browsers / polyfills also expose
- * `NS_ERROR_DOM_QUOTA_REACHED`. We check both.
- *
- * Why not wrap `QuotaExceededError` at the storage boundary the
- * way we wrap `InvalidPDFException` at the pdf.js boundary:
- *   - The exception class is a stable W3C contract — `name`
- *     survives across all major browsers and polyfills.
- *   - Wrapping would also be defensible; we keep the discrimination
- *     here because there is exactly one thrower (Dexie's
- *     `transaction()`) and one catcher (this module).
- */
-function isQuotaExceeded(cause: unknown): boolean {
-	if (cause === null || typeof cause !== 'object') return false;
-	const name = (cause as { name?: unknown }).name;
-	return name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED';
 }

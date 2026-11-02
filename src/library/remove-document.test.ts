@@ -7,18 +7,18 @@
  *   2. `not-found` — the storage layer's `null` (row already gone)
  *      becomes a typed error instead of a silent success, because a
  *      delete that deleted nothing must not be reported as a delete.
- *   3. `unknown` — a Dexie failure is carried with its cause.
+ *   3. `unknown` — a failure below the flow is carried with its cause.
  *   4. `removeErrorMessage` covers every `kind`, so a new kind cannot
  *      reach the screen without copy.
  *
  * Why we mock the storage boundary:
  *   - The cascade itself lives in `deleteDocument()`
- *     (`src/storage/documents-repo.ts`) and needs a real IndexedDB.
- *     This repo has no `fake-indexeddb` (see the same note in
- *     `import-document.test.ts`), so repository-level behaviour is
- *     covered by the browser smoke in `scripts/smoke-library.mjs`
- *     rather than by a fake store that could drift from Dexie's
- *     real behaviour.
+ *     (`src/storage/documents-repo.ts`). The store is in-memory now
+ *     (ADR-0008), so a unit test COULD run it for real; the cascade's
+ *     end-to-end claim (counts after a visible delete) is covered by
+ *     the browser smoke in `scripts/smoke-library.mjs`, and this file
+ *     keeps mocking so it tests the flow's own logic rather than the
+ *     store's.
  *   - What matters here is the flow's own logic: the null → error
  *     mapping and the cause propagation.
  */

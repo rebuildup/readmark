@@ -2,7 +2,7 @@
  * readmark — format-agnostic document model.
  *
  * Three concept types form the spine of the model. Each owns one
- * responsibility and lives in its own IndexedDB table:
+ * responsibility and lives in its own storage record:
  *
  *   - `Document`        — LOGICAL book. A reader's "this book in my
  *                         library." Survives re-imports of the same

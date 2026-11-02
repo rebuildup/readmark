@@ -56,9 +56,9 @@ vi.mock('../storage/reading-state-repo.ts', () => ({
 	deleteReadingProgress: vi.fn(async () => false),
 }));
 
-// The view reads the mark list on mount, and the real repository needs
-// IndexedDB, which this environment does not have. Bookmark behaviour
-// has its own file; here the list only has to be empty and quiet.
+// The view reads the mark list on mount; here the list only has to be
+// empty and quiet (bookmark behaviour has its own file), so the repo
+// is mocked to keep this test independent of the shared session store.
 vi.mock('../storage/bookmarks-repo.ts', () => ({
 	listBookmarks: vi.fn(async () => []),
 	addBookmark: vi.fn(),
@@ -495,7 +495,7 @@ describe('saving the position', () => {
 		});
 
 		// One row per settled position, not one per scroll event: a
-		// read would otherwise be hundreds of IndexedDB writes.
+		// read would otherwise be hundreds of writes to the store.
 		expect(saveReadingPosition).toHaveBeenCalledTimes(1);
 		expect(saveReadingPosition.mock.calls[0]?.[0]).toMatchObject({
 			documentId: DOC_ID,

@@ -14,7 +14,7 @@
  *     overlay on failure is a row the reader cannot find by deleting
  *     what they see.
  *   - Re-selecting marked text offers removal, and confirming it takes
- *     the row down both in IndexedDB and on the page.
+ *     the row down both in the store and on the page.
  *   - A selection bookmark is stored with the anchor; a page bookmark is
  *     stored without one. Two different rows, two different shapes.
  *   - Switching source resets the highlights list. A row from a
@@ -469,8 +469,8 @@ describe('the bookmark action', () => {
 	it('shows the mark in the panel it just opened', async () => {
 		// The row is written and the panel is opened in the same handler,
 		// so if the write is not reflected in state the reader is shown
-		// the list they were already looking at: the mark is in IndexedDB
-		// and nowhere they can see or undo it. Nothing refills the list
+		// the list they were already looking at: the mark is in the
+		// store and nowhere they can see or undo it. Nothing refills the list
 		// either — it is read once per open, not watched.
 		//
 		// Asserted on the rendered panel rather than on `bookmarks`, so

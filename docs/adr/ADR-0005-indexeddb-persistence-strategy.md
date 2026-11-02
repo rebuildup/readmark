@@ -1,6 +1,7 @@
 # ADR-0005: IndexedDB persistence strategy
 
-- Status: Accepted
+- Status: Superseded by ADR-0008 (2026-11-02) — readmark keeps no
+  browser storage at all; see `ADR-0008-session-scoped-no-persistence.md`
 - Date: 2026-09-26
 - Deciders: readmark maintainers
 

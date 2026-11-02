@@ -1,58 +1,48 @@
 /**
- * Component test for `<DocumentImport>` (#10 wiring).
+ * Component test for `<DocumentImport>`.
  *
- * Coverage for #10 acceptance criteria:
- *   - When `readQuotaUsage` reports >= 90% used, the import does NOT
- *     run and an error is surfaced (#10 acceptance: "quota の 90%
- *     を超えた状態で import を試みるとエラー表示される").
- *   - On a successful import, `requestPersistenceIfNeeded` is called
- *     (#10 acceptance: "初回 import 後に persistent 要求が出る").
+ * Coverage:
  *   - On a successful import, `onImported` fires with the typed
- *     success value (the contract the library screen depends on).
- *   - On a quota-exceeded import failure, `requestPersistenceIfNeeded`
- *     is NOT called — we only ask for persistence when we actually
- *     committed a write.
+ *     success value (the contract the library screen depends on) and
+ *     the status line renders.
+ *   - A typed failure (`invalid-pdf` / `unknown`) surfaces as an
+ *     alert with the message the switch produces.
+ *   - A rejected flow (which the `Result` contract says cannot
+ *     happen) still ends in an alert rather than a stuck spinner.
+ *
+ * ADR-0008 removed what this file used to cover alongside those:
+ * the quota pre-flight (no storage, no quota) and the
+ * `requestPersistenceIfNeeded` call after a commit (nothing to make
+ * persistent). `#10`'s acceptance criteria died with them.
  *
  * Why the file picker is mocked, not rendered:
  *   - The `<input type="file">` opens the OS picker, which is not
  *     testable. We exercise `handleFile()` by directly invoking the
  *     React change handler with a synthetic `File`. The flow under
  *     test is everything between "file picked" and "import result
- *     surfaced", which is where the #10 wiring lives.
+ *     surfaced".
  */
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ImportError, ImportSuccess } from '../library/import-document.ts';
+import type { ImportSuccess } from '../library/import-document.ts';
 import { importPdfDocument } from '../library/import-document.ts';
-import { readQuotaUsage, requestPersistenceIfNeeded } from '../platform/persistent-storage.ts';
 import { DocumentImport } from './document-import.tsx';
 
 vi.mock('../library/import-document.ts', () => ({
 	importPdfDocument: vi.fn(),
 }));
 
-vi.mock('../platform/persistent-storage.ts', () => ({
-	readQuotaUsage: vi.fn(),
-	isQuotaOverThreshold: vi.fn((snapshot, threshold = 0.9) => {
-		if (snapshot.quota <= 0) return false;
-		return snapshot.usage / snapshot.quota >= threshold;
-	}),
-	requestPersistenceIfNeeded: vi.fn(),
-}));
-
 const mockImportPdfDocument = vi.mocked(importPdfDocument);
-const mockReadQuotaUsage = vi.mocked(readQuotaUsage);
-const mockRequestPersistence = vi.mocked(requestPersistenceIfNeeded);
 
 function makeSuccess(): ImportSuccess {
 	return {
 		documentId: '00000000-0000-4000-8000-000000000001' as ImportSuccess['documentId'],
 		sourceFingerprint: 'a'.repeat(64) as ImportSuccess['sourceFingerprint'],
 		pageCount: 12,
-		title: 'pre-flight doc',
+		title: 'a document',
 	};
 }
 
@@ -79,24 +69,14 @@ function pickFile(file: File) {
 
 beforeEach(() => {
 	mockImportPdfDocument.mockReset();
-	mockReadQuotaUsage.mockReset();
-	mockRequestPersistence.mockReset();
-	// Default: quota is healthy so individual tests can opt into the
-	// over-threshold path by overriding this mock.
-	mockReadQuotaUsage.mockResolvedValue({
-		usage: 100,
-		quota: 10000,
-		persistent: true,
-	});
-	mockRequestPersistence.mockResolvedValue(true);
 });
 
 afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-describe('DocumentImport — #10 wiring', () => {
-	it('calls importPdfDocument and onImported on success, then requests persistence', async () => {
+describe('DocumentImport', () => {
+	it('calls importPdfDocument and onImported on success, then shows the status', async () => {
 		const onImported = vi.fn();
 		const success = makeSuccess();
 		mockImportPdfDocument.mockResolvedValueOnce({ ok: true, value: success });
@@ -105,65 +85,51 @@ describe('DocumentImport — #10 wiring', () => {
 		pickFile(makeFile());
 
 		await waitFor(() => expect(onImported).toHaveBeenCalledWith(success));
-		expect(mockRequestPersistence).toHaveBeenCalledTimes(1);
 		expect(await screen.findByTestId('rm-import-status')).toBeTruthy();
+		// The success copy names the page count the flow computed —
+		// the library's immediate feedback contract.
+		expect(screen.getByTestId('rm-import-status').textContent).toContain('12 ページ');
 	});
 
-	it('refuses the import when current usage is at the 90% threshold', async () => {
-		mockReadQuotaUsage.mockResolvedValueOnce({
-			usage: 9000,
-			quota: 10000,
-			persistent: false,
+	it('surfaces an invalid PDF as the typed alert', async () => {
+		mockImportPdfDocument.mockResolvedValueOnce({
+			ok: false,
+			error: { kind: 'invalid-pdf', cause: new Error('not a pdf') },
 		});
+
 		renderImport();
 		pickFile(makeFile());
 
 		const alert = await screen.findByRole('alert');
-		expect(alert.textContent).toContain('ストレージの容量が不足');
-		// The import flow itself must NOT have been called — the
-		// pre-flight refuses before we touch IndexedDB.
-		expect(mockImportPdfDocument).not.toHaveBeenCalled();
-		expect(mockRequestPersistence).not.toHaveBeenCalled();
+		expect(alert.textContent).toContain('PDF として開けませんでした');
 	});
 
-	it('refuses the import when current usage is above the 90% threshold', async () => {
-		mockReadQuotaUsage.mockResolvedValueOnce({
-			usage: 9500,
-			quota: 10000,
-			persistent: true,
+	it('surfaces an unknown failure as the generic alert', async () => {
+		mockImportPdfDocument.mockResolvedValueOnce({
+			ok: false,
+			error: { kind: 'unknown', cause: new Error('boom') },
 		});
+
 		renderImport();
 		pickFile(makeFile());
 
 		const alert = await screen.findByRole('alert');
-		expect(alert.textContent).toContain('ストレージの容量が不足');
-		expect(mockImportPdfDocument).not.toHaveBeenCalled();
+		expect(alert.textContent).toContain('取り込みに失敗しました');
 	});
 
-	it('proceeds when readQuotaUsage rejects (unsupported browser)', async () => {
-		// Private-mode / unsupported browsers make estimate() reject.
-		// The pre-flight must not block on that; the storage layer
-		// will surface a real quota-exceeded if it really is full.
-		mockReadQuotaUsage.mockRejectedValueOnce(new Error('private mode'));
-		mockImportPdfDocument.mockResolvedValueOnce({ ok: true, value: makeSuccess() });
+	it('ends in an alert when the flow rejects, which the Result contract forbids', async () => {
+		// Defensive: `importPdfDocument()` is typed to return a
+		// `Result` and never throws. If a future change breaks that
+		// contract, leaving the busy spinner spinning is worse than
+		// surfacing a generic message.
+		const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		mockImportPdfDocument.mockRejectedValueOnce(new Error('contract broken'));
 
 		renderImport();
 		pickFile(makeFile());
 
-		await waitFor(() => expect(mockImportPdfDocument).toHaveBeenCalledTimes(1));
-	});
-
-	it('does not call requestPersistenceIfNeeded when the import fails', async () => {
-		const quotaError: ImportError = {
-			kind: 'quota-exceeded',
-			cause: new Error('disk full'),
-		};
-		mockImportPdfDocument.mockResolvedValueOnce({ ok: false, error: quotaError });
-
-		renderImport();
-		pickFile(makeFile());
-
-		await screen.findByRole('alert');
-		expect(mockRequestPersistence).not.toHaveBeenCalled();
+		const alert = await screen.findByRole('alert');
+		expect(alert.textContent).toContain('取り込みに失敗しました');
+		expect(spy).toHaveBeenCalled();
 	});
 });

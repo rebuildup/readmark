@@ -16,8 +16,8 @@
  *   - Generic UI can render "this annotation is at page 7" by
  *     asking the format-specific reader for a fallback display,
  *     without parsing the payload itself.
- *   - The storage layer writes bytes opaquely — Dexie / IndexedDB
- *     do not need to know what `payload` looks like.
+ *   - The storage layer writes bytes opaquely — the session store
+ *     does not need to know what `payload` looks like.
  *
  * Why `format` is a property of the anchor, not external metadata?
  *   - A Document may have multiple sources in different formats
