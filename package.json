@@ -25,7 +25,6 @@
 		"skills": "bunx skills"
 	},
 	"dependencies": {
-		"dexie": "^4.4.6",
 		"pdfjs-dist": "^5.4.624",
 		"react": "^19.3.0",
 		"react-dom": "^19.3.0",

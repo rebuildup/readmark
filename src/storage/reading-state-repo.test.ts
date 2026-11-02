@@ -1,59 +1,26 @@
 /**
- * Unit tests for the reading-progress repository.
+ * Unit tests for the reading-progress repository (session store,
+ * ADR-0008).
  *
- * `getDb` is faked with a table that behaves like Dexie's for the
- * operations this repository uses (a `Map` keyed by the composite
- * primary key). The repo has no `fake-indexeddb`, and a real IndexedDB
- * would not add evidence here anyway: what is under test is the key
- * discipline — the pair in the right order, the upsert replacing
- * rather than accumulating — and the row shape the UI relies on. The
- * end-to-end claim (a scroll really writes a row, a reopen really
- * restores it) is `scripts/smoke-reader.mjs`.
+ * What is under test is the key discipline — the pair in the right
+ * order, the upsert replacing rather than accumulating — and the row
+ * shape the UI relies on. The repository runs against the real
+ * in-memory store, so a test here exercises the shipped code path
+ * exactly: there is no database to fake. The end-to-end claim (a
+ * scroll really writes a row, a reopen really restores it) is
+ * `scripts/smoke-reader.mjs`.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
-import { asDocumentId, asSourceFingerprint, type DocumentId } from '../domain/document.ts';
+import { asDocumentId, asSourceFingerprint } from '../domain/document.ts';
 import { asPageIndex } from '../domain/reading-state.ts';
-
-const rows = new Map<string, unknown>();
-const putCalls: unknown[] = [];
-
-function key(documentId: DocumentId, fingerprint: string): string {
-	return `${documentId}|${fingerprint}`;
-}
-
-vi.mock('./db.ts', () => {
-	let inflight: Promise<unknown> = Promise.resolve();
-	return {
-		getDb: () => ({
-			readingProgress: {
-				get: async ([documentId, fingerprint]: [DocumentId, string]) =>
-					rows.get(key(documentId, fingerprint)) ?? undefined,
-				put: async (row: { documentId: DocumentId; sourceFingerprint: string }) => {
-					putCalls.push(row);
-					rows.set(key(row.documentId, row.sourceFingerprint), row);
-					return row.sourceFingerprint;
-				},
-				delete: async ([documentId, fingerprint]: [DocumentId, string]) => {
-					// Dexie 4 types `Table.delete` as `void`.
-					rows.delete(key(documentId, fingerprint));
-				},
-			},
-			transaction: async <T>(_mode: string, _tables: unknown, fn: () => Promise<T>) => {
-				// Serialise concurrent transactions on this table so
-				// the delete-vs-save race resolves deterministically.
-				const result = inflight.then(async () => await fn());
-				inflight = result.catch(() => undefined);
-				return result;
-			},
-		}),
-	};
-});
-
-const { deleteReadingProgress, getReadingProgress, saveReadingPosition } = await import(
-	'./reading-state-repo.ts'
-);
+import {
+	deleteReadingProgress,
+	getReadingProgress,
+	saveReadingPosition,
+} from './reading-state-repo.ts';
+import { _resetSessionStoreForTests, sessionStore } from './session-store.ts';
 
 const DOC_A = asDocumentId('00000000-0000-4000-8000-00000000000a');
 const DOC_B = asDocumentId('00000000-0000-4000-8000-00000000000b');
@@ -61,8 +28,7 @@ const FINGERPRINT_A = asSourceFingerprint('a'.repeat(64));
 const FINGERPRINT_B = asSourceFingerprint('b'.repeat(64));
 
 beforeEach(() => {
-	rows.clear();
-	putCalls.length = 0;
+	_resetSessionStoreForTests();
 });
 
 describe('getReadingProgress', () => {
@@ -126,7 +92,7 @@ describe('saveReadingPosition', () => {
 		await saveReadingPosition({ ...params, currentPage: asPageIndex(1) });
 		await saveReadingPosition({ ...params, currentPage: asPageIndex(9) });
 
-		expect(rows.size).toBe(1);
+		expect(sessionStore.readingProgress.size).toBe(1);
 		expect(
 			(
 				await getReadingProgress({
@@ -151,7 +117,7 @@ describe('saveReadingPosition', () => {
 			position: null,
 		});
 
-		expect(rows.size).toBe(2);
+		expect(sessionStore.readingProgress.size).toBe(2);
 		expect(
 			(
 				await getReadingProgress({
@@ -197,11 +163,10 @@ describe('deleteReadingProgress', () => {
 		).toBe(false);
 	});
 
-	it('atomically reports only one winner when two callers race', async () => {
-		// Without a transaction, two concurrent "forget progress"
-		// clicks would both pass the existence check and both delete.
-		// The transaction serialises the read-and-delete so the
-		// second caller sees the row is already gone.
+	it('reports only one winner when two callers race', async () => {
+		// Two concurrent "forget progress" clicks: the calls run one
+		// after the other, so the second one finds nothing and says
+		// `false`.
 		await saveReadingPosition({
 			documentId: DOC_A,
 			sourceFingerprint: FINGERPRINT_A,
