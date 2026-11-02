@@ -2,8 +2,8 @@
  * readmark — UI state store.
  *
  * Only ephemeral UI state lives here (selected panel, zoom level, etc.).
- * Persistent state (library, library, reading-progress, notes) lives in
- * IndexedDB through storage/. Zustand is chosen because the store is small
+ * Session state (library, reading-progress, notes) lives in the
+ * session store through storage/. Zustand is chosen because the store is small
  * and we don't need the atom-per-key granularity of Jotai.
  */
 

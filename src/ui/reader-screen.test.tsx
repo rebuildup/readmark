@@ -87,7 +87,9 @@ vi.mock('../storage/reading-state-repo.ts', () => ({
 
 // The view reads the mark list on mount. This screen is not where
 // bookmark behaviour is under test, so the list only has to be empty —
-// and it has to be a mock, because the real repository needs IndexedDB.
+// and it has to be a mock, because this screen's own behaviour is
+// what is under test — the real repository would share the app's
+// session store with every other test file.
 vi.mock('../storage/bookmarks-repo.ts', () => ({
 	listBookmarks: vi.fn(async () => []),
 	addBookmark: vi.fn(),

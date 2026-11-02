@@ -51,20 +51,21 @@ bun install --frozen-lockfile  # CI 用
 | `bun scripts/smoke-reader.mjs` | Reader（#11）のブラウザ smoke |
 | `bun scripts/smoke-geometry.mjs` | highlight geometry（#7）のブラウザ smoke |
 | `bun scripts/smoke-pdf-assets.mjs` | pdf.js の support table（CMap / standard font / wasm）が `dist/` にあり HTTP で取得できることの smoke |
-| `bun scripts/smoke-schema-upgrade.mjs` | 旧スキーマの IndexedDB を app が回復できることの smoke |
 
-> `smoke-geometry` / `smoke-pdf-assets` / `smoke-schema-upgrade` は
+> `smoke-geometry` / `smoke-pdf-assets` は
 > **それぞれ 1 種類の環境依存を検出する**。他の smoke は毎回 Chromium
-> profile が新品なので、IndexedDB が壊れている状態と pdf.js の
-> support table が `dist/` に無い状態を再現できない。それぞれ
-> `docs/troubleshooting.md` §4 / §5 に対応する。
+> profile が新品なので、pdf.js の
+> support table が `dist/` に無い状態を再現できない。pdf.js 側は
+> `docs/troubleshooting.md` §4 に対応する（schema upgrade の smoke は
+> ADR-0008 で対象が消えたため削除）。
 
 ### ブラウザ smoke
 
 `scripts/smoke-*.mjs` は `bun run preview`（= `bun run build` 済み）を
 headless Chromium で操作する one-shot のスクリプトで、CI では動かない。
-共通の土台（preview 起動、Chromium 起動、count の settle、IndexedDB の
-store 件数読み出し）は `scripts/smoke-harness.mjs` にある。
+共通の土台（preview 起動、Chromium 起動、count の settle、session
+store の行数読み出し — smoke seam は `src/storage/session-store.ts`）は
+`scripts/smoke-harness.mjs` にある。
 
 ```bash
 bun run build
@@ -84,13 +85,10 @@ rotation）も同じで、happy-dom には canvas も layout も実 Selection �
 > env schema はリポジトリ root の `.env.example` を canonical として
 > 扱う。`.env`, `.env.development`, `.env.production` は gitignore。
 
-MVP で必要な env 変数は 1 つだけ：
+MVP で必要な env 変数はありません（ADR-0008 で保存そのものを廃止した
+ため、`READMARK_EPHEMERAL` のような永続化切替は存在しない）。
 
-| 変数 | デフォルト | 用途 |
-| ---- | ---------- | ---- |
-| `READMARK_EPHEMERAL` | `false` | true で IndexedDB 永続化を拒否（プレビュー / sandbox mode 用） |
-
-それ以外（`READMARK_TELEMETRY` や `READMARK_ENABLE_EPUB` 等）は MVP
+不要（`READMARK_TELEMETRY` や `READMARK_ENABLE_EPUB` 等）なものは MVP
 では **schema にも存在しない**。テレメトリは ADR-0001 で
 「含めない」と決めており、EPUB は ADR-0003 で「post-MVP」と決めて
 いるため、YAGNI に従い schema を膨らませない。必要になった時点で
@@ -115,11 +113,6 @@ ADR と一緒に追加する。
 #     ADR that introduces them. Adding `READMARK_TELEMETRY` or
 #     `READMARK_ENABLE_EPUB` here would imply those features are
 #     on the MVP roadmap — they are not.
-
-# When true, IndexedDB persistence is bypassed. Useful for
-# ephemeral preview / sandbox mode where every reload starts
-# from an empty library.
-READMARK_EPHEMERAL=false
 ```
 
 CI は `.env.example` を参照しない（`.env*` を読みに行く step が

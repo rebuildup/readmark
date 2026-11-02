@@ -168,9 +168,9 @@ export interface ResolvedAnchor {
 	 * Recovery rebuilds the display half of an anchor from the source
 	 * (ADR-0007), and those rects are better than the ones in storage:
 	 * they were measured against the copy of the file in front of the
-	 * reader. Somebody has to persist them, and it cannot be the
+	 * reader. Somebody has to keep them, and it cannot be the
 	 * reader: `src/reader/` does not import the storage layer, and a
-	 * reader that reached into IndexedDB would be a second, invisible
+	 * reader that reached into the store would be a second, invisible
 	 * writer whose failures no screen could report.
 	 *
 	 * So recovery hands the refreshed anchor back and lets the caller

@@ -3,7 +3,7 @@
  *
  * Single responsibility (AGENTS.md §3 boundary): turn "the reader
  * asked to delete this document" into a typed outcome, without
- * knowing anything about React or IndexedDB.
+ * knowing anything about React or the session store.
  *
  * What deletion means, and why it is not the caller's problem:
  *   - `deleteDocument()` in the storage layer removes the Document,
@@ -53,8 +53,8 @@ export async function removeDocument(
 		}
 		return { ok: true, value: { documentId, summary } };
 	} catch (cause: unknown) {
-		// Do not narrow the cause here: a Dexie failure (blocked
-		// upgrade, closed connection, corrupted store) is a bug we
+		// Do not narrow the cause here: a failure below this layer
+		// (a broken fingerprint pass, a store bug) is a bug we
 		// want in the log, not a user-facing category. `console.error`
 		// stays at the UI boundary, which owns the console.
 		return { ok: false, error: { kind: 'unknown', cause } };

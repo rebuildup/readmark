@@ -172,9 +172,10 @@ const PREFETCH_MARGIN = '200% 0px';
 /** How long the position has to be still before it is written.
  *
  *  A scroll produces one event per frame; writing a row per frame
- *  would put a hundred IndexedDB transactions per second of reading
- *  into a local-first app for no benefit — the position only has to
- *  survive a crash, not every intermediate scroll offset. This is a
+ *  would put a hundred writes per second of reading into the
+ *  session store for no benefit — the position only has to be
+ *  current when something reads it (a restore, the reader's own
+ *  position query), not at every intermediate scroll offset. This is a
  *  *debounce*, not a throttle: the timer is restarted by every new
  *  position, so a continuous scroll writes once when it stops rather
  *  than writing repeatedly while it is still going.

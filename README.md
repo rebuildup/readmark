@@ -1,7 +1,9 @@
 # readmark
 
 ローカルファーストの読書環境。ブラウザで文書を開いて読むだけでなく、その
-文書に対する「読書状態」を継続して保持できます。
+文書に対する「読書状態」をそのセッションの中で保持します。**保存はしません**
+— 文書はこのセッションの間だけで、閉じたら再 import します
+（[ADR-0008](./docs/adr/ADR-0008-session-scoped-no-persistence.md)）。
 
 - **MVP 対応フォーマット**: PDF
 - **将来対応**: EPUB / Markdown / プレーンテキスト
@@ -22,9 +24,9 @@ readmark はファイルビューアではなく、読書アプリです。
   - **`DocumentSource`**（物理的 file）— `SourceFingerprint`（バイト列の
     SHA-256）と `DocumentId` を持つ。`format` / `byteSize` / `pageCount`
     など source 固有のプロパティを保持。
-  - **`DocumentBlob`** — source のバイト列のみ。quota eviction で
-    `DocumentSource` のメタデータや読書状態に手を入れずに落とせるよう、
-    別テーブル。
+  - **`DocumentBlob`** — source のバイト列のみ。`DocumentSource` の
+    メタデータや読書状態と独立に（削除や drop が互いに影響しないよう
+    ）分離。
 - 位置を持つ読書状態は **`Document` + `DocumentSource` のペアで識別**：
   - `ReadingProgress` は composite primary key `[documentId,
     sourceFingerprint]`、source ごとに 1 行。
@@ -36,8 +38,9 @@ readmark はファイルビューアではなく、読書アプリです。
 - MVP では 1 Document に対して 1 DocumentSource。schema は 1:N を
   既にサポートしているので、「同じ本の PDF 版と EPUB 版を束ねる」UI
   は storage を書き換えずに追加できる。
-- 永続化はすべて IndexedDB（Dexie）。`localStorage` に大きなデータは
-  入れません。
+- 保存はしません。文書 bytes・メタデータ・読書状態はすべてタブ内
+  インメモリ（`src/storage/session-store.ts`）で、リロードで消えます。
+  `localStorage` も使いません（[ADR-0008](./docs/adr/ADR-0008-session-scoped-no-persistence.md)）。
 - PDF レンダラーは `src/reader/pdf/` に閉じ込め、アプリの他の層は
   `pdfjs-dist` を直接 import しません
   （[ADR-0004](./docs/adr/ADR-0004-pdf-renderer-isolation.md)）。
@@ -84,19 +87,18 @@ readmark/
 │  ├─ development.md
 │  ├─ release.md
 │  ├─ troubleshooting.md
-│  └─ adr/               # ADR-0001 〜 ADR-0007
+│  └─ adr/               # ADR-0001 〜 ADR-0008
 ├─ src/
 │  ├─ main.tsx           # entry
 │  ├─ App.tsx            # router shell
 │  ├─ styles.css         # デザイントークン + 最小スタイル
 │  ├─ domain/            # format-agnostic types（Document / ReadingState）
-│  ├─ storage/           # Dexie スキーマ + repositories
+│  ├─ storage/           # インメモリ session store + repositories
 │  ├─ reader/            # reader 契約 + per-format 実装（pdf はここ）
 │  ├─ annotation/        # フォーマット非依存 anchor（ADR-0007）
 │  ├─ library/           # ライブラリ系フロー
 │  ├─ ui/                # React 画面
 │  ├─ stores/            # Zustand（UI state のみ）
-│  ├─ platform/          # navigator.storage 等の薄いラッパー
 │  ├─ lib/               # utilities（fingerprint.ts）
 │  └─ test/              # vitest setup
 ├─ public/
@@ -110,10 +112,10 @@ readmark/
 含む:
 
 1. ローカル PDF の import
-2. import した文書をブラウザ内ライブラリへ保存
+2. import した文書をそのセッションのライブラリへ保持（保存はしない）
 3. ライブラリから再度開く
 4. PDF の閲覧
-5. 最後に読んでいたページ・位置の自動保存と復元
+5. 最後に読んでいたページ・位置の自動保存と復元（セッション内）
 6. 栞の追加・削除
 7. PDF テキストの選択
 8. 選択範囲へのハイライト
@@ -123,6 +125,7 @@ readmark/
 
 含まない：
 
+- ブラウザへの保存（リロード後の復元。仕様として持たない — ADR-0008）
 - アカウント / サーバ / クラウド同期
 - 複数端末同期
 - PDF ファイル自体への annotation 書き込み

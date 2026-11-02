@@ -35,7 +35,8 @@ design tokens, or CI.
 - **JS/TS**: bun (`packageManager` pin in `package.json`).
 - **Build**: Vite 7.x with `@vitejs/plugin-react`.
 - **Renderer**: `pdfjs-dist` 5.4.x.
-- **Persistence**: IndexedDB through Dexie.
+- **Persistence**: none. The session store (`src/storage/session-store.ts`)
+  is in-memory and tab-scoped (ADR-0008). No browser storage APIs.
 - **State**: Zustand for ephemeral UI state only.
 - **Router**: react-router-dom 7.x.
 - **Format / lint**: Biome 2.x. **No Prettier. No ESLint.**
@@ -52,10 +53,10 @@ an ADR ticket before installing.
 The folder shape is obligation-oriented. **Path = projection of
 ownership**, not the rule that creates it.
 
-- `src/domain/` — format-agnostic types. No React, no Dexie, no
+- `src/domain/` — format-agnostic types. No React, no storage, no
   pdf.js imports here.
-- `src/storage/` — Dexie schema + repositories. The only folder
-  that imports `dexie`.
+- `src/storage/` — the in-memory session store + repositories. The
+  only code allowed to touch the store.
 - `src/reader/` — reader contract + per-format implementations.
   PDF lives at `src/reader/pdf/`. **Only this folder imports
   `pdfjs-dist`.**
@@ -63,17 +64,17 @@ ownership**, not the rule that creates it.
   Format-agnostic; format-specific details come from the reader.
 - `src/library/` — library flows (import, list, dedupe).
 - `src/ui/` — React screens. Imports from every layer above, but
-  does not bypass repositories to hit Dexie directly.
+  does not bypass repositories to hit the session store directly.
 - `src/stores/` — Zustand stores for ephemeral UI state. **Never
   store document bytes or reading-state here.**
-- `src/platform/` — thin wrappers over browser APIs
-  (`navigator.storage`, `crypto.subtle`, `URL.createObjectURL`).
 - `src/lib/` — utilities (currently `fingerprint.ts`).
 
 Forbidden:
 
 - `import … from "pdfjs-dist"` outside `src/reader/pdf/`.
-- `import … from "dexie"` outside `src/storage/`.
+- Any browser storage API (`indexedDB`, `localStorage`,
+  `navigator.storage`) anywhere — ADR-0008 removed persistence
+  entirely; introducing one needs a new ADR, not a call site.
 - Generic `src/components/`, `src/hooks/`, `src/utils/` folders.
   Add code to the owner that needs it.
 
@@ -217,8 +218,9 @@ the upstream). Do not invent them to "look protected".
 - No telemetry in the default build. (No `READMARK_TELEMETRY` env
   var — YAGNI. Add it back if / when telemetry is actually
   implemented.)
-- No `localStorage` for documents or large payloads. IndexedDB
-  only.
+- No browser storage at all: no `localStorage`, no `indexedDB`,
+  no `navigator.storage` (ADR-0008). Documents, metadata and
+  reading state live in the tab's session store.
 - Reading state and document source are separate stores keyed by
   `DocumentId` (ADR-0002). Source bytes are keyed by
   `SourceFingerprint`.
@@ -230,8 +232,7 @@ In order:
 1. This `AGENTS.md` (always-on invariants).
 2. `docs/adr/*` (long-lived decisions).
 3. Coherent existing implementation in this repo.
-4. Current official framework guidance (Vite, React, pdf.js,
-   Dexie).
+4. Current official framework guidance (Vite, React, pdf.js).
 5. Ecosystem convention.
 6. Local best judgment.
 
@@ -242,9 +243,11 @@ violating an invariant.
 
 - `.env`, `.env.*` are gitignored. **Do not commit secrets.**
 - `.env.example` is the canonical env schema. See
-  `docs/development.md` §4. The MVP schema is `READMARK_EPHEMERAL`
-  only. Variables for unimplemented features do not exist; they
-  land here together with the ADR that introduces them.
+  `docs/development.md` §4. The MVP schema is **empty** (ADR-0008
+  removed the last variable, `READMARK_EPHEMERAL`, together with
+  the persistence it toggled). Variables for unimplemented features
+  do not exist; they land here together with the ADR that introduces
+  them.
 - A future ticket may integrate Infisical per project-init
   ADR-0023. Out of scope for MVP.
 
@@ -299,7 +302,10 @@ files.
 - ADR-0004 — PDF reader contract and renderer isolation
   (`ReaderSource<F>` / `Reader<F>` / `ReaderHandle<F>` /
   `PageHandle<F>` / `ResolvedAnchor`).
-- ADR-0005 — IndexedDB persistence strategy.
+- ADR-0005 — IndexedDB persistence strategy (**superseded by
+  ADR-0008**).
 - ADR-0006 — deployment / my-web-2026 integration.
 - ADR-0007 — PDF annotation anchor model (`Anchor<P>` outer +
   `PdfAnchor` payload; quote canonical, rects display).
+- ADR-0008 — session-scoped storage: no browser persistence, no
+  third-party contact; the session is the unit of keeping.

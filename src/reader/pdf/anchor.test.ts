@@ -5,7 +5,7 @@
  * code that reads `payload.rects` / `payload.quote` as PDF shapes, so
  * what it *accepts* matters as much as what it rejects. Every case
  * here is a payload that some version, some bug or some hand-edited
- * IndexedDB could plausibly contain.
+ * store could plausibly contain.
  *
  * The guard is structural, not semantic: it proves a payload has the
  * declared shape and nothing more. Whether the page exists, whether

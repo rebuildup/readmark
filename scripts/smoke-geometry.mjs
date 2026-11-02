@@ -15,14 +15,15 @@
  *
  * The fixtures and assertions:
  *
- *   - Three highlight rows are seeded into IndexedDB before the reader
+ *   - Three highlight rows are seeded into the session store before
+ *     the reader
  *     opens, each with a *deliberately wrong* stored `rects[]` but a
  *     correct `quote`. On source open the reader calls
  *     `resolveAnchor` exactly once per row, measures the fragments,
  *     detects the mismatch (`rectsMatch()` returns `false`), and
  *     writes the measured rects back via `replaceHighlightAnchor`.
  *   - The smoke waits for the read-side write-back to settle, then
- *     reads the row back from IndexedDB and checks that:
+ *     reads the row back from the session store and checks that:
  *       1. `anchor.payload.rects` was rewritten (count and value
  *          changed away from the seed).
  *       2. `selectedText`, `pageIndex`, `color`, `createdAt` are
@@ -166,69 +167,36 @@ async function importPdf(page, bytes, name) {
 	await page.locator('[data-testid="rm-import-status"]').waitFor({ state: 'visible' });
 }
 
-/** Read `documents` and `documentSources` straight from IndexedDB so
- *  the smoke knows the `(documentId, sourceFingerprint)` keys the
- *  reader will resolve against. */
-async function readIndexedDbIdentity(page) {
-	return await page.evaluate(async () => {
-		const db = await new Promise((resolve, reject) => {
-			const req = indexedDB.open('readmark');
-			req.onsuccess = () => resolve(req.result);
-			req.onerror = () => reject(req.error);
-		});
-		const docs = await new Promise((resolve) => {
-			const req = db.transaction('documents', 'readonly').objectStore('documents').getAll();
-			req.onsuccess = () => resolve(req.result);
-			req.onerror = () => resolve([]);
-		});
-		const sources = await new Promise((resolve) => {
-			const req = db
-				.transaction('documentSources', 'readonly')
-				.objectStore('documentSources')
-				.getAll();
-			req.onsuccess = () => resolve(req.result);
-			req.onerror = () => resolve([]);
-		});
-		db.close();
-		return { documents: docs, sources };
+/** Read `documents` and `documentSources` from the page's session
+ *  store (smoke seam) so the smoke knows the `(documentId,
+ *  sourceFingerprint)` keys the reader will resolve against. */
+async function readStoreIdentity(page) {
+	return await page.evaluate(() => {
+		const store = globalThis.readmarkSessionStore;
+		if (store === undefined) return { documents: [], sources: [] };
+		return {
+			documents: [...store.documents.values()],
+			sources: [...store.documentSources.values()],
+		};
 	});
 }
 
-/** Insert one highlight row into IndexedDB. Direct write — the
- *  reader's recovery is what this file is here to exercise, not the
- *  repository's insert path. */
+/** Insert one highlight row into the session store (smoke seam).
+ *  Direct write — the reader's recovery is what this file is here
+ *  to exercise, not the repository's insert path. */
 async function seedHighlight(page, row) {
-	await page.evaluate(async (row) => {
-		const db = await new Promise((resolve, reject) => {
-			const req = indexedDB.open('readmark');
-			req.onsuccess = () => resolve(req.result);
-			req.onerror = () => reject(req.error);
-		});
-		await new Promise((resolve, reject) => {
-			const tx = db.transaction('highlights', 'readwrite');
-			const store = tx.objectStore('highlights');
-			const req = store.put(row);
-			req.onsuccess = () => resolve();
-			req.onerror = () => reject(req.error);
-		});
-		db.close();
+	await page.evaluate((row) => {
+		const store = globalThis.readmarkSessionStore;
+		if (store === undefined) throw new Error('session store seam not installed');
+		store.highlights.set(row.id, row);
 	}, row);
 }
 
 async function readHighlightRow(page, id) {
-	return await page.evaluate(async (id) => {
-		const db = await new Promise((resolve, reject) => {
-			const req = indexedDB.open('readmark');
-			req.onsuccess = () => resolve(req.result);
-			req.onerror = () => reject(req.error);
-		});
-		const row = await new Promise((resolve) => {
-			const req = db.transaction('highlights', 'readonly').objectStore('highlights').get(id);
-			req.onsuccess = () => resolve(req.result ?? null);
-			req.onerror = () => resolve(null);
-		});
-		db.close();
-		return row;
+	return await page.evaluate((id) => {
+		const store = globalThis.readmarkSessionStore;
+		if (store === undefined) return null;
+		return store.highlights.get(id) ?? null;
 	}, id);
 }
 
@@ -405,8 +373,8 @@ async function main() {
 		await importPdf(page, bytes, 'geometry-smoke.pdf');
 		log(`imported fixture: ${PAGE_COUNT} pages`);
 
-		// --- Read documentId + sourceFingerprint from IndexedDB ---
-		const meta = await readIndexedDbIdentity(page);
+		// --- Read documentId + sourceFingerprint from the session store ---
+		const meta = await readStoreIdentity(page);
 		if (meta.documents.length !== 1) fail(`expected 1 document row, got ${meta.documents.length}`);
 		if (meta.sources.length !== 1)
 			fail(`expected 1 document source row, got ${meta.sources.length}`);
@@ -510,9 +478,9 @@ async function main() {
 		await waitForOverlayFragments(page, 3, 1);
 		log('page 3 paints its single-fragment overlay');
 
-		// --- IndexedDB write-back verification ---
-		// Wait for the rows to land at their measured values. The reader
-		// writes via Dexie `update()`, which is async; reading too early
+		// --- Session-store write-back verification ---
+		// Wait for the rows to land at their measured values. The
+		// resolver's write-back is async; reading too early
 		// catches the wrong-rect state. Poll until the rect count for
 		// row `geo-single-1` is 1, row `geo-multi-1` is 2, row
 		// `geo-single-2` is 1 — those are the truth counts.
@@ -792,13 +760,13 @@ async function main() {
 				`(per-page=${JSON.stringify(counts)})`,
 		);
 
-		// --- IndexedDB store counts: no row was duplicated ---
+		// --- Session-store counts: no row was duplicated ---
 		const finalCounts = await readStoreCounts(page);
-		const highlights = finalCounts.readmark?.counts?.highlights;
+		const highlights = finalCounts.session?.counts?.highlights;
 		if (highlights !== 3) {
-			fail(`expected 3 rows in IndexedDB highlights store, got ${highlights}`);
+			fail(`expected 3 rows in the session store's highlights, got ${highlights}`);
 		}
-		log(`IndexedDB highlights store: ${highlights} rows (no duplicates)`);
+		log(`session store highlights: ${highlights} rows (no duplicates)`);
 
 		if (consoleErrors.length > 0) {
 			fail(`console errors during geometry smoke:\n${consoleErrors.join('\n')}`);

@@ -1,6 +1,12 @@
 # ADR-0001: Local-first reading environment
 
 - Status: Accepted
+- **Amended by ADR-0008 (2026-11-02)**: the locality half stands
+  (no server, no network, trust, latency — strengthened, not
+  weakened); the persistence half is replaced. readmark keeps its
+  data in a per-tab in-memory store and states that model in the UI,
+  so "all persistence is IndexedDB" below is historical, and the
+  quota / eviction consequences no longer apply (there is no quota).
 - Date: 2026-09-26
 - Deciders: readmark maintainers
 
