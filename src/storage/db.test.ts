@@ -35,9 +35,19 @@
  * primary key, and it recognises nothing else.
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import Dexie from 'dexie';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { DATABASE_NAME, getDb, ReadmarkDatabase, recoverUnmigratableDatabase } from './db.ts';
+import { asDocumentId, asSourceFingerprint } from '../domain/document.ts';
+import { asPageIndex, type Bookmark } from '../domain/reading-state.ts';
+import {
+	_resetStorageBackendForTests,
+	DATABASE_NAME,
+	getDb,
+	isSessionOnlyStorage,
+	ReadmarkDatabase,
+	recoverUnmigratableDatabase,
+} from './db.ts';
 
 describe('ReadmarkDatabase schema', () => {
 	it('declares exactly one version', () => {
@@ -245,5 +255,77 @@ describe('recoverUnmigratableDatabase / how the delete ends', () => {
 		});
 		await expect(recoverUnmigratableDatabase()).resolves.toBe(false);
 		expect(events).not.toContain('delete-requested');
+	});
+});
+
+/**
+ * The denial a sandboxed Tool frame produces (Issue #83): the
+ * browser throws `SecurityError` SYNCHRONOUSLY from
+ * `indexedDB.open()`, before a request object exists.
+ */
+function stubDeniedIndexedDB(): void {
+	vi.stubGlobal('indexedDB', {
+		open: () => {
+			throw new DOMException('denied', 'SecurityError');
+		},
+		deleteDatabase: () => {
+			throw new DOMException('denied', 'SecurityError');
+		},
+	});
+}
+
+describe('session-only storage fallback', () => {
+	beforeEach(() => {
+		// Earlier tests in this file cache a `persistent` verdict (and
+		// one runs with a stubbed global): every test here starts from
+		// the un-made decision.
+		_resetStorageBackendForTests();
+	});
+	afterEach(() => {
+		_resetStorageBackendForTests();
+		vi.unstubAllGlobals();
+	});
+
+	it('reports session-only storage and keeps the repository layer working', async () => {
+		stubDeniedIndexedDB();
+
+		expect(isSessionOnlyStorage()).toBe(true);
+
+		// The claim the whole fallback exists for: the app's own
+		// storage layer (Dexie + repositories) still reads and
+		// writes. Before #83 this context threw before reaching a
+		// table at all.
+		const bookmark: Bookmark = {
+			id: '00000000-0000-4000-8000-000000000001',
+			documentId: asDocumentId('00000000-0000-4000-8000-000000000002'),
+			sourceFingerprint: asSourceFingerprint('a'.repeat(64)),
+			pageIndex: asPageIndex(3),
+			anchor: null,
+			position: null,
+			title: 'page 3',
+			createdAt: 1_700_000_000_000,
+		};
+
+		await getDb().bookmarks.put(bookmark);
+		await expect(getDb().bookmarks.get(bookmark.id)).resolves.toEqual(bookmark);
+	});
+
+	it('treats a denied recovery as a no-op (false), not a failure', async () => {
+		// `main.tsx` mounts the app on a resolved promise: rejecting
+		// here would render the terminal error screen in a context
+		// that can still read everything, in memory.
+		stubDeniedIndexedDB();
+		await expect(recoverUnmigratableDatabase()).resolves.toBe(false);
+		expect(isSessionOnlyStorage()).toBe(true);
+	});
+
+	it("restores Dexie's own defaults on reset", () => {
+		const persistentIndexedDB = Dexie.dependencies.indexedDB;
+		stubDeniedIndexedDB();
+		expect(isSessionOnlyStorage()).toBe(true);
+		expect(Dexie.dependencies.indexedDB).not.toBe(persistentIndexedDB);
+
+		_resetStorageBackendForTests();
+		expect(Dexie.dependencies.indexedDB).toBe(persistentIndexedDB);
 	});
 });

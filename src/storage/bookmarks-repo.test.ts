@@ -8,9 +8,10 @@
  *
  * `getDb` is faked with a table that behaves like Dexie's for the
  * operations used here (a `Map` keyed by id, filter and sortBy over
- * it). The repo has no `fake-indexeddb`; the end-to-end claim — a
- * mark in the UI survives a reload and a jump lands on it — is
- * `scripts/smoke-reader.mjs`.
+ * it). The repo's own `fake-indexeddb` (Issue #83, the session-only
+ * backend) is runtime storage, not test tooling — the end-to-end
+ * claim — a mark in the UI survives a reload and a jump lands on it —
+ * is `scripts/smoke-reader.mjs`.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
