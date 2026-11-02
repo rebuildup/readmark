@@ -26,6 +26,7 @@
 	},
 	"dependencies": {
 		"dexie": "^4.4.6",
+		"fake-indexeddb": "^6.2.7",
 		"pdfjs-dist": "^5.4.624",
 		"react": "^19.3.0",
 		"react-dom": "^19.3.0",

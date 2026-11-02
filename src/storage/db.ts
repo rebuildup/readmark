@@ -38,6 +38,7 @@
  */
 
 import Dexie, { type EntityTable, type Table } from 'dexie';
+import { IDBKeyRange as sessionIDBKeyRange, indexedDB as sessionIndexedDB } from 'fake-indexeddb';
 import type {
 	Document,
 	DocumentId,
@@ -147,10 +148,132 @@ export class ReadmarkDatabase extends Dexie {
  *  DB. */
 let _db: ReadmarkDatabase | null = null;
 
-export function getDb(): ReadmarkDatabase {
-	if (typeof indexedDB === 'undefined') {
-		throw new Error('readmark: IndexedDB is not available in this environment');
+/**
+ * Which storage backend Dexie talks to (Issue #83; found through
+ * rebuildup/my-web-2026#786).
+ *
+ * `persistent` — the browser's own IndexedDB. Every normal launch.
+ *
+ * `session-only` — `fake-indexeddb`, an in-memory IndexedDB
+ * implementation, installed into `Dexie.dependencies` when the real
+ * one is denied. The app then works for the lifetime of the tab and
+ * forgets everything on reload.
+ *
+ * When the real one is denied: inside `<iframe sandbox="allow-
+ * scripts">` the frame runs with an opaque origin, and the browser
+ * refuses every storage API to it. Measured in Chromium:
+ *
+ *   indexedDB.open()  -> SecurityError: access to the IndexedDB API
+ *                        is denied in this context.
+ *   localStorage      -> SecurityError: The document is sandboxed and
+ *                        lacks the 'allow-same-origin' flag.
+ *
+ * The host (my-web-2026) delivers every embedded Tool under that
+ * sandbox and its embed policy refuses to widen it, so "denied" is
+ * the permanent shape of the embedded context, not a browser bug to
+ * wait out. Note that `location.origin` cannot DETECT it: Chromium
+ * reports the frame's URL origin there, not the opaque origin's
+ * serialization — which is why detection below is a probe open
+ * rather than a string check.
+ *
+ * Session-only was chosen over two honest alternatives: refusing to
+ * run (the pre-#83 behaviour in the sandbox — a terminal error
+ * screen, nothing usable), and rewriting every repository against
+ * in-memory maps (a second storage layer kept in step with the
+ * schema forever).
+ *
+ * What session-only is NOT: it is not persistence. The UI says so
+ * on screen — `LibraryScreen` renders the notice whenever
+ * `isSessionOnlyStorage()` — because local-first is the product's
+ * promise, and a silent downgrade of it would be the real defect.
+ */
+type StorageBackend = 'persistent' | 'session-only';
+
+let storageBackend: StorageBackend | null = null;
+
+/** Dexie's module-load defaults, captured before any swap, so the
+ *  swap-back (tests) restores the browser's own implementation
+ *  rather than a stale reference. */
+const PERSISTENT_INDEXED_DB = Dexie.dependencies.indexedDB;
+const PERSISTENT_IDB_KEY_RANGE = Dexie.dependencies.IDBKeyRange;
+
+/**
+ * Can this context open the real database? Answers SYNCHRONOUSLY,
+ * because the denial is synchronous: in a denied context
+ * `indexedDB.open()` throws `SecurityError` before it can return a
+ * request, so a `try/catch` around the call is the whole detection.
+ *
+ * The probe opens `DATABASE_NAME` itself — not a throwaway name — so
+ * a normal launch leaves no litter: it opens (or, on a first launch,
+ * creates at the version an open-without-version creates) the very
+ * database the app is about to use anyway, and the connection is
+ * closed in `onsuccess` before the decision is ever acted on.
+ *
+ * An async `onerror` (quota pressure, eviction) does NOT flip the
+ * answer: those are not the sandbox's synchronous denial, and
+ * Dexie's own open surfaces them on screen the way it always did.
+ */
+function canOpenPersistentDatabase(): boolean {
+	if (typeof indexedDB === 'undefined') return false;
+	try {
+		const request = indexedDB.open(DATABASE_NAME);
+		request.onsuccess = () => {
+			try {
+				request.result.close();
+			} catch {
+				// Already closed elsewhere; nothing left to release.
+			}
+		};
+		// Not a verdict: an async open error is reported by Dexie's own
+		// open, with its reader-facing message.
+		request.onerror = () => {};
+		request.onblocked = () => {};
+		return true;
+	} catch {
+		return false;
 	}
+}
+
+/** Point Dexie at the in-memory implementation. Idempotent. */
+function installSessionOnlyBackend(): void {
+	if (storageBackend === 'session-only') return;
+	storageBackend = 'session-only';
+	Dexie.dependencies.indexedDB = sessionIndexedDB;
+	Dexie.dependencies.IDBKeyRange = sessionIDBKeyRange;
+}
+
+function ensureStorageBackend(): StorageBackend {
+	if (storageBackend !== null) return storageBackend;
+	if (canOpenPersistentDatabase()) {
+		storageBackend = 'persistent';
+		return storageBackend;
+	}
+	installSessionOnlyBackend();
+	return 'session-only';
+}
+
+/**
+ * Is the app running against the in-memory backend? This is the
+ * one-line truth for "will what I do here survive a reload?" — the
+ * library screen renders its notice from it.
+ */
+export function isSessionOnlyStorage(): boolean {
+	return ensureStorageBackend() === 'session-only';
+}
+
+/** Test-only: forget the backend decision, drop the singleton and
+ *  restore Dexie's defaults. Production code never calls this — the
+ *  same contract `_resetPersistenceRequestFlag` keeps in
+ *  `persistent-storage.ts`. */
+export function _resetStorageBackendForTests(): void {
+	storageBackend = null;
+	_db = null;
+	Dexie.dependencies.indexedDB = PERSISTENT_INDEXED_DB;
+	Dexie.dependencies.IDBKeyRange = PERSISTENT_IDB_KEY_RANGE;
+}
+
+export function getDb(): ReadmarkDatabase {
+	ensureStorageBackend();
 	if (!_db) {
 		_db = new ReadmarkDatabase();
 	}
@@ -248,7 +371,25 @@ const DELETE_TIMEOUT_MS = 5_000;
 export async function recoverUnmigratableDatabase(): Promise<boolean> {
 	if (typeof indexedDB === 'undefined') return false;
 
-	const existing = await openRawDatabase(DATABASE_NAME);
+	let existing: IDBDatabase | null;
+	try {
+		existing = await openRawDatabase(DATABASE_NAME);
+	} catch (err) {
+		// A denied context (sandboxed opaque origin — Issue #83) makes
+		// `indexedDB.open()` throw `SecurityError` synchronously inside
+		// the promise executor, and the promise turns that into a
+		// rejection. There is no persistent database to inspect or
+		// repair there: the app runs session-only instead (see
+		// `ensureStorageBackend`), so this is `false`, not a failure.
+		// `main.tsx` mounts the app on a resolved promise, and a
+		// terminal error screen for a context that can still read (in
+		// memory) would be the wrong verdict.
+		if (err instanceof DOMException && err.name === 'SecurityError') {
+			installSessionOnlyBackend();
+			return false;
+		}
+		throw err;
+	}
 	if (!existing) return false;
 
 	// Read the installed primary keys straight from the object stores.
