@@ -41,11 +41,14 @@
 	 * silent tofu — every label renders as □ and the app looks broken
 	 * while working perfectly.
 	 *
-	 * `Noto Sans JP` is loaded as a webfont from Google Fonts (see
-	 * `index.html`), so it is present regardless of what the host has
-	 * installed. It is repeated in the heading stack as a fallback so
-	 * that a failed or blocked webfont request degrades to *readable
-	 * Japanese* rather than to boxes.
+	 * `Noto Sans JP` / `Zen Kaku Gothic New` appear in the stacks as
+	 * *system-installed* faces only: no webfont is fetched (ADR-0008
+	 * — zero external origins), so they draw text when the machine
+	 * happens to have them, and the Japanese system faces below them
+	 * (Hiragino / Yu Gothic / Meiryo) carry the rest. On a machine
+	 * with no CJK face at all the labels fall through to the generic
+	 * and render as tofu — accepted as the cost of fetching nothing
+	 * for UI text (owner decision, 2026-11-02).
 	 */
 	--rm-font-sans:
 		"Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, system-ui, -apple-system,
@@ -279,40 +282,6 @@ pre {
 .rm-library-header h1 {
 	margin: 0;
 	font-size: 20px;
-}
-
-.rm-library-header .rm-quota-badge {
-	margin: 6px 0 0;
-	font-size: 13px;
-}
-
-/*
- * The badge lives in the header next to the title. Two spans: the
- * primary "usage / quota" line, and an optional warning that appears
- * only when the origin is not marked persistent. The warning uses
- * the same muted foreground as the primary line and leans on a
- * slightly tinted background so it is discoverable without being
- * alarming — losing persistent storage is a soft risk, not an
- * error.
- */
-.rm-quota-badge {
-	display: flex;
-	flex-direction: column;
-	gap: 4px;
-	color: var(--rm-fg-muted);
-}
-
-.rm-quota-badge__usage {
-	font-variant-numeric: tabular-nums;
-}
-
-.rm-quota-badge__warning {
-	display: inline-block;
-	padding: 4px 8px;
-	border-radius: var(--rm-radius-sm);
-	background: var(--rm-bg-subtle);
-	color: var(--rm-fg-muted);
-	font-size: 12px;
 }
 
 .rm-library-intro {

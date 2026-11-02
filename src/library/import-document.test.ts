@@ -4,16 +4,15 @@
  * Coverage:
  *   1. Happy path: real PDF bytes → `ok: true` with metadata.
  *   2. Invalid PDF: corrupt bytes → `ok: false, kind: 'invalid-pdf'`.
- *   3. Quota error: storage layer raises → `ok: false, kind: 'quota-exceeded'`.
- *   4. Unknown error: anything else → `ok: false, kind: 'unknown'`.
+ *   3. Unknown error: anything else (a storage-layer failure, a bug
+ *      below the flow) → `ok: false, kind: 'unknown'`.
+ *      (ADR-0008 removed `quota-exceeded`: with the session store
+ *      there is no quota whose exhaustion could produce one.)
  *
  * Why we mock the storage layer:
- *   - The repository writes to IndexedDB through Dexie.
- *   - The repo does not own a real DB in unit tests (no
- *     fake-indexeddb in this MVP).
- *   - We mock at the `documents-repo` boundary so the test
- *     covers the error-normalization logic of `importPdfDocument`
- *     without exercising storage.
+ *   - The repository writes into the session store; this test is
+ *     about the flow's error normalization, not about the store
+ *     (which has its own tests in `src/storage/`).
  *
  * Why we keep the real PDF metadata path:
  *   - The "real PDF loads" smoke lives in
@@ -107,34 +106,6 @@ describe('importPdfDocument', () => {
 		expect(result.error.kind).toBe('invalid-pdf');
 		// We must NOT have called the storage layer for a bad PDF.
 		expect(mockImportDocument).not.toHaveBeenCalled();
-	});
-
-	it('returns ok=false with kind=quota-exceeded when storage raises QuotaExceededError', async () => {
-		const bytes = await makeOnePagePdfBytes();
-		const blob = bytesToBlob(bytes);
-		mockImportDocument.mockRejectedValueOnce(
-			Object.assign(new Error('quota'), { name: 'QuotaExceededError' }),
-		);
-
-		const result = await importPdfDocument(blob);
-
-		expect(result.ok).toBe(false);
-		if (result.ok) return;
-		expect(result.error.kind).toBe('quota-exceeded');
-	});
-
-	it('returns ok=false with kind=quota-exceeded for Firefox NS_ERROR_DOM_QUOTA_REACHED', async () => {
-		const bytes = await makeOnePagePdfBytes();
-		const blob = bytesToBlob(bytes);
-		mockImportDocument.mockRejectedValueOnce(
-			Object.assign(new Error('quota'), { name: 'NS_ERROR_DOM_QUOTA_REACHED' }),
-		);
-
-		const result = await importPdfDocument(blob);
-
-		expect(result.ok).toBe(false);
-		if (result.ok) return;
-		expect(result.error.kind).toBe('quota-exceeded');
 	});
 
 	it('returns ok=false with kind=unknown for any other storage error', async () => {

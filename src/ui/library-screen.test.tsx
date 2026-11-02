@@ -21,7 +21,7 @@
  *
  * Why both layers are mocked:
  *   - `documents-repo` is the storage boundary: this file must not
- *     depend on IndexedDB. `library-list.test.ts` covers the sort /
+ *     touch the store. `library-list.test.ts` covers the sort /
  *     filter rules, and the real cascade is covered by
  *     `scripts/smoke-library.mjs` against a real browser.
  *   - `<DocumentImport>` is stubbed because importing a PDF is #3's
@@ -384,7 +384,7 @@ describe('LibraryScreen', () => {
 	});
 
 	it('surfaces a load failure without pretending the library is empty', async () => {
-		mockListLibrary.mockRejectedValueOnce(new Error('indexeddb unavailable'));
+		mockListLibrary.mockRejectedValueOnce(new Error('store unavailable'));
 		renderScreen();
 
 		expect(await screen.findByTestId('rm-library-load-error')).toBeTruthy();
