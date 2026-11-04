@@ -136,8 +136,8 @@ await withPreview(async () => {
 				(names.length > 0 ? `: ${names.join(', ')}` : ''),
 		);
 	}
-	const pdfChunk = APP_BASE + 'assets/' + pdfChunkName;
-	const worker = APP_BASE + 'assets/' + workerName;
+	const pdfChunk = `${APP_BASE}assets/${pdfChunkName}`;
+	const worker = `${APP_BASE}assets/${workerName}`;
 
 	await ctx.route('**/__manifest.json', (r) =>
 		r.fulfill({
