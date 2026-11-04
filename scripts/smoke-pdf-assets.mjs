@@ -33,6 +33,14 @@ import { readdir, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 
+// The serving base, shared with `vite.config.ts` so the probe cannot
+// drift from the build (Issue #896). The preview serves the tables
+// under it, so the HTTP probe has to ask there — a root
+// `/assets/pdfjs/...` request 404s (measured:
+// `GET /assets/pdfjs/cmaps/uni2utf.bcmap -> 404`,
+// `GET /tools/readmark/app/assets/pdfjs/cmaps/uni2utf.bcmap -> 200`).
+import { APP_BASE } from '../app-base.ts';
+
 import {
 	fail,
 	launchBrowser,
@@ -42,15 +50,6 @@ import {
 } from './smoke-harness.mjs';
 
 const DIST = resolve(import.meta.dirname, '..', 'dist');
-
-/**
- * Must match `base` in `vite.config.ts` (Issue #896): the preview
- * serves the tables under the tool's base, so the HTTP probe has to
- * ask there — a root `/assets/pdfjs/...` request 404s (measured:
- * `GET /assets/pdfjs/cmaps/uni2utf.bcmap -> 404`,
- * `GET /tools/readmark/app/assets/pdfjs/cmaps/uni2utf.bcmap -> 200`).
- */
-const APP_BASE = '/tools/readmark/app/';
 
 /**
  * Tables that must exist, and a file each must contain.

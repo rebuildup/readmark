@@ -5,6 +5,8 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
 
+import { APP_BASE } from './app-base';
+
 const require = createRequire(import.meta.url);
 
 /**
@@ -183,8 +185,10 @@ export default defineConfig({
 	// `__vite__mapDeps` preload helper joins `base + chunk` the same
 	// way). With the base set, every emitted URL — index.html
 	// references, worker, support tables — resolves inside the tool's
-	// own namespace. See Issue #896.
-	base: '/tools/readmark/app/',
+	// own namespace. See Issue #896. The value lives in `app-base.ts`,
+	// shared with the smoke scripts, so this cannot drift from the paths
+	// they probe.
+	base: APP_BASE,
 	resolve: {
 		alias: {
 			'~': resolve(import.meta.dirname, 'src'),

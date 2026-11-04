@@ -12,5 +12,5 @@
 		"strict": true,
 		"types": ["node"]
 	},
-	"include": ["vite.config.ts", "vitest.config.ts", "biome.json"]
+	"include": ["app-base.ts", "vite.config.ts", "vitest.config.ts", "biome.json"]
 }

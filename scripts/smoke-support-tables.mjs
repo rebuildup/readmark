@@ -45,6 +45,14 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// The serving base, shared with `vite.config.ts` so the URLs this probe
+// builds cannot drift from the build (Issue #896). The preview answers
+// under it, so every absolute asset URL the probe page builds has to
+// carry it — a root `/assets/...` request 404s (measured:
+// `GET /assets/pdf-B75MOh95.js -> 404`,
+// `GET /tools/readmark/app/assets/pdf-B75MOh95.js -> 200`).
+import { APP_BASE } from '../app-base.ts';
+
 import {
 	fail,
 	launchBrowser,
@@ -52,15 +60,6 @@ import {
 	readStableCount,
 	withPreview,
 } from './smoke-harness.mjs';
-
-/**
- * Must match `base` in `vite.config.ts` (Issue #896): the preview
- * answers under the tool's serving base, so every absolute asset URL
- * the probe page builds has to carry it — a root `/assets/...` request
- * 404s (measured: `GET /assets/pdf-B75MOh95.js -> 404`,
- * `GET /tools/readmark/app/assets/pdf-B75MOh95.js -> 200`).
- */
-const APP_BASE = '/tools/readmark/app/';
 
 const FIXTURE = join(
 	dirname(fileURLToPath(import.meta.url)),
