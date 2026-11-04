@@ -310,10 +310,26 @@ await withPreview(async () => {
 				console.log(`[smoke] dev serves ${path} (${bytes} bytes, 200)`);
 			}
 
-			// And the module must actually point at that base.
-			const modSrc = await (
-				await fetch(`http://127.0.0.1:${devPort}/src/reader/pdf/pdf-worker.ts`)
-			).text();
+			// And the module must actually point at that base. The probe has
+			// to ask under the base as well: a root path is answered by
+			// Vite's base middleware with a 404 page, and a check that
+			// never looks at the status would run its regex over that error
+			// text and pass.
+			const modulePath = `${APP_BASE}src/reader/pdf/pdf-worker.ts`;
+			const moduleResponse = await fetch(`http://127.0.0.1:${devPort}${modulePath}`);
+			if (moduleResponse.status !== 200) {
+				fail(
+					`dev server: GET ${modulePath} -> ${moduleResponse.status} ` +
+						'(the module source must resolve under the base)',
+				);
+			}
+			const modSrc = await moduleResponse.text();
+			if (!modSrc.includes('PDFJS_ASSET_BASE')) {
+				fail(
+					`dev server: GET ${modulePath} returned 200 but the body has no ` +
+						`PDFJS_ASSET_BASE (${modSrc.length} bytes) — this is not the module.`,
+				);
+			}
 			if (/node_modules[^"']*pdfjs\//.test(modSrc.split('PDFJS_ASSET_BASE')[1] ?? '')) {
 				fail(
 					'the dev module derives the support-table base from the worker URL ' +
