@@ -123,9 +123,22 @@ await withPreview(async () => {
 	const assets = join(process.cwd(), 'dist', 'assets');
 	const { readdirSync } = await import('node:fs');
 	const names = readdirSync(assets);
-	const pdfChunk = APP_BASE + 'assets/' + names.find((f) => /^pdf-.*\.js$/.test(f));
-	const worker = APP_BASE + 'assets/' + names.find((f) => /^pdf\.worker\.min-.*\.mjs$/.test(f));
-	if (!pdfChunk || !worker) fail('could not locate the pdf.js chunks in dist/assets');
+	// The names are looked up BEFORE the base is joined. Concatenating first
+	// turns a missing chunk into the truthy string `.../assets/undefined`,
+	// so a guard on the joined URL can never fire and the run dies later on
+	// a dynamic import of a file nobody named.
+	const pdfChunkName = names.find((f) => /^pdf-.*\.js$/.test(f));
+	const workerName = names.find((f) => /^pdf\.worker\.min-.*\.mjs$/.test(f));
+	if (pdfChunkName === undefined || workerName === undefined) {
+		fail(
+			`could not locate the pdf.js chunks in dist/assets — ` +
+				`pdf chunk: ${pdfChunkName ?? 'not found'}, worker: ${workerName ?? 'not found'}. ` +
+				`dist/assets holds ${names.length} file(s)` +
+				(names.length > 0 ? `: ${names.join(', ')}` : ''),
+		);
+	}
+	const pdfChunk = APP_BASE + 'assets/' + pdfChunkName;
+	const worker = APP_BASE + 'assets/' + workerName;
 
 	await ctx.route('**/__manifest.json', (r) =>
 		r.fulfill({
@@ -280,19 +293,22 @@ await withPreview(async () => {
 			});
 			if (!ready) fail(`dev server never bound 5199; stderr:\n${devErr.slice(-400)}`);
 
-			// The tables must be served in dev, at the app's base path.
+			// The tables must be served in dev, at the app's base path — the
+			// same URL `pdf-worker.ts` builds from `BASE_URL`. A root
+			// `/assets/pdfjs/…` is outside the base and is refused.
 			for (const probe of [
 				'assets/pdfjs/cmaps/UniJIS-UCS2-H.bcmap',
 				'assets/pdfjs/standard_fonts/LiberationSans-Regular.ttf',
 				'assets/pdfjs/wasm/openjpeg.wasm',
 			]) {
-				const res = await fetch(`http://127.0.0.1:${devPort}/${probe}`);
+				const path = `${APP_BASE}${probe}`;
+				const res = await fetch(`http://127.0.0.1:${devPort}${path}`);
 				if (res.status !== 200) {
-					fail(`dev server: GET /${probe} -> ${res.status} (tables must resolve in dev too)`);
+					fail(`dev server: GET ${path} -> ${res.status} (tables must resolve in dev too)`);
 				}
 				const bytes = (await res.arrayBuffer()).byteLength;
-				if (bytes === 0) fail(`dev server: GET /${probe} returned 0 bytes`);
-				console.log(`[smoke] dev serves ${probe} (${bytes} bytes, 200)`);
+				if (bytes === 0) fail(`dev server: GET ${path} returned 0 bytes`);
+				console.log(`[smoke] dev serves ${path} (${bytes} bytes, 200)`);
 			}
 
 			// And the module must actually point at that base.
