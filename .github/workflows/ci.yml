@@ -19,10 +19,11 @@
 #   reproducibility contract for JS dependencies.
 # - validate:fast: typecheck + lint + test. Build is excluded to keep
 #   PR feedback < 60s; release PRs additionally run validate locally.
-# - Builds: two targets (ADR-0006 Amendment). `build` emits the host
-#   namespace (`/tools/readmark/app/`) that the smoke probes; the
-#   container build emits the root-base artefact that `readmark-dist`
-#   publishes and the Containerfile ships.
+# - Builds: two targets (ADR-0006 Amendment). The default target emits
+#   the host namespace (`/tools/readmark/app/`); CI runs it to catch a
+#   broken default build, because no smoke runs here. The container
+#   target emits the root-base artefact that `readmark-dist` publishes
+#   and the Containerfile ships, and is verified before the upload.
 
 name: ci
 
@@ -76,13 +77,28 @@ jobs:
       - name: Unit tests
         run: bun run test
 
-      - name: Build (host namespace, for smoke)
+      - name: "Build (default target: host namespace)"
         run: bun run build
 
       # Runs second so `dist/` is left root-base: the uploaded artefact
       # is what the Containerfile ships (ADR-0006 Amendment).
-      - name: Build container artefact (root base)
+      - name: "Build (container target: root base)"
         run: bun run build:container
+
+      # Guards the `--base=/` half of the container build. Without this
+      # the default target would still pass CI and the regression would
+      # surface only after deploy.
+      - name: Verify root-base dist
+        run: |
+          if ! grep -q '="/assets/' dist/index.html; then
+            echo "dist/index.html does not reference /assets/ — is this a root-base build?"
+            exit 1
+          fi
+          if grep -q '/tools/readmark/app/' dist/index.html; then
+            echo "dist/index.html still references the host namespace:"
+            grep -n '/tools/readmark/app/' dist/index.html
+            exit 1
+          fi
 
       - name: Upload root-base dist (readmark-dist)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
