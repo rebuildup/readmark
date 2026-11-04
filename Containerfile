@@ -1,6 +1,10 @@
 # readmark — Containerfile (NOT Dockerfile; per rebuildup/project-init
 # stack discipline). Static-build-only image. The deployed artefact is the
-# `dist/` produced by `bun run build`; this image serves it.
+# `dist/` produced by `bun run build:container` — a ROOT-base build
+# (`vite build --base=/`), because this image serves the artefact from the
+# nginx document root, while the default `bun run build` targets the
+# my-web-2026 host namespace (`base: '/tools/readmark/app/'`, Issue #896).
+# This image serves it.
 #
 # Build:   podman build -t readmark:dev -f Containerfile .
 # Run:     podman run --rm -p 8080:8080 readmark:dev
@@ -17,7 +21,7 @@ COPY package.json bun.lock* ./
 RUN corepack disable && bun install --frozen-lockfile
 
 COPY . .
-RUN bun run build
+RUN bun run build:container
 
 # --- runtime stage ---
 FROM mirror.gcr.io/library/nginx:1.27-alpine AS runtime
