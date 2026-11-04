@@ -19,6 +19,10 @@
 #   reproducibility contract for JS dependencies.
 # - validate:fast: typecheck + lint + test. Build is excluded to keep
 #   PR feedback < 60s; release PRs additionally run validate locally.
+# - Builds: two targets (ADR-0006 Amendment). `build` emits the host
+#   namespace (`/tools/readmark/app/`) that the smoke probes; the
+#   container build emits the root-base artefact that `readmark-dist`
+#   publishes and the Containerfile ships.
 
 name: ci
 
@@ -72,10 +76,15 @@ jobs:
       - name: Unit tests
         run: bun run test
 
-      - name: Build (smoke)
+      - name: Build (host namespace, for smoke)
         run: bun run build
 
-      - name: Upload build artefact
+      # Runs second so `dist/` is left root-base: the uploaded artefact
+      # is what the Containerfile ships (ADR-0006 Amendment).
+      - name: Build container artefact (root base)
+        run: bun run build:container
+
+      - name: Upload root-base dist (readmark-dist)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:

@@ -63,8 +63,9 @@ bun run dev          # http://localhost:5173
 # 4. 検証（typecheck + lint + test）
 bun run validate:fast
 
-# 5. ビルド（静的バンドル、Containerfile で配信可能）
-bun run build
+# 5. ビルド（ターゲットが 2 つある — ADR-0006 の Amendment 参照）
+bun run build           # ホストの /tools/readmark/app/ 配信向け（既定、smoke の前提）
+bun run build:container # Containerfile / nginx の root 配信向け
 ```
 
 ## ディレクトリ構成
