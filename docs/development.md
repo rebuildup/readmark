@@ -66,7 +66,8 @@ bun install --frozen-lockfile  # CI 用
 headless Chromium で操作する one-shot のスクリプトで、CI では動かない。
 URL を `/tools/readmark/app/` 配下に組んでいるため、前提とする成果物は
 `bun run build`（ホスト名前空間向け）である。`bun run build:container`
-の root-base 成果物に対しては走らせない（probe が 404 で落ちるだけになる）。
+の root-base 成果物に対しては走らせない（`preview` の base と成果物の
+base が食い違い、アプリが起動しない）。
 共通の土台（preview 起動、Chromium 起動、count の settle、session
 store の行数読み出し — smoke seam は `src/storage/session-store.ts`）は
 `scripts/smoke-harness.mjs` にある。
