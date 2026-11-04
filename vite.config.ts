@@ -53,6 +53,10 @@ export function pdfjsSupportTables(): Plugin {
 	const OUTPUT_SUBPATH = 'assets/pdfjs';
 	const VIRTUAL_ID = 'virtual:readmark-pdfjs-assets';
 	const RESOLVED_ID = `\0${VIRTUAL_ID}`;
+	// The configured `base` (Vite normalizes it to `/…/`). The app is
+	// built for the my-web-2026 tool namespace, so in dev the browser
+	// asks for `<base>assets/pdfjs/…` — see `configResolved` below.
+	let base = '/';
 
 	const pdfjsRoot = resolve(require.resolve('pdfjs-dist/package.json'), '..');
 
@@ -83,12 +87,27 @@ export function pdfjsSupportTables(): Plugin {
 			if (id !== RESOLVED_ID) return null;
 			return `export const SUPPORT_TABLE_COUNTS = ${JSON.stringify(inventory())};`;
 		},
+		// The `base` decides which prefix the dev server answers under
+		// (Issue #896: `/tools/readmark/app/` when embedded in the host).
+		// Capture it so the middleware below can strip it; the unit tests
+		// construct the plugin without this hook and keep the default `/`.
+		configResolved(config) {
+			base = config.base;
+		},
 		// Dev server: serve the tables at the same paths the URLs
 		// resolve to, so dev and production behave identically. A
 		// dev-only pass is how "works on my machine" bugs are made.
 		configureServer(server) {
 			server.middlewares.use((req, res, next) => {
-				const url = req.url?.split('?')[0] ?? '';
+				let url = req.url?.split('?')[0] ?? '';
+				// With a non-root `base` the browser requests
+				// `<base>assets/pdfjs/…`. Strip it so ONE matcher serves both
+				// that URL and the root-prefixed `/assets/pdfjs/…` the unit
+				// tests use. (If Vite's own base middleware already stripped
+				// it, the startsWith check simply does not match.)
+				if (base !== '/' && url.startsWith(base)) {
+					url = `/${url.slice(base.length)}`;
+				}
 				const match = url.match(/^\/assets\/pdfjs\/([a-z_]+)\//);
 				if (!match) return next();
 				const dir = match[1];
@@ -151,6 +170,17 @@ export function pdfjsSupportTables(): Plugin {
 // - `server.headers` — COOP/COEP for SharedArrayBuffer (pdfjs needs it for
 //   certain multi-threaded decode paths). Safe to enable locally too.
 export default defineConfig({
+	// The my-web-2026 parent serves this artifact at
+	// `/tools/readmark/app/` (its `delivery.artifact_path`). Vite's
+	// default `base: '/'` makes every EMITTED URL root-absolute —
+	// including the pdf.js worker from `?url` in
+	// `src/reader/pdf/pdf-worker.ts`, which the host then resolves to
+	// `https://<host>/assets/pdf.worker.min-*.mjs` and 404s (the
+	// `__vite__mapDeps` preload helper joins `base + chunk` the same
+	// way). With the base set, every emitted URL — index.html
+	// references, worker, support tables — resolves inside the tool's
+	// own namespace. See Issue #896.
+	base: '/tools/readmark/app/',
 	resolve: {
 		alias: {
 			'~': resolve(import.meta.dirname, 'src'),
