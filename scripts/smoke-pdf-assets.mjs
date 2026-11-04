@@ -159,9 +159,9 @@ async function main() {
 			// The library screen mounts two `DocumentImport` instances (the
 			// empty-state CTA and the section header — the empty state shows
 			// 「PDF を import」 twice, recorded in
-			// docs/verification/tools/first-party-delivery-followup.md), so the
-			// unqualified locator is ambiguous and strict mode fails. Either
-			// input drives the same import handler; take the first.
+			// my-web-2026: docs/verification/tools/first-party-delivery-followup.md),
+			// so the unqualified locator is ambiguous and strict mode fails.
+			// Either input drives the same import handler; take the first.
 			const fileInput = page.locator('input[type=file]').first();
 			await fileInput.waitFor({ state: 'attached', timeout: 30000 });
 			await fileInput.setInputFiles({
