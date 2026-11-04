@@ -69,6 +69,27 @@ Today, readmark commits to the following minimal shape:
    commit may add a `manifest.json` and a `postMessage` schema
    when an integration is chosen. Today: nothing.
 
+### Amendment — 2026-11-05: two build targets
+
+The sentence in Decision 1 that a single `bun run build` produces the
+bundle is no longer an accurate description of the build. The decision
+itself — standalone, self-serving, no assumed parent — is unchanged;
+the mechanics now have two targets:
+
+- **`bun run build`** (default) emits every URL under the host tool
+  namespace `/tools/readmark/app/`. The prefix comes from
+  `app-base.ts`, which the smoke scripts import as well. This is the
+  artefact my-web-2026 serves and the smokes probe. It is *not*
+  root-deployable: a root server would resolve
+  `/tools/readmark/app/assets/...` against its own document root.
+- **`bun run build:container`** emits a root-base bundle (`base: '/'`)
+  for Decision 3's `Containerfile` / nginx path. This is the
+  deployable surface that the `readmark-dist` artefact publishes.
+
+Both targets build the same source and differ only in URL prefix. The
+split records where the artefact is served from; it does not
+pre-commit readmark to any of the integration options below.
+
 ## Consequences
 
 Positive:

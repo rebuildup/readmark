@@ -85,9 +85,21 @@ interface Attempt {
 	readonly response: FakeResponse;
 }
 
-/** Pull the handler out of the plugin without starting a dev server. */
-function installMiddleware(): Middleware {
+/**
+ * Pull the handler out of the plugin without starting a dev server.
+ *
+ * Pass `base` to build the plugin the way the host namespace runs it:
+ * `configResolved` is the hook that captures the base the middleware
+ * strips, and without it the plugin keeps its `/` default.
+ */
+function installMiddleware(base?: string): Middleware {
 	const plugin = pdfjsSupportTables();
+	if (base !== undefined) {
+		// Same `ObjectHook` caveat as `configureServer` below: this plugin
+		// writes a plain function, so the call is typed by hand.
+		const configResolved = plugin.configResolved as unknown as (config: { base: string }) => void;
+		configResolved({ base });
+	}
 	// `configureServer` is a Vite `ObjectHook`, so the direct call is not
 	// typed; the shape used here is the one the plugin itself writes to.
 	const configureServer = plugin.configureServer as unknown as (server: {
@@ -119,10 +131,10 @@ beforeAll(() => {
 	middleware = installMiddleware();
 });
 
-function request(url: string): Attempt {
+function request(url: string, target: Middleware = middleware): Attempt {
 	const response = createResponse();
 	let nexted = false;
-	middleware({ url }, response, () => {
+	target({ url }, response, () => {
 		nexted = true;
 	});
 	return { nexted, response };
@@ -209,5 +221,49 @@ describe('the pdf.js support-table dev middleware / containment', () => {
 		const { nexted } = request('/src/main.tsx');
 
 		expect(nexted).toBe(true);
+	});
+});
+
+describe('the pdf.js support-table dev middleware / host tool base', () => {
+	// The my-web-2026 host serves this app under `/tools/readmark/app/`,
+	// so `configResolved` hands the plugin a non-root base and the
+	// middleware has to strip it before its own matcher runs. The base is
+	// a local in the factory's closure, so this plugin instance shares
+	// nothing with the `/`-default ones above.
+	const HOST_BASE = '/tools/readmark/app/';
+	let hostMiddleware: Middleware;
+
+	beforeAll(() => {
+		hostMiddleware = installMiddleware(HOST_BASE);
+	});
+
+	it('serves a shipped CMap requested under the base', () => {
+		const { nexted, response } = request(`${HOST_BASE}assets/pdfjs/${CMAP}`, hostMiddleware);
+
+		expect(nexted).toBe(false);
+		expect(response.body?.equals(readFileSync(resolve(pdfjsRoot, CMAP)))).toBe(true);
+	});
+
+	it('refuses a traversal under the base', () => {
+		// The prefix is stripped first, so the containment guard sees the
+		// same `/assets/pdfjs/cmaps/../…` it refuses without a base.
+		const { nexted, response } = request(
+			`${HOST_BASE}assets/pdfjs/cmaps/../package.json`,
+			hostMiddleware,
+		);
+
+		expect(nexted).toBe(true);
+		expect(response.body).toBeUndefined();
+	});
+
+	it('does not serve a root-prefixed request when a base is configured', () => {
+		// Every URL the app builds carries the base, so a root
+		// `/assets/pdfjs/…` cannot come from it. Answering it anyway would
+		// serve a path the host never publishes — the mirror image of the
+		// 404 the base exists to prevent.
+		const { nexted, response } = request(`/assets/pdfjs/${CMAP}`, hostMiddleware);
+
+		expect(nexted).toBe(true);
+		expect(response.body).toBeUndefined();
 	});
 });

@@ -35,7 +35,8 @@ bun install --frozen-lockfile  # CI 用
 | コマンド | 用途 |
 | -------- | ---- |
 | `bun run dev` | Vite dev server（http://localhost:5173） |
-| `bun run build` | `dist/` に静的バンドル出力 |
+| `bun run build` | `dist/` に静的バンドル出力。base は `/tools/readmark/app/`（ホスト配信向け。smoke の前提） |
+| `bun run build:container` | `dist/` に root-base の静的バンドル出力（Containerfile / nginx 配信向け） |
 | `bun run preview` | ビルド成果物をローカルで配信 |
 | `bun run typecheck` | `tsc -b --noEmit` |
 | `bun run lint` | Biome check（読み取り専用） |
@@ -43,7 +44,7 @@ bun install --frozen-lockfile  # CI 用
 | `bun run format` | Biome format --write |
 | `bun run test` | Vitest 単体テスト 1 回実行 |
 | `bun run test:watch` | Vitest ウォッチモード |
-| `bun run validate` | typecheck + lint + test + build |
+| `bun run validate` | typecheck + lint + test + build（`build:container` は含まない） |
 | `bun run validate:fast` | typecheck + lint + test（PR 前） |
 | `bun run skills` | `bunx skills` のショートカット |
 | `bun scripts/smoke-import.mjs` | import フロー（#3）のブラウザ smoke |
@@ -63,6 +64,10 @@ bun install --frozen-lockfile  # CI 用
 
 `scripts/smoke-*.mjs` は `bun run preview`（= `bun run build` 済み）を
 headless Chromium で操作する one-shot のスクリプトで、CI では動かない。
+URL を `/tools/readmark/app/` 配下に組んでいるため、前提とする成果物は
+`bun run build`（ホスト名前空間向け）である。`bun run build:container`
+の root-base 成果物に対しては走らせない（`preview` の base と成果物の
+base が食い違い、アプリが起動しない）。
 共通の土台（preview 起動、Chromium 起動、count の settle、session
 store の行数読み出し — smoke seam は `src/storage/session-store.ts`）は
 `scripts/smoke-harness.mjs` にある。

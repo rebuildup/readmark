@@ -19,6 +19,13 @@
 #   reproducibility contract for JS dependencies.
 # - validate:fast: typecheck + lint + test. Build is excluded to keep
 #   PR feedback < 60s; release PRs additionally run validate locally.
+# - Builds: two targets (ADR-0006 Amendment), each verified right
+#   after it runs and before the next one overwrites `dist/`: the
+#   default target must reference the host namespace read from
+#   `app-base.ts`, the container target must be root-base. The
+#   container build empties `outDir`, so `readmark-dist` publishes the
+#   container artefact. No smoke runs here — CI proves the build
+#   targets, not the runtime.
 
 name: ci
 
@@ -72,10 +79,57 @@ jobs:
       - name: Unit tests
         run: bun run test
 
-      - name: Build (smoke)
+      # One place resolves the namespace, both checks consume it: the
+      # literal itself lives only in `app-base.ts`.
+      - name: "Resolve host namespace (app-base.ts)"
+        run: |
+          HOST_NS="$(bun -e 'const { APP_BASE } = await import("./app-base.ts"); process.stdout.write(APP_BASE ?? "")')"
+          if [ -z "$HOST_NS" ]; then
+            echo "app-base.ts exported an empty APP_BASE"
+            exit 1
+          fi
+          echo "HOST_NS=$HOST_NS" >> "$GITHUB_ENV"
+
+      - name: "Build (default target: host namespace)"
         run: bun run build
 
-      - name: Upload build artefact
+      # The container build empties `outDir` right afterwards, so the
+      # default target's output only exists until then — check it now.
+      - name: "Verify host-namespace dist"
+        run: |
+          bun scripts/check-dist-tables.mjs
+          if ! grep -qF "=\"${HOST_NS}assets/" dist/index.html; then
+            echo "dist/index.html does not reference ${HOST_NS}assets/ — the default build lost the host namespace"
+            grep -o 'src="[^"]*"' dist/index.html || true
+            exit 1
+          fi
+
+      # Runs second so `dist/` is left root-base: the uploaded artefact
+      # is what the Containerfile ships (ADR-0006 Amendment).
+      - name: "Build (container target: root base)"
+        run: bun run build:container
+
+      # Guards the `--base=/` half of the container build. Without this
+      # the default target would still pass CI and the regression would
+      # surface only after deploy.
+      - name: "Verify root-base dist"
+        run: |
+          bun scripts/check-dist-tables.mjs
+          if ! grep -q '="/assets/' dist/index.html; then
+            echo "dist/index.html does not reference /assets/ — is this a root-base build?"
+            exit 1
+          fi
+          # Whole tree, not just index.html: the base is baked into the
+          # chunks as well (`import.meta.env.BASE_URL` is replaced at
+          # build time), so a namespace reintroduced in a source string
+          # has to fail here too.
+          if grep -rqF "$HOST_NS" dist/; then
+            echo "dist/ still references the host namespace ($HOST_NS):"
+            grep -rlF "$HOST_NS" dist/
+            exit 1
+          fi
+
+      - name: Upload root-base dist (readmark-dist)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:

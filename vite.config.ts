@@ -5,6 +5,8 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
 
+import { APP_BASE } from './app-base';
+
 const require = createRequire(import.meta.url);
 
 /**
@@ -101,11 +103,15 @@ export function pdfjsSupportTables(): Plugin {
 			server.middlewares.use((req, res, next) => {
 				let url = req.url?.split('?')[0] ?? '';
 				// With a non-root `base` the browser requests
-				// `<base>assets/pdfjs/…`. Strip it so ONE matcher serves both
-				// that URL and the root-prefixed `/assets/pdfjs/…` the unit
-				// tests use. (If Vite's own base middleware already stripped
-				// it, the startsWith check simply does not match.)
-				if (base !== '/' && url.startsWith(base)) {
+				// `<base>assets/pdfjs/…`. Strip it so ONE matcher serves that URL.
+				// A root-prefixed request is outside the configured base: the app
+				// builds every support-table URL from `import.meta.env.BASE_URL`,
+				// so nothing it owns can produce one, and answering it would
+				// publish a path the host does not serve. Let the dev server
+				// 404 it. (This middleware runs before Vite's base middleware,
+				// so the prefix is still intact here.)
+				if (base !== '/') {
+					if (!url.startsWith(base)) return next();
 					url = `/${url.slice(base.length)}`;
 				}
 				const match = url.match(/^\/assets\/pdfjs\/([a-z_]+)\//);
@@ -179,8 +185,10 @@ export default defineConfig({
 	// `__vite__mapDeps` preload helper joins `base + chunk` the same
 	// way). With the base set, every emitted URL — index.html
 	// references, worker, support tables — resolves inside the tool's
-	// own namespace. See Issue #896.
-	base: '/tools/readmark/app/',
+	// own namespace. See Issue #896. The value lives in `app-base.ts`,
+	// shared with the smoke scripts, so this cannot drift from the paths
+	// they probe.
+	base: APP_BASE,
 	resolve: {
 		alias: {
 			'~': resolve(import.meta.dirname, 'src'),
