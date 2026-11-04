@@ -97,6 +97,7 @@ jobs:
       # default target's output only exists until then — check it now.
       - name: "Verify host-namespace dist"
         run: |
+          bun scripts/check-dist-tables.mjs
           if ! grep -qF "=\"${HOST_NS}assets/" dist/index.html; then
             echo "dist/index.html does not reference ${HOST_NS}assets/ — the default build lost the host namespace"
             grep -o 'src="[^"]*"' dist/index.html || true
@@ -113,13 +114,18 @@ jobs:
       # surface only after deploy.
       - name: "Verify root-base dist"
         run: |
+          bun scripts/check-dist-tables.mjs
           if ! grep -q '="/assets/' dist/index.html; then
             echo "dist/index.html does not reference /assets/ — is this a root-base build?"
             exit 1
           fi
-          if grep -qF "$HOST_NS" dist/index.html; then
-            echo "dist/index.html still references the host namespace ($HOST_NS):"
-            grep -nF "$HOST_NS" dist/index.html
+          # Whole tree, not just index.html: the base is baked into the
+          # chunks as well (`import.meta.env.BASE_URL` is replaced at
+          # build time), so a namespace reintroduced in a source string
+          # has to fail here too.
+          if grep -rqF "$HOST_NS" dist/; then
+            echo "dist/ still references the host namespace ($HOST_NS):"
+            grep -rlF "$HOST_NS" dist/
             exit 1
           fi
 
