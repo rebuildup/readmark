@@ -1,7 +1,8 @@
 // readmark — the URL prefix the host serves this app under.
 //
 // my-web-2026 mounts the build at its `delivery.artifact_path`, which is
-// `/tools/readmark/app/`. The readers of this value all have to agree:
+// `/tools/readmark/app`; `APP_BASE` below carries the trailing slash that
+// Vite normalizes `base` to. The readers of this value all have to agree:
 //
 //   - `vite.config.ts` passes it to Vite as `base`, so every emitted URL
 //     (index.html, chunks, the pdf.js worker, the support tables) is
