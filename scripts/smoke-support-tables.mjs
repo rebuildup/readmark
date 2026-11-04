@@ -53,6 +53,15 @@ import {
 	withPreview,
 } from './smoke-harness.mjs';
 
+/**
+ * Must match `base` in `vite.config.ts` (Issue #896): the preview
+ * answers under the tool's serving base, so every absolute asset URL
+ * the probe page builds has to carry it — a root `/assets/...` request
+ * 404s (measured: `GET /assets/pdf-B75MOh95.js -> 404`,
+ * `GET /tools/readmark/app/assets/pdf-B75MOh95.js -> 200`).
+ */
+const APP_BASE = '/tools/readmark/app/';
+
 const FIXTURE = join(
 	dirname(fileURLToPath(import.meta.url)),
 	'..',
@@ -78,11 +87,11 @@ window.__ink = async (withAssets) => {
   pdfjs.GlobalWorkerOptions.workerSrc = m.worker;
   const opts = { url: '/__probe.pdf' };
   if (withAssets) {
-    opts.cMapUrl = '/assets/pdfjs/cmaps/';
+    opts.cMapUrl = '${APP_BASE}assets/pdfjs/cmaps/';
     opts.cMapPacked = true;
-    opts.standardFontDataUrl = '/assets/pdfjs/standard_fonts/';
-    opts.wasmUrl = '/assets/pdfjs/wasm/';
-    opts.iccUrl = '/assets/pdfjs/iccs/';
+    opts.standardFontDataUrl = '${APP_BASE}assets/pdfjs/standard_fonts/';
+    opts.wasmUrl = '${APP_BASE}assets/pdfjs/wasm/';
+    opts.iccUrl = '${APP_BASE}assets/pdfjs/iccs/';
   }
   const doc = await pdfjs.getDocument(opts).promise;
   const page = await doc.getPage(1);
@@ -114,8 +123,8 @@ await withPreview(async () => {
 	const assets = join(process.cwd(), 'dist', 'assets');
 	const { readdirSync } = await import('node:fs');
 	const names = readdirSync(assets);
-	const pdfChunk = '/assets/' + names.find((f) => /^pdf-.*\.js$/.test(f));
-	const worker = '/assets/' + names.find((f) => /^pdf\.worker\.min-.*\.mjs$/.test(f));
+	const pdfChunk = APP_BASE + 'assets/' + names.find((f) => /^pdf-.*\.js$/.test(f));
+	const worker = APP_BASE + 'assets/' + names.find((f) => /^pdf\.worker\.min-.*\.mjs$/.test(f));
 	if (!pdfChunk || !worker) fail('could not locate the pdf.js chunks in dist/assets');
 
 	await ctx.route('**/__manifest.json', (r) =>

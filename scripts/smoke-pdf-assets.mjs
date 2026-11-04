@@ -44,6 +44,15 @@ import {
 const DIST = resolve(import.meta.dirname, '..', 'dist');
 
 /**
+ * Must match `base` in `vite.config.ts` (Issue #896): the preview
+ * serves the tables under the tool's base, so the HTTP probe has to
+ * ask there — a root `/assets/pdfjs/...` request 404s (measured:
+ * `GET /assets/pdfjs/cmaps/uni2utf.bcmap -> 404`,
+ * `GET /tools/readmark/app/assets/pdfjs/cmaps/uni2utf.bcmap -> 200`).
+ */
+const APP_BASE = '/tools/readmark/app/';
+
+/**
  * Tables that must exist, and a file each must contain.
  *
  * The named file is the one that matters for the failure this guards,
@@ -96,10 +105,10 @@ async function main() {
 			const dirPath = resolve(DIST, 'assets', 'pdfjs', dir);
 			const entries = await readdir(dirPath);
 			const probeName = mustContain ?? entries[0];
-			const response = await fetch(`${PREVIEW_URL}/assets/pdfjs/${dir}/${probeName}`);
+			const response = await fetch(`${PREVIEW_URL}${APP_BASE}assets/pdfjs/${dir}/${probeName}`);
 			if (response.status !== 200) {
 				fail(
-					`GET /assets/pdfjs/${dir}/${probeName} -> ${response.status}. ` +
+					`GET ${APP_BASE}assets/pdfjs/${dir}/${probeName} -> ${response.status}. ` +
 						`The table is on disk but not served, so pdf.js still 404s.`,
 				);
 			}
@@ -148,7 +157,13 @@ async function main() {
 			// `waitFor` defaults to requiring visibility, and this input
 			// is deliberately hidden (a styled label triggers it), so we
 			// wait for attachment instead.
-			const fileInput = page.locator('input[type=file]');
+			// The library screen mounts two `DocumentImport` instances (the
+			// empty-state CTA and the section header — the empty state shows
+			// 「PDF を import」 twice, recorded in
+			// docs/verification/tools/first-party-delivery-followup.md), so the
+			// unqualified locator is ambiguous and strict mode fails. Either
+			// input drives the same import handler; take the first.
+			const fileInput = page.locator('input[type=file]').first();
 			await fileInput.waitFor({ state: 'attached', timeout: 30000 });
 			await fileInput.setInputFiles({
 				name: 'asset-probe.pdf',
