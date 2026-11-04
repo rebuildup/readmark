@@ -44,7 +44,7 @@ bun install --frozen-lockfile  # CI 用
 | `bun run format` | Biome format --write |
 | `bun run test` | Vitest 単体テスト 1 回実行 |
 | `bun run test:watch` | Vitest ウォッチモード |
-| `bun run validate` | typecheck + lint + test + build（`build:container` は含まない） |
+| `bun run validate` | typecheck + lint + test + build + build:container（ビルド2ターゲット両方） |
 | `bun run validate:fast` | typecheck + lint + test（PR 前） |
 | `bun run skills` | `bunx skills` のショートカット |
 | `bun scripts/smoke-import.mjs` | import フロー（#3）のブラウザ smoke |

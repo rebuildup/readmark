@@ -21,7 +21,7 @@
 		"test": "vitest run",
 		"test:watch": "vitest",
 		"test:coverage": "vitest run --coverage",
-		"validate": "bun run typecheck && bun run lint && bun run test && bun run build",
+		"validate": "bun run typecheck && bun run lint && bun run test && bun run build && bun run build:container",
 		"validate:fast": "bun run typecheck && bun run lint && bun run test",
 		"skills": "bunx skills"
 	},

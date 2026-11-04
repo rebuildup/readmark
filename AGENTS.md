@@ -191,8 +191,8 @@ quality-gate shape):
 
 - `bun run validate:fast` — typecheck + lint + unit test. Required
   locally before opening a PR.
-- `bun run validate` — adds build. Required before tagging a
-  release.
+- `bun run validate` — adds both build targets (`build`, then
+  `build:container`). Required before tagging a release.
 - CI workflow `.github/workflows/ci.yml` runs `validate:fast` on
   PRs and push to `main` / `release-*` / numeric branches.
 
