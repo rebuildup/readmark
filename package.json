@@ -1,6 +1,6 @@
 {
 	"name": "readmark",
-	"version": "0.0.1",
+	"version": "0.1.0",
 	"private": true,
 	"description": "A local-first reading app for the browser. PDFs in MVP; EPUB/Markdown/text next. Designed to be embedded as a Tool by my-web-2026.",
 	"type": "module",
