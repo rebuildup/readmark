@@ -1,24 +1,30 @@
 /**
- * Unit tests for the bookmarks repository.
+ * Unit tests for the bookmarks repository (session store, ADR-0008).
  *
  * What is under test is the key discipline and the ordering, which
  * are the two things that go wrong silently: a list scoped to the
  * wrong source shows a reader another file's marks, and an unordered
  * list makes "jump to the one I just made" ambiguous.
  *
- * `getDb` is faked with a table that behaves like Dexie's for the
- * operations used here (a `Map` keyed by id, filter and sortBy over
- * it). The repo has no `fake-indexeddb`; the end-to-end claim — a
- * mark in the UI survives a reload and a jump lands on it — is
- * `scripts/smoke-reader.mjs`.
+ * These run against the real in-memory repository — there is no
+ * database to fake, which is the point of ADR-0008: the store is a
+ * `Map`, so a test that exercises the repository exercises the
+ * shipped code path exactly. The end-to-end claim (a mark appears
+ * in the panel and a jump lands on it) is `scripts/smoke-reader.mjs`.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { asDocumentId, asSourceFingerprint, type DocumentId } from '../domain/document.ts';
 import { asPageIndex } from '../domain/reading-state.ts';
+import {
+	addBookmark,
+	deleteBookmark,
+	listBookmarks,
+	listBookmarksOnPage,
+} from './bookmarks-repo.ts';
+import { _resetSessionStoreForTests } from './session-store.ts';
 
-const rows = new Map<string, Record<string, unknown>>();
 let sequence = 0;
 
 /** A `crypto.randomUUID` that is stable, so ids can be asserted. */
@@ -29,87 +35,16 @@ function useDeterministicIds(): void {
 	});
 }
 
-vi.mock('./db.ts', () => {
-	let inflight: Promise<unknown> = Promise.resolve();
-	return {
-		getDb: () => ({
-			bookmarks: {
-				where: (index: string) => ({
-					equals: (value: unknown) => {
-						// Index shape support. Single-column equality is a
-						// simple scan; compound equality matches an exact
-						// tuple so a `[documentId+sourceFingerprint]` read
-						// narrows to one document's bookmarks in one pass.
-						// Dexie's compound syntax wraps the index in
-						// `[...]`; strip the brackets before splitting.
-						const tuple = Array.isArray(value) ? value : [value];
-						const segments = index.replace(/[[\]]/g, '').split('+');
-						return {
-							filter: (predicate: (row: Record<string, unknown>) => boolean) => ({
-								async sortBy(key: string) {
-									return Array.from(rows.values())
-										.filter((row) => tuple.every((v, i) => row[segments[i] ?? index] === v))
-										.filter(predicate)
-										.sort((a, b) => Number(a[key]) - Number(b[key]));
-								},
-								async toArray() {
-									return Array.from(rows.values())
-										.filter((row) => tuple.every((v, i) => row[segments[i] ?? index] === v))
-										.filter(predicate);
-								},
-							}),
-							async toArray() {
-								return Array.from(rows.values()).filter((row) =>
-									tuple.every((v, i) => row[segments[i] ?? index] === v),
-								);
-							},
-						};
-					},
-				}),
-				get: async (id: string) => rows.get(id),
-				put: async (row: Record<string, unknown>) => {
-					rows.set(String(row.id), row);
-					return row.id;
-				},
-				delete: async (id: string) => {
-					// Dexie 4 types `Table.delete` as `void`.
-					rows.delete(id);
-				},
-				update: async (id: string, changes: Record<string, unknown>) => {
-					const row = rows.get(id);
-					if (row === undefined) return 0;
-					rows.set(id, { ...row, ...changes });
-					return 1;
-				},
-			},
-			transaction: async <T>(_mode: string, _tables: unknown, fn: () => Promise<T>) => {
-				// Serialise concurrent transactions on this table:
-				// a second `tx` awaits the first, so its `get` sees
-				// the first's `delete`. Mirrors Dexie's transactional
-				// queue for the race tests to be meaningful.
-				const result = inflight.then(async () => await fn());
-				inflight = result.catch(() => undefined);
-				return result;
-			},
-		}),
-	};
-});
-
-const { addBookmark, deleteBookmark, listBookmarks, listBookmarksOnPage } = await import(
-	'./bookmarks-repo.ts'
-);
-
 const DOC_A = asDocumentId('00000000-0000-4000-8000-00000000000a');
 const DOC_B = asDocumentId('00000000-0000-4000-8000-00000000000b');
 const FINGERPRINT_A = asSourceFingerprint('a'.repeat(64));
 const FINGERPRINT_B = asSourceFingerprint('b'.repeat(64));
 
 beforeEach(() => {
-	rows.clear();
+	vi.unstubAllGlobals();
 	sequence = 0;
 	useDeterministicIds();
-	vi.unstubAllGlobals();
-	useDeterministicIds();
+	_resetSessionStoreForTests();
 });
 
 async function add(params: {
@@ -128,8 +63,11 @@ async function add(params: {
 		...(params.title === undefined ? {} : { title: params.title }),
 	});
 	if (params.createdAt !== undefined) {
-		const row = rows.get(bookmark.id);
-		if (row !== undefined) row.createdAt = params.createdAt;
+		// `addBookmark` returns the very object it stored, so the
+		// test can backdate the row without a second write path —
+		// the ordering assertions need creation times the clock
+		// cannot produce on demand.
+		(bookmark as { createdAt: number }).createdAt = params.createdAt;
 	}
 	return bookmark;
 }
@@ -264,11 +202,11 @@ describe('deleteBookmark', () => {
 		expect(listed.map((row) => row.id)).toEqual([keep.id]);
 	});
 
-	it('atomically reports only one winner when two callers race', async () => {
-		// The race that an unwrapped get-then-delete cannot answer:
-		// both callers see the row, both call delete, both would
-		// otherwise return true. The transaction serialises them so
-		// exactly one returns true.
+	it('reports only one winner when two callers race', async () => {
+		// The shape the transaction used to serialise: two callers
+		// for the same row. JavaScript runs one job at a time, so the
+		// first delete has already happened when the second one runs
+		// — exactly one `true`, and the loser says `false`.
 		const bookmark = await add({ pageIndex: 1 });
 
 		const results = await Promise.all([deleteBookmark(bookmark.id), deleteBookmark(bookmark.id)]);

@@ -31,7 +31,8 @@
  *      click away.
  *   8. Reading progress: scrolling writes a `readingProgress` row, and
  *      reopening the document restores the scroll position — asserted
- *      against IndexedDB, because a row can be missing while the list
+ *      against the session store, because a row can be missing while
+ *      the list
  *      still looks right.
  *   9. Bookmarks: the toolbar asks for a name and writes a `bookmarks`
  *      row pinned to the page being read, the panel shows the name and
@@ -40,7 +41,7 @@
  *      wheel scroll, which must not disable later jumps — and the
  *      confirmed delete removes the row. A row can be missing while the
  *      list still looks right, so each step is read back out of
- *      IndexedDB.
+ *      the session store (the smoke seam in `src/storage/session-store.ts`).
  *  10. The same reader on a 2× display: the backing store is scaled,
  *      and the painted ink covers the whole canvas rather than its
  *      top-left quarter.
@@ -91,7 +92,7 @@ const PAGE_TEXT = 'readmark page';
 
 /** The name the reader types for the first mark. Japanese, because a
  *  label in the reader's own script is the case that matters: it has to
- *  survive the round trip through IndexedDB and the panel unchanged. */
+ *  survive the round trip through the session store and the panel unchanged. */
 const BOOKMARK_TITLE = '第三の章 まとめ';
 
 /** A multi-page PDF with real text on every page, so the text layer
@@ -198,39 +199,21 @@ async function inkBounds(page, index) {
 	});
 }
 
-/** The single `readingProgress` row, read straight out of IndexedDB. */
+/** The single `readingProgress` row, read from the page's session
+ *  store through the smoke seam. */
 async function readProgressRow(page) {
-	return await page.evaluate(async () => {
-		const db = await new Promise((resolve, reject) => {
-			const request = indexedDB.open('readmark');
-			request.onsuccess = () => resolve(request.result);
-			request.onerror = () => reject(request.error);
-		});
-		const row = await new Promise((resolve) => {
-			const store = db.transaction('readingProgress', 'readonly').objectStore('readingProgress');
-			const cursorRequest = store.openCursor();
-			cursorRequest.onsuccess = () => resolve(cursorRequest.result?.value ?? null);
-		});
-		db.close();
-		return row;
+	return await page.evaluate(() => {
+		const store = globalThis.readmarkSessionStore;
+		if (store === undefined) return null;
+		return [...store.readingProgress.values()][0] ?? null;
 	});
 }
 
 async function readBookmarkRows(page) {
-	return await page.evaluate(async () => {
-		const db = await new Promise((resolve, reject) => {
-			const request = indexedDB.open('readmark');
-			request.onsuccess = () => resolve(request.result);
-			request.onerror = () => reject(request.error);
-		});
-		const rows = await new Promise((resolve) => {
-			const store = db.transaction('bookmarks', 'readonly').objectStore('bookmarks');
-			const request = store.getAll();
-			request.onsuccess = () => resolve(request.result);
-			request.onerror = () => resolve([]);
-		});
-		db.close();
-		return rows;
+	return await page.evaluate(() => {
+		const store = globalThis.readmarkSessionStore;
+		if (store === undefined) return [];
+		return [...store.bookmarks.values()];
 	});
 }
 
@@ -748,7 +731,7 @@ async function main() {
 
 		// --- Reading progress: written, then restored ---
 		// Scroll to the middle of the document, let the debounce fire,
-		// and read the row back out of IndexedDB.
+		// and read the row back out of the session store.
 		await page.evaluate(() => {
 			const scroller = document.querySelector('[data-testid="rm-reader-scroll"]');
 			if (scroller !== null) scroller.scrollTop = scroller.scrollHeight / 2;
@@ -1172,8 +1155,9 @@ async function main() {
 			fail(`a second bookmark on the same page replaced the first: ${JSON.stringify(marked)}`);
 		}
 		if (marked[0].id === marked[1].id) fail('two bookmarks on one page share an id');
-		// IndexedDB hands rows back in primary-key order and a bookmark
-		// id is a random UUID, so "the second row" means nothing here.
+		// The store hands rows back in creation order, but two marks
+		// made moments apart are only as distinct as what they carry,
+		// so "the second row" means nothing here.
 		// The two marks are told apart by what they carry.
 		const titled = marked.filter((candidate) => candidate.title === BOOKMARK_TITLE);
 		const unnamed = marked.filter((candidate) => candidate.title === '');
@@ -1302,19 +1286,10 @@ async function main() {
 			async () => findStoreCount(await readStoreCounts(page), 'highlights') === 1,
 			'the toolbar to write a highlight row',
 		);
-		const markRow = await page.evaluate(async () => {
-			const db = await new Promise((resolve, reject) => {
-				const request = indexedDB.open('readmark');
-				request.onsuccess = () => resolve(request.result);
-				request.onerror = () => reject(request.error);
-			});
-			const row = await new Promise((resolve) => {
-				const store = db.transaction('highlights', 'readonly').objectStore('highlights');
-				const cursor = store.openCursor();
-				cursor.onsuccess = () => resolve(cursor.result?.value ?? null);
-			});
-			db.close();
-			return row;
+		const markRow = await page.evaluate(() => {
+			const store = globalThis.readmarkSessionStore;
+			if (store === undefined) return null;
+			return [...store.highlights.values()][0] ?? null;
 		});
 		if (markRow === null) fail('the toolbar wrote no highlight row');
 		// The text the row remembers is the quote's own text, from the same

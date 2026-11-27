@@ -12,7 +12,7 @@
  *   2. No "fake worker" / "please use the legacy build"
  *      warning in the console.
  *   3. A real PDF, dropped through the UI's file input, lands
- *      in IndexedDB (`documents`, `documentSources`,
+ *      in the session store (`documents`, `documentSources`,
  *      `documentBlobs`) and shows in the library list.
  *   4. Re-importing the same PDF does NOT add a duplicate
  *      row (fingerprint dedup).
@@ -202,9 +202,9 @@ async function main() {
 			fail(`expected worker resourceType=script, got ${workerFetch.resourceType}`);
 		}
 
-		// --- Verify IndexedDB rows ---
+		// --- Verify session-store rows ---
 		const dbStats = await readStoreCounts(page);
-		log(`IndexedDB databases: ${JSON.stringify(dbStats)}`);
+		log(`session store: ${JSON.stringify(dbStats)}`);
 		assertSingleDocumentStats(dbStats, 'after first import');
 		log('documents=1 documentSources=1 documentBlobs=1');
 
@@ -226,7 +226,7 @@ async function main() {
 
 		const dbStats2 = await readStoreCounts(page);
 		assertSingleDocumentStats(dbStats2, 'after re-import');
-		log('dedup confirmed at IndexedDB level');
+		log('dedup confirmed at store level');
 
 		// --- Console diagnostics ---
 		const fakeWorkerHits = [...consoleErrors, ...consoleWarns].filter((m) =>

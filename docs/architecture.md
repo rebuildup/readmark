@@ -25,7 +25,7 @@
 │                             │                                     │
 │                             ▼                                     │
 │  ┌──────────────────────────────────────────────────────────────┐│
-│  │   Storage 層 (Dexie → IndexedDB)                              ││
+│  │   Storage 層 (in-memory session store, ADR-0008)              ││
 │  │   documents         — Document (id)                           ││
 │  │   documentSources   — DocumentSource (sourceFingerprint)      ││
 │  │   documentBlobs     — DocumentBlob (sourceFingerprint)        ││
@@ -44,10 +44,11 @@
 
 Key points:
 
-- **Single browser origin.** All app state lives in the browser's
-  IndexedDB under one origin. There is no server-side runtime.
+- **No runtime storage.** All app state lives in the tab's memory
+  (the session store); a reload starts an empty library and the UI
+  says so. There is no server-side runtime.
 - **No network in MVP.** The app makes no outbound requests during
-  normal use.
+  normal use — not even for fonts (zero external origins).
 - **Integration with my-web-2026 is intentionally undecided**
   (ADR-0006). readmark is a standalone web app.
 
@@ -56,7 +57,7 @@ Key points:
 ### Domain layer (`src/domain/`)
 
 - Format-agnostic types only.
-- No imports from React, Dexie, pdf.js, browser APIs.
+- No imports from React, pdf.js, browser APIs, or the storage layer.
 - Three concept files today:
   - `document.ts` — `Document` (logical), `DocumentSource`
     (physical), `DocumentBlob` (bytes), identity types.
@@ -74,8 +75,8 @@ Key points:
     metadata.
   - `documentBlobs` keyed by `sourceFingerprint` — bytes. The
     blob is never duplicated onto `documents`; the invariant is
-    "drop `documentBlobs` rows under quota pressure without
-    touching `documents` or reading-state."
+    "drop `documentBlobs` entries without touching `documents` or
+    reading-state" (the delete cascade counts them separately).
 - Reading state is keyed by `(documentId, sourceFingerprint)`:
   - `readingProgress` has composite PK
     `[documentId+sourceFingerprint]`.
@@ -160,15 +161,7 @@ payload is well-formed.
 - Zustand for ephemeral UI state only (current side panel, zoom,
   rotation).
 - **Never** store document blobs, reading state, or any
-  persistent data.
-
-### Platform (`src/platform/`)
-
-- Thin wrappers over browser APIs:
-  - `navigator.storage.persist()` / `.estimate()` / `.persisted()`
-  - `crypto.subtle.digest()`
-  - `URL.createObjectURL()` / `URL.revokeObjectURL()`
-- One wrapper per concept; not a "utilities grab bag".
+  session data (that is `src/storage/`'s store).
 
 ## 3. Data flow — opening a document
 
@@ -219,10 +212,8 @@ this distinction at the type level.
 
 | Failure                             | Handling                                            |
 | ----------------------------------- | --------------------------------------------------- |
-| Browser data deleted                | Library shows empty state; orphan-state UX is a follow-up ticket. |
-| IndexedDB quota exceeded            | Import flow refuses and shows the quota estimate.   |
-| Persistent storage denied           | UX marks the library as "may be evicted".           |
-| Bytes evicted but metadata kept     | ReaderScreen shows `missing-blob` state; user re-imports. |
+| Reload / new tab                    | Library starts empty by design (ADR-0008); the one-line notice states it. |
+| Metadata without its bytes (defensive) | ReaderScreen shows `missing-blob` state; user re-imports. |
 | PDF file malformed                  | Reader throws a typed error; UI shows a recovery flow. |
 | Worker fails to load                | PDF rendering falls back to a synchronous flag (TODO). |
 

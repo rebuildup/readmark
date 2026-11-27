@@ -16,12 +16,12 @@
  *   5. Delete asks first: the app behind the dialog is inert, focus
  *      is on the cancel button, and cancelling writes nothing.
  *   6. Confirming the delete removes the row AND the document,
- *      source and blob rows in IndexedDB — the delete cascade is a
+ *      source and blob rows in the session store — the delete cascade is a
  *      storage claim, so a DOM-only assertion would not prove it.
  *   7. The row states the last open ("最終閲覧" / "未閲覧") and never
  *      claims the book was read through.
  *
- * Why the assertions are about IndexedDB as well as the DOM: a row
+ * Why the assertions are about the store as well as the DOM: a row
  * can leave the list while its bytes stay in the store, which is
  * precisely the failure mode a cascade can have, and it only shows up
  * where the reader's disk usage is decided.
@@ -195,7 +195,7 @@ async function main() {
 		}
 		if ((await readStableCount(rows(page))) !== 2)
 			fail('cancelling the delete changed the row count');
-		log('cancel left both the list and IndexedDB untouched');
+		log('cancel left both the list and the store untouched');
 
 		// --- Delete: confirm cascades ---
 		const victimTitle = (await rowTitles(page))[0];

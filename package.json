@@ -12,6 +12,7 @@
 	"scripts": {
 		"dev": "vite",
 		"build": "tsc -b --noCheck && vite build",
+		"build:container": "tsc -b --noCheck && vite build --base=/",
 		"preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
 		"typecheck": "tsc -b --noEmit",
 		"lint": "biome check .",
@@ -20,12 +21,11 @@
 		"test": "vitest run",
 		"test:watch": "vitest",
 		"test:coverage": "vitest run --coverage",
-		"validate": "bun run typecheck && bun run lint && bun run test && bun run build",
+		"validate": "bun run typecheck && bun run lint && bun run test && bun run build && bun run build:container",
 		"validate:fast": "bun run typecheck && bun run lint && bun run test",
 		"skills": "bunx skills"
 	},
 	"dependencies": {
-		"dexie": "^4.4.6",
 		"pdfjs-dist": "^5.4.624",
 		"react": "^19.3.0",
 		"react-dom": "^19.3.0",

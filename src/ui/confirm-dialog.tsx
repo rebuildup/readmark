@@ -27,7 +27,7 @@
  *      is never dismissed by a backdrop click: for an irreversible
  *      action an explicit choice is the safer contract, and it keeps
  *      the dialog usable without a pointer. Escape is disabled while
- *      `busy` so a slow IndexedDB transaction cannot be abandoned
+ *      `busy` so a slow delete cannot be abandoned
  *      half-done.
  *
  * The description is a `ReactNode` because callers need to name the

@@ -45,6 +45,14 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// The serving base, shared with `vite.config.ts` so the URLs this probe
+// builds cannot drift from the build (Issue #896). The preview answers
+// under it, so every absolute asset URL the probe page builds has to
+// carry it — a root `/assets/...` request 404s (measured:
+// `GET /assets/pdf-B75MOh95.js -> 404`,
+// `GET /tools/readmark/app/assets/pdf-B75MOh95.js -> 200`).
+import { APP_BASE } from '../app-base.ts';
+
 import {
 	fail,
 	launchBrowser,
@@ -78,11 +86,11 @@ window.__ink = async (withAssets) => {
   pdfjs.GlobalWorkerOptions.workerSrc = m.worker;
   const opts = { url: '/__probe.pdf' };
   if (withAssets) {
-    opts.cMapUrl = '/assets/pdfjs/cmaps/';
+    opts.cMapUrl = '${APP_BASE}assets/pdfjs/cmaps/';
     opts.cMapPacked = true;
-    opts.standardFontDataUrl = '/assets/pdfjs/standard_fonts/';
-    opts.wasmUrl = '/assets/pdfjs/wasm/';
-    opts.iccUrl = '/assets/pdfjs/iccs/';
+    opts.standardFontDataUrl = '${APP_BASE}assets/pdfjs/standard_fonts/';
+    opts.wasmUrl = '${APP_BASE}assets/pdfjs/wasm/';
+    opts.iccUrl = '${APP_BASE}assets/pdfjs/iccs/';
   }
   const doc = await pdfjs.getDocument(opts).promise;
   const page = await doc.getPage(1);
@@ -114,9 +122,22 @@ await withPreview(async () => {
 	const assets = join(process.cwd(), 'dist', 'assets');
 	const { readdirSync } = await import('node:fs');
 	const names = readdirSync(assets);
-	const pdfChunk = '/assets/' + names.find((f) => /^pdf-.*\.js$/.test(f));
-	const worker = '/assets/' + names.find((f) => /^pdf\.worker\.min-.*\.mjs$/.test(f));
-	if (!pdfChunk || !worker) fail('could not locate the pdf.js chunks in dist/assets');
+	// The names are looked up BEFORE the base is joined. Concatenating first
+	// turns a missing chunk into the truthy string `.../assets/undefined`,
+	// so a guard on the joined URL can never fire and the run dies later on
+	// a dynamic import of a file nobody named.
+	const pdfChunkName = names.find((f) => /^pdf-.*\.js$/.test(f));
+	const workerName = names.find((f) => /^pdf\.worker\.min-.*\.mjs$/.test(f));
+	if (pdfChunkName === undefined || workerName === undefined) {
+		fail(
+			`could not locate the pdf.js chunks in dist/assets — ` +
+				`pdf chunk: ${pdfChunkName ?? 'not found'}, worker: ${workerName ?? 'not found'}. ` +
+				`dist/assets holds ${names.length} file(s)` +
+				(names.length > 0 ? `: ${names.join(', ')}` : ''),
+		);
+	}
+	const pdfChunk = `${APP_BASE}assets/${pdfChunkName}`;
+	const worker = `${APP_BASE}assets/${workerName}`;
 
 	await ctx.route('**/__manifest.json', (r) =>
 		r.fulfill({
@@ -271,25 +292,44 @@ await withPreview(async () => {
 			});
 			if (!ready) fail(`dev server never bound 5199; stderr:\n${devErr.slice(-400)}`);
 
-			// The tables must be served in dev, at the app's base path.
+			// The tables must be served in dev, at the app's base path — the
+			// same URL `pdf-worker.ts` builds from `BASE_URL`. A root
+			// `/assets/pdfjs/…` is outside the base and is refused.
 			for (const probe of [
 				'assets/pdfjs/cmaps/UniJIS-UCS2-H.bcmap',
 				'assets/pdfjs/standard_fonts/LiberationSans-Regular.ttf',
 				'assets/pdfjs/wasm/openjpeg.wasm',
 			]) {
-				const res = await fetch(`http://127.0.0.1:${devPort}/${probe}`);
+				const path = `${APP_BASE}${probe}`;
+				const res = await fetch(`http://127.0.0.1:${devPort}${path}`);
 				if (res.status !== 200) {
-					fail(`dev server: GET /${probe} -> ${res.status} (tables must resolve in dev too)`);
+					fail(`dev server: GET ${path} -> ${res.status} (tables must resolve in dev too)`);
 				}
 				const bytes = (await res.arrayBuffer()).byteLength;
-				if (bytes === 0) fail(`dev server: GET /${probe} returned 0 bytes`);
-				console.log(`[smoke] dev serves ${probe} (${bytes} bytes, 200)`);
+				if (bytes === 0) fail(`dev server: GET ${path} returned 0 bytes`);
+				console.log(`[smoke] dev serves ${path} (${bytes} bytes, 200)`);
 			}
 
-			// And the module must actually point at that base.
-			const modSrc = await (
-				await fetch(`http://127.0.0.1:${devPort}/src/reader/pdf/pdf-worker.ts`)
-			).text();
+			// And the module must actually point at that base. The probe has
+			// to ask under the base as well: a root path is answered by
+			// Vite's base middleware with a 404 page, and a check that
+			// never looks at the status would run its regex over that error
+			// text and pass.
+			const modulePath = `${APP_BASE}src/reader/pdf/pdf-worker.ts`;
+			const moduleResponse = await fetch(`http://127.0.0.1:${devPort}${modulePath}`);
+			if (moduleResponse.status !== 200) {
+				fail(
+					`dev server: GET ${modulePath} -> ${moduleResponse.status} ` +
+						'(the module source must resolve under the base)',
+				);
+			}
+			const modSrc = await moduleResponse.text();
+			if (!modSrc.includes('PDFJS_ASSET_BASE')) {
+				fail(
+					`dev server: GET ${modulePath} returned 200 but the body has no ` +
+						`PDFJS_ASSET_BASE (${modSrc.length} bytes) — this is not the module.`,
+				);
+			}
 			if (/node_modules[^"']*pdfjs\//.test(modSrc.split('PDFJS_ASSET_BASE')[1] ?? '')) {
 				fail(
 					'the dev module derives the support-table base from the worker URL ' +

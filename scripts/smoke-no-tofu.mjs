@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 /**
  * Gate: no tofu. Every Japanese glyph the UI draws must have real
- * ink behind it.
+ * ink behind it — and the page must fetch nothing from any third
+ * party while drawing it (ADR-0008: zero external origins; the
+ * webfont that used to guarantee the glyphs is gone with it).
  *
  * ## Why this is a pixel test and not a DOM assertion
  *
@@ -16,17 +18,25 @@
  * font known to lack the glyph — and comparing ink is how we tell
  * "drew a real kanji" from "drew a box".
  *
- * The simplest reliable signal is font availability plus a
- * non-rectangular ink profile, so this measures both:
- *   1. `document.fonts.check()` for each family the UI asks for.
- *   2. The rendered width of a known Japanese string, which must be
- *      non-zero and must not equal the width of the same string
- *      rendered with CJK glyphs forced off.
+ * Three sections:
+ *   1. No third-party request leaves the page (font hosts or any
+ *      other external origin → fail). A webfont fetch would both
+ *      violate ADR-0008 and mask whether the MACHINE can draw
+ *      Japanese.
+ *   2. The chrome strings are really on screen.
+ *   3. Ink: rendered widths of a known Japanese string, which must
+ *      be non-zero and must not collapse to the uniform width of
+ *      forced tofu.
+ *
+ * What a failure of section 3 means HERE: the machine running the
+ * smoke has no installed Japanese face. That is the accepted cost
+ * of ADR-0008 (a document that phones home for its own UI text
+ * contradicts the model), and the fix is to install a CJK font on
+ * the machine — not to re-add a webfont.
  */
 
 import { fail, launchBrowser, PREVIEW_URL, withPreview } from './smoke-harness.mjs';
 
-/** Japanese that appears verbatim in the library screen's chrome. */
 /**
  * Japanese that appears verbatim in the library screen's chrome.
  *
@@ -36,10 +46,16 @@ import { fail, launchBrowser, PREVIEW_URL, withPreview } from './smoke-harness.m
  */
 const UI_STRINGS = [
 	'まだ文書がありません',
-	'ローカルに保持された文書のリスト',
+	'このセッションの文書のリスト',
+	'この readmark は保存しません',
 	'import ボタンから PDF を追加してください',
 	'PDF を import',
 ];
+
+/** Origins the page may talk to. Everything else is a violation. */
+function isAllowedUrl(url) {
+	return url.startsWith(PREVIEW_URL) || url.startsWith('data:') || url.startsWith('blob:');
+}
 
 await withPreview(async () => {
 	const browser = await launchBrowser();
@@ -47,62 +63,28 @@ await withPreview(async () => {
 		const page = await browser.newPage();
 		const failures = [];
 		page.on('requestfailed', (r) => {
-			if (r.url().includes('fonts.g')) failures.push(`request failed: ${r.url()}`);
+			if (!isAllowedUrl(r.url())) failures.push(`third-party request failed: ${r.url()}`);
 		});
-		page.on('response', (r) => {
-			if (r.url().includes('fonts.googleapis.com/css2') && r.status() >= 400) {
-				failures.push(`stylesheet ${r.status()}: ${r.url()}`);
-			}
+		page.on('request', (r) => {
+			if (!isAllowedUrl(r.url())) failures.push(`third-party request: ${r.url()}`);
 		});
 
 		await page.goto(`${PREVIEW_URL}/`, { waitUntil: 'load' });
-		// The library screen mounts after the database opens.
+		// The library screen mounts directly — there is no storage
+		// initialization gate in front of the first render (ADR-0008).
 		await page.locator('input[type=file]').waitFor({ state: 'attached', timeout: 30000 });
 		await page.evaluate(() => document.fonts.ready);
 		await page.waitForTimeout(1500);
 
-		// --- 1. the webfont actually loaded ------------------------
+		// --- 1. nothing left the origin -----------------------------
 		//
-		// `document.fonts.check(family, text)` is NOT a usable
-		// assertion here. Google Fonts serves Noto Sans JP as ~120
-		// `unicode-range`-scoped subsets, and `check()` only reports true
-		// for characters covered by an ALREADY-LOADED subset. The browser
-		// fetches those subsets lazily, so per-character `check()` returns
-		// false for perfectly good text and this smoke fails on a working
-		// page.
-		//
-		// What is reliable: the stylesheet was fetched and faces were
-		// created for the family. The real proof of glyphs is section 3,
-		// which measures ink.
-		const fontReport = await page.evaluate(
-			(families) => {
-				const out = {};
-				for (const family of families) {
-					const faces = Array.from(document.fonts).filter(
-						(f) => f.family.replace(/["']/g, '') === family,
-					);
-					out[family] = {
-						faceCount: faces.length,
-						loaded: faces.filter((f) => f.status === 'loaded').length,
-						weights: [...new Set(faces.map((f) => f.weight))].sort(),
-					};
-				}
-				return out;
-			},
-			['Noto Sans JP', 'Zen Kaku Gothic New'],
-		);
-
-		console.log('[tofu] font faces:', JSON.stringify(fontReport));
-		if (fontReport['Noto Sans JP'].faceCount === 0) {
-			fail(
-				'No Noto Sans JP face was created at all — the Google Fonts stylesheet ' +
-					'never loaded. Check the <link> in index.html and whether ' +
-					'Cross-Origin-Embedder-Policy: require-corp blocks it.',
-			);
-		}
-		if (fontReport['Noto Sans JP'].loaded === 0) {
-			fail('Noto Sans JP faces exist but none loaded — every Japanese label is tofu');
-		}
+		// The old check here verified the Google Fonts stylesheet had
+		// loaded. ADR-0008 removed the stylesheet: a page that fetches
+		// its own UI text from a third party contradicts the
+		// storage-free, zero-contact model this app ships with, and a
+		// successful fetch would hide whether the machine itself can
+		// draw Japanese.
+		console.log('[tofu] no third-party request observed');
 
 		// --- 2. the chrome text is really on screen ----------------
 		const body = await page.evaluate(() => document.body.innerText);
@@ -115,10 +97,11 @@ await withPreview(async () => {
 
 		// --- 3. real ink, not hollow boxes -------------------------
 		//
-		// Draw the same string twice into a canvas: once with the app's
-		// stack, once with a font that certainly has no CJK. Tofu is
-		// what the second produces, so if the first matches the second
-		// the app is drawing boxes.
+		// Draw the same string twice into a canvas: once with the
+		// machine's stack (the same faces the stylesheet lists first),
+		// once with a font that certainly has no CJK. Tofu is what the
+		// second produces, so if the first matches the second the app
+		// is drawing boxes.
 		const ink = await page.evaluate(async (text) => {
 			await document.fonts.ready;
 			const measure = (font) => {
@@ -138,7 +121,9 @@ await withPreview(async () => {
 				return { width: m.width, distinctWidths: widths.size };
 			};
 			return {
-				app: measure('16px "Noto Sans JP", sans-serif'),
+				app: measure(
+					'16px "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, system-ui, sans-serif',
+				),
 				// A stack with no CJK face at all, forced.
 				noCjk: measure('16px "___NoSuchFont___", monospace'),
 			};
@@ -151,7 +136,9 @@ await withPreview(async () => {
 		if (ink.app.distinctWidths < 2) {
 			fail(
 				`every Japanese character measured the same width (${ink.app.distinctWidths} ` +
-					'distinct) — that is the signature of tofu boxes, not real glyphs',
+					'distinct) — that is the signature of tofu boxes, not real glyphs. ' +
+					'Install a Japanese system font on this machine (ADR-0008 accepted ' +
+					'that no webfont will be fetched).',
 			);
 		}
 
@@ -159,7 +146,7 @@ await withPreview(async () => {
 		console.log('[tofu] screenshot -> /tmp/opencode/tofu-check.png');
 
 		if (failures.length > 0) {
-			fail(`font requests failed:\n  ${failures.join('\n  ')}`);
+			fail(`external contact observed:\n  ${failures.join('\n  ')}`);
 		}
 		console.log('[tofu] NO TOFU CHECK PASSED');
 	} finally {

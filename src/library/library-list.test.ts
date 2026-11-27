@@ -7,7 +7,7 @@
  * proves the ordering and matching semantics (tie-breaks, untitled
  * rows, Japanese collation, calendar-day arithmetic).
  *
- * No IndexedDB and no React: `LibraryEntry` is a plain object
+ * No storage and no React: `LibraryEntry` is a plain object
  * (`Document` + its primary `DocumentSource`), so fixtures are
  * literals.
  */
