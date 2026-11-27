@@ -22,8 +22,17 @@ export interface DocumentSourceKey {
 	readonly sourceFingerprint: SourceFingerprint;
 }
 
-/** Aliases for the three repositories. They are the same type; the
- *  names document which table each repository reads/writes. */
+/** Aliases for the four repositories. They are the same type; the
+ *  names document which table each repository reads/writes.
+ *
+ *  `NoteScope` is the same pair for a *different* reason than the other
+ *  three, and the difference is worth stating because it is the whole
+ *  point of the notes repository: a `FreeNote` has no position and so
+ *  no source to be scoped by, and the notes repository answers for it
+ *  by document alone. The scope type is the *upper* bound of what a
+ *  notes query can return, not a claim that every row it returns
+ *  carries both keys. See `notes-repo.ts`. */
 export type BookmarkScope = DocumentSourceKey;
 export type HighlightScope = DocumentSourceKey;
+export type NoteScope = DocumentSourceKey;
 export type ReadingProgressKey = DocumentSourceKey;
