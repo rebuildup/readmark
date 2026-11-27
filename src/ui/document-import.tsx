@@ -47,13 +47,35 @@ interface DocumentImportProps {
 	/** Called after a successful import. The library screen
 	 *  uses this to refresh its list. */
 	onImported?: (result: ImportSuccess) => void;
+	/** Called once the browser has answered `persist()` after a
+	 *  successful import, with no opinion on the answer.
+	 *
+	 *  Why this exists rather than relying on `onImported`:
+	 *  `requestPersistenceIfNeeded()` is asynchronous, so the
+	 *  list refresh that `onImported` triggers races it. Whichever
+	 *  finishes first decides what `<QuotaBadge>` reads, and a
+	 *  `persisted()` read that lands before `persist()` resolves
+	 *  reports "not persistent" even when the browser goes on to
+	 *  grant the request. The badge would then show a false
+	 *  eviction warning to a reader whose storage IS persistent.
+	 *  The parent uses this to re-read after the answer is known.
+	 *
+	 *  It is a separate callback rather than an `await` because
+	 *  `persist()` may put a permission prompt in front of the
+	 *  user; awaiting it would stall the library list refresh
+	 *  until they dismiss that prompt. */
+	onPersistenceSettled?: () => void;
 	/** Where to send the user after a successful import.
 	 *  Default: stay on the library screen so they see the
 	 *  new entry. Pass `/read/{id}` to jump straight in. */
 	navigateOnSuccess?: 'library' | 'reader';
 }
 
-export function DocumentImport({ onImported, navigateOnSuccess = 'library' }: DocumentImportProps) {
+export function DocumentImport({
+	onImported,
+	onPersistenceSettled,
+	navigateOnSuccess = 'library',
+}: DocumentImportProps) {
 	const inputRef = useRef<HTMLInputElement | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<ImportError | null>(null);
@@ -94,11 +116,22 @@ export function DocumentImport({ onImported, navigateOnSuccess = 'library' }: Do
 			const result = await importPdfDocument(file);
 			if (result.ok) {
 				setLastImport(result.value);
-				// Ask for persistent storage once per tab. Wrapped in
-				// `void` because the reader does not need to see the
-				// outcome — the badge in the library header reflects it
-				// after the next refresh.
-				void requestPersistenceIfNeeded();
+				// Ask for persistent storage once per tab. The reader
+				// does not need to see the answer, so the list
+				// refresh is NOT blocked on it — but the badge in
+				// the library header must not re-read `persisted()`
+				// until the answer is in, or it renders a false
+				// "not persistent" warning. `onPersistenceSettled`
+				// is the signal that the answer has landed.
+				//
+				// `requestPersistenceIfNeeded()` is documented never
+				// to reject, so the `catch` is belt-and-braces. It
+				// is here because the badge must re-read either way:
+				// a rejection means "not persistent", and staying on
+				// a stale badge would misreport that as persistent.
+				void requestPersistenceIfNeeded()
+					.catch(() => undefined)
+					.then(() => onPersistenceSettled?.());
 				onImported?.(result.value);
 				if (navigateOnSuccess === 'reader') {
 					navigate(`/read/${result.value.documentId}`);

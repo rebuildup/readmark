@@ -112,4 +112,32 @@ describe('QuotaBadge', () => {
 		expect(badge.textContent).toContain('100%');
 		expect(badge.textContent).not.toContain('150%');
 	});
+
+	it.each([
+		['0 of 0', { usage: 0, quota: 0, persistent: false }, false],
+		['0 of a real quota', { usage: 0, quota: 5_000_000, persistent: true }, true],
+		['0 bytes against an absent quota', { usage: 0, quota: 0, persistent: true }, false],
+	])('never renders NaN or Infinity for %s', async (_label, snapshot, expectBadge) => {
+		// `0 / 0` is `NaN` and `n / 0` is `Infinity`, so a badge that
+		// divided without guarding would print exactly those. The
+		// guard is `quota <= 0 -> render nothing`; this asserts the
+		// rendered output, not merely that the component mounted.
+		mockReadQuotaUsage.mockResolvedValue(snapshot);
+		const { container } = render(<QuotaBadge refreshKey={0} />);
+		await waitFor(() =>
+			expect(container.querySelector('[data-testid="rm-quota-badge-loading"]')).toBeNull(),
+		);
+		const rendered = container.querySelector('[data-testid="rm-quota-badge"]')?.textContent ?? '';
+		expect(rendered).not.toContain('NaN');
+		expect(rendered).not.toContain('Infinity');
+		if (expectBadge) {
+			// A real quota still renders, and its percent is a real
+			// integer — here exactly 0, not `NaN`.
+			expect(rendered).toMatch(/\(\d+%\)/);
+			expect(rendered).toContain('(0%)');
+		} else {
+			// No quota means no ratio to show, so nothing is rendered.
+			expect(rendered).toBe('');
+		}
+	});
 });
