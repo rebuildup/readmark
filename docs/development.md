@@ -151,11 +151,8 @@ CI は `.env.example` を参照しない（`.env*` を読みに行く step が
 | `worktree-workflow` | worktree 操作 |
 
 ```bash
-bunx skills add rebuildup/project-init --skill writing-discipline
-bunx skills add rebuildup/project-init --skill engineering-decisions
-bunx skills add rebuildup/project-init --skill github-delivery
-bunx skills add rebuildup/project-init --skill quality-gate
-bunx skills add rebuildup/project-init --skill worktree-workflow
+bunx skills add rebuildup/writing-skills --skill writing-discipline --copy
+bunx skills add rebuildup/aude-skills --skill engineering-decisions github-delivery quality-gate system-quality code-naming worktree-workflow --copy
 ```
 
 `AGENTS.md` §9 の表も参照。
@@ -207,4 +204,4 @@ polyfill している。`vitest.config.ts` の `setupFiles` から漏れてい�
 - `docs/architecture.md`
 - `docs/troubleshooting.md`
 - `docs/release.md`
-- rebuildup/project-init — meta-template
+- rebuildup/aude-skills — meta-template
