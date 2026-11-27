@@ -37,6 +37,12 @@ import { fail, launchBrowser, PREVIEW_URL, withPreview } from './smoke-harness.m
 /** A real book: 717 pages, non-embedded CID fonts, ~515pt wide. */
 const BOOK = process.env.RM_BOOK ?? '/mnt/d/3_docs/books/プログラミングのための数学.pdf';
 
+/** The book's page width in PDF points. The one number that makes a
+ *  scale legible: at 100% a 515pt page draws its body text at ~10px,
+ *  which is what issue #35 is about. Used to turn a percentage back
+ *  into the width a reader should actually be seeing. */
+const BOOK_WIDTH_PT = 515;
+
 /** A laptop viewport, which is where "too small to read" bites hardest. */
 const VIEWPORT = { width: 1280, height: 800 };
 
@@ -220,6 +226,65 @@ await withPreview(async () => {
 		fail(`pages rendered blank while reading: ${blank.map((p) => p.page).join(', ')}`);
 	}
 	console.log(`[smoke] ${pages.length} pages materialised, none blank`);
+
+	// --- and it survives leaving the document and coming back --------
+	//
+	// The other half of "the reader's choice sticks". A resize happens
+	// inside one mounted reader, so the check above can pass while the
+	// choice is still held per-mount and dies the moment the reader is
+	// unmounted — which is exactly what a library round trip does.
+	// Leaving and reopening is also the only place the "fit-width is a
+	// default, not a policy" question is observable: on re-open the fit
+	// would report a perfectly correct number, and the only way to tell
+	// it apart from a restored choice is to have made one.
+	await page.click('[data-testid="rm-reader-back"]');
+	await page.locator('[data-testid="rm-library-search"]').waitFor({ state: 'visible' });
+	await page.click('[data-testid="rm-library-row-read"]');
+	await page.locator('[data-testid="rm-reader-toolbar"]').waitFor({ state: 'visible' });
+	await page.locator('canvas').first().waitFor({ timeout: 30000 });
+	// A painted page, not the reserved placeholder: a reserved box has a
+	// zero backing store and would report a width of 0, which the check
+	// below would (correctly) call a disagreement.
+	await page.waitForFunction(
+		() => {
+			for (const c of document.querySelectorAll('canvas')) {
+				if (c.width < 10) continue;
+				const d = c
+					.getContext('2d', { willReadFrequently: true })
+					.getImageData(0, 0, c.width, c.height).data;
+				for (let i = 0; i < d.length; i += 4) if (d[i] < 200) return true;
+			}
+			return false;
+		},
+		null,
+		{ timeout: 60000 },
+	);
+	await page.waitForTimeout(1500);
+
+	const afterReopen = await read();
+	console.log(`[smoke] reopened at ${afterReopen.zoomLabel} (was ${zoomedIn.zoomLabel})`);
+	if (afterReopen.zoom !== zoomedIn.zoom) {
+		fail(
+			`re-opening the document came back at ${afterReopen.zoomLabel} instead of the ` +
+				`${zoomedIn.zoomLabel} the reader had chosen. The choice is being held ` +
+				'per-mount, so it dies every time the reader leaves the document.',
+		);
+	}
+	// And the re-opened reader must still render at that scale, not just
+	// claim it — a label restored without a matching render is the same
+	// lie check 2 exists to catch.
+	if (afterReopen.canvasCssWidth <= 0) {
+		fail('the re-opened document reported no page width; nothing was measured');
+	}
+	const expectedWidth = Math.round(BOOK_WIDTH_PT * (zoomedIn.zoom / 100));
+	if (Math.abs(afterReopen.canvasCssWidth - expectedWidth) > expectedWidth * 0.05) {
+		fail(
+			`the re-opened page is ${afterReopen.canvasCssWidth}px wide, but ` +
+				`${zoomedIn.zoomLabel} of a 515pt book is about ${expectedWidth}px. ` +
+				'The restored label and the restored render disagree.',
+		);
+	}
+	console.log(`[smoke] the reader's zoom survives reopening (${afterReopen.zoomLabel})`);
 
 	await page.screenshot({ path: '/tmp/opencode/readability-gate.png' });
 	console.log('[smoke] screenshot -> /tmp/opencode/readability-gate.png');
