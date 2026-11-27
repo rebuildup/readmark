@@ -25,11 +25,18 @@
  *
  * Why a single `PdfInvalidError` class for three pdf.js errors:
  *   - From the library's perspective all three mean the same
- *     thing: "we could not turn this Blob into a PDF document."
+ *     thing: "this claimed to be a PDF, and we could not read it."
  *     Surfacing the specific pdf.js reason in the UI adds
  *     complexity for no MVP value.
  *   - We keep the original `cause` so logs / debug surfaces can
  *     still see the pdf.js-level reason.
+ *
+ * Why `PdfUnsupportedFormatError` is a sibling, not another pdf.js
+ *   name: pdf.js reports "these bytes are not a PDF" with the same
+ *   `InvalidPDFException` it uses for "these bytes are a broken
+ *   PDF". Folding the two together loses a distinction the user
+ *   acts on, so the non-PDF case is caught by our own header sniff
+ *   before pdf.js ever runs.
  *
  * Why `QuotaExceededError` is NOT wrapped here:
  *   - That error originates in the storage layer
@@ -66,6 +73,29 @@ export class PdfInvalidError extends Error {
 			(this as { cause?: unknown }).cause = options.cause;
 		}
 	}
+}
+
+/**
+ * Thrown by `extractPdfMetadata()` when the bytes do not look like a
+ * PDF *at all* — no `%PDF-` header in the first 1 KiB.
+ *
+ * Why this is a separate class from `PdfInvalidError`:
+ *   - They are different facts and the user needs different advice.
+ *     A JPEG is not a broken PDF; a truncated PDF is not an
+ *     unsupported format. pdf.js reports both as
+ *     `InvalidPDFException`, so without this class every wrong file
+ *     type would be answered with "your PDF is corrupt or
+ *     password-protected", which is simply false for a photo.
+ *   - `library/` discriminates on `instanceof` and maps this to
+ *     `ImportError.kind = 'unsupported-format'`, which the UI
+ *     already has a distinct branch for.
+ *
+ * Detected by a header sniff in `pdf-metadata.ts` BEFORE
+ * `loadPdfDocument()` is called, so no pdf.js worker is ever opened
+ * for a file that cannot be one.
+ */
+export class PdfUnsupportedFormatError extends Error {
+	override readonly name = 'PdfUnsupportedFormatError';
 }
 
 /**

@@ -19,6 +19,9 @@
  *
  *   layer         | produces             | reason
  *   ------------- | -------------------- | -----------------------------------
+ *   reader/pdf/   | PdfUnsupportedFormat | our own header sniff: no %PDF-
+ *                 | Error                | signature at all, so pdf.js is
+ *                 |                      | never called. Boundary-stable.
  *   reader/pdf/   | PdfInvalidError      | wraps pdf.js's three "not a
  *                 |                      | usable PDF" exceptions behind a
  *                 |                      | single class. Boundary-stable.
@@ -26,7 +29,7 @@
  *                 | (raw, by spec name)  | `transaction()` failure. The W3C
  *                 |                      | name is stable across browsers;
  *                 |                      | we discriminate by `name`.
- *   library/      | Result<…, ImportError> | Translates the two above into a
+ *   library/      | Result<…, ImportError> | Translates the three above into a
  *                 |                      | single discriminated union.
  *
  * The UI never inspects raw exceptions from this layer — it
@@ -44,7 +47,7 @@
  */
 
 import type { DocumentId, SourceFingerprint, SourceMetadata } from '../domain/document.ts';
-import { PdfInvalidError } from '../reader/pdf/pdf-errors.ts';
+import { PdfInvalidError, PdfUnsupportedFormatError } from '../reader/pdf/pdf-errors.ts';
 import { extractPdfMetadata, pdfMetadataToSourceMetadata } from '../reader/pdf/pdf-metadata.ts';
 import { importDocument } from '../storage/documents-repo.ts';
 import type { Result } from './result.ts';
@@ -86,22 +89,33 @@ export interface ImportSuccess {
  *      never re-hash the blob.
  *
  * Errors are normalized to `ImportError`:
- *   - `PdfInvalidError` → `invalid-pdf`.
+ *   - `PdfUnsupportedFormatError` → `unsupported-format`. The bytes
+ *     carry no `%PDF-` header: a photo, a zip, an EPUB. This is
+ *     checked by `extractPdfMetadata` before pdf.js runs, so it is a
+ *     specific answer rather than pdf.js's opaque parse failure.
+ *   - `PdfInvalidError` → `invalid-pdf`. The bytes claim to be a PDF
+ *     and do not parse.
  *   - Dexie / IndexedDB `QuotaExceededError` (or Firefox's
  *     `NS_ERROR_DOM_QUOTA_REACHED`) → `quota-exceeded`.
  *   - Anything else → `unknown` (with the raw cause for logging).
  *
- * Note: this MVP only handles PDF. The discriminated union above
- * already reserves `unsupported-format` for when other formats
- * (EPUB / Markdown / text) land and we need to reject non-PDF
- * blobs at this layer (the file picker already filters by
- * `accept="application/pdf"`, but drag-drop bypasses that).
+ * Note: this MVP only handles PDF, so `unsupported-format` means
+ * "not a PDF" rather than "a format we have not shipped yet". The
+ * `accept="application/pdf"` filter on the picker is a hint, not a
+ * gate — drag-drop, "All files" selection, and a renamed `.pdf` all
+ * reach this function — so the check has to live here, not only in
+ * the UI.
  */
 export async function importPdfDocument(blob: Blob): Promise<Result<ImportSuccess, ImportError>> {
 	let pdfMeta: Awaited<ReturnType<typeof extractPdfMetadata>>;
 	try {
 		pdfMeta = await extractPdfMetadata(blob);
 	} catch (cause: unknown) {
+		// Order matters only in that both are `instanceof` checks on
+		// sibling classes, so neither can shadow the other.
+		if (cause instanceof PdfUnsupportedFormatError) {
+			return { ok: false, error: { kind: 'unsupported-format', cause } };
+		}
 		if (cause instanceof PdfInvalidError) {
 			return { ok: false, error: { kind: 'invalid-pdf', cause } };
 		}

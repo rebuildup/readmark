@@ -53,6 +53,16 @@ function bytesToBlob(bytes: Uint8Array): Blob {
 	return new Blob([bytes as unknown as ArrayBuffer], { type: 'application/pdf' });
 }
 
+/** A real 8-byte PNG signature followed by filler. No part of it is
+ *  `%PDF-`, so it is a valid stand-in for "the user picked a photo
+ *  instead of a PDF" — the case the picker does NOT filter out,
+ *  because `accept="application/pdf"` is a hint, not a gate. */
+function pngHeaderBytes(): Uint8Array {
+	const bytes = new Uint8Array(32);
+	bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+	return bytes;
+}
+
 /** A branded `DocumentId` for stubbing — the storage layer is
  *  mocked, so the actual UUID string is irrelevant. */
 const FAKE_DOC_ID = '00000000-0000-4000-8000-000000000001' as DocumentId;
@@ -95,10 +105,12 @@ describe('importPdfDocument', () => {
 	});
 
 	it('returns ok=false with kind=invalid-pdf for corrupt bytes', async () => {
-		// NOT a PDF. `extractPdfMetadata` will throw `PdfInvalidError`.
-		const blob = new Blob(['this is plain text, not a pdf'], {
-			type: 'application/pdf',
-		});
+		// A file that claims to be a PDF and is not parseable. The
+		// fixture used to be plain text, which is a non-PDF rather
+		// than a corrupt PDF and now takes the `unsupported-format`
+		// path — this test is about the corrupt-PDF path, so the
+		// fixture has to be a corrupt PDF.
+		const blob = bytesToBlob(new TextEncoder().encode('%PDF-1.7\n1 0 obj\n<< /Type /Catalog'));
 
 		const result = await importPdfDocument(blob);
 
@@ -106,6 +118,39 @@ describe('importPdfDocument', () => {
 		if (result.ok) return;
 		expect(result.error.kind).toBe('invalid-pdf');
 		// We must NOT have called the storage layer for a bad PDF.
+		expect(mockImportDocument).not.toHaveBeenCalled();
+	});
+
+	it('returns ok=false with kind=unsupported-format for non-PDF bytes', async () => {
+		// The failure this pins: a PNG dropped on the picker used to be
+		// reported as `invalid-pdf`, and the UI told the user their
+		// "PDF is corrupt or password-protected". Both halves of that
+		// message are false for a photo. `importPdfDocument` must
+		// discriminate on the bytes BEFORE pdf.js gets a chance to
+		// raise its opaque `InvalidPDFException`.
+		const blob = new Blob([pngHeaderBytes() as unknown as ArrayBuffer], { type: 'image/png' });
+
+		const result = await importPdfDocument(blob);
+
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.kind).toBe('unsupported-format');
+		// Still must not have touched storage.
+		expect(mockImportDocument).not.toHaveBeenCalled();
+	});
+
+	it('keeps corrupt bytes that DO claim to be a PDF as invalid-pdf', async () => {
+		// The other half of the distinction: a `%PDF-` header with a
+		// truncated body is a broken PDF, not an unsupported format.
+		// Collapsing the two loses the message that actually helps.
+		const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]);
+		const blob = bytesToBlob(bytes);
+
+		const result = await importPdfDocument(blob);
+
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.kind).toBe('invalid-pdf');
 		expect(mockImportDocument).not.toHaveBeenCalled();
 	});
 
