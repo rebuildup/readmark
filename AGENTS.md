@@ -3,7 +3,7 @@
 This file is the **always-on** agent contract for working in the readmark
 repository. It is intentionally concise. Long-lived decisions live in
 `docs/adr/`; conditional workflows live in Skills (installed via
-`bunx skills add rebuildup/project-init`); current task state lives on
+`bunx skills add rebuildup/aude-skills`); current task state lives on
 the GitHub Issue or PR.
 
 > Source of truth: this repo at HEAD. Do NOT infer from older memory
@@ -25,7 +25,7 @@ design tokens, or CI.
 
 - **Source code**: English. Comments, identifiers, file headers.
 - **Documentation**: Japanese. ADRs, README, docs/*, inline
-  explanation. (mirrors rebuildup/project-init's language policy.)
+  explanation. (mirrors rebuildup/aude-skills's language policy.)
 - **Issues / PR titles & bodies**: Japanese.
 - **Commit messages**: English subject; Japanese body is fine.
 - **Branch names**: identifiers or release versions only — no prose.
@@ -199,7 +199,7 @@ quality-gate shape):
 Coverage thresholds are not enforced (project-init ADR-0007 of
 the upstream). Do not invent them to "look protected".
 
-## 5. Sprint workflow (mirrors rebuildup/project-init /
+## 5. Sprint workflow (mirrors rebuildup/aude-skills /
    my-web-2026)
 
 - One Issue = one branch = one PR. Branch name is just the issue
@@ -262,8 +262,7 @@ violating an invariant.
 | Worktree / branch ops      | `worktree-workflow`          |
 | Recovery after interruption | `agent-recovery`           |
 
-Install with `bunx skills add rebuildup/project-init --skill
-<name>`.
+See [`docs/development.md`](docs/development.md#6-skills) for project-local installation and Skill dependencies.
 
 ## 10. Out of scope (do not start)
 
@@ -292,7 +291,7 @@ files.
 - `docs/development.md` — local setup, env schema, common tasks.
 - `docs/release.md` — version / release process.
 - `docs/troubleshooting.md` — known gotchas.
-- rebuildup/project-init — meta-template this repo follows.
+- rebuildup/aude-skills — meta-template this repo follows.
 
 ## 13. ADR index
 
