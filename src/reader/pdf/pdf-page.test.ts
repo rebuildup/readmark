@@ -19,12 +19,14 @@
  * is the smoke's job.
  */
 
+import { degrees, PDFDocument } from 'pdf-lib';
 import type { PDFPageProxy, RenderTask } from 'pdfjs-dist';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { asPageIndex, type PageIndex } from '../../domain/reading-state.ts';
 import type { ResolvedAnchor } from '../types.ts';
 import type { PdfRect } from './anchor.ts';
 import type { ViewportLike } from './pdf-coords.ts';
+import { loadPdfDocument } from './pdf-document.ts';
 import { PDF_PAGE_CLASS, PdfPageHandle } from './pdf-page.ts';
 
 const PAGE_WIDTH = 600;
@@ -106,6 +108,10 @@ interface FakeProxy {
 	readonly proxy: PDFPageProxy;
 	readonly renders: FakeRenderTask[];
 	readonly renderCalls: Record<string, unknown>[];
+	/** Every `getViewport` call, as the handle actually made it. The
+	 *  rotation reaching pdf.js is the whole of issue #33, so it is
+	 *  recorded rather than inferred from the resulting DOM. */
+	readonly viewportCalls: { readonly scale: number; readonly rotation: number | undefined }[];
 	readonly cleanups: { count: number };
 }
 
@@ -117,13 +123,22 @@ interface FakeRenderTask {
 	reject: (cause: unknown) => void;
 }
 
-function makeProxy(options: { autoResolve?: boolean } = {}): FakeProxy {
+function makeProxy(options: { autoResolve?: boolean; rotate?: unknown } = {}): FakeProxy {
 	const renders: FakeRenderTask[] = [];
 	const renderCalls: Record<string, unknown>[] = [];
+	const viewportCalls: { scale: number; rotation: number | undefined }[] = [];
 	const cleanups = { count: 0 };
 	const proxy = {
-		getViewport: ({ scale, rotation }: { scale?: number; rotation?: number }) =>
-			makeViewport(scale ?? 1, rotation ?? 0),
+		// Absent unless a case asks for it, which is the common case:
+		// most PDFs carry no `/Rotate` at all, and the handle has to
+		// read the missing entry as 0 rather than as a broken page.
+		// `rotate` is spread in rather than defaulted so "the page has
+		// no /Rotate" and "the page says /Rotate 0" stay distinguishable.
+		...(options.rotate === undefined ? {} : { rotate: options.rotate }),
+		getViewport: ({ scale, rotation }: { scale?: number; rotation?: number }) => {
+			viewportCalls.push({ scale: scale ?? 1, rotation });
+			return makeViewport(scale ?? 1, rotation ?? 0);
+		},
 		render: (params: Record<string, unknown>) => {
 			renderCalls.push(params);
 			let resolve!: () => void;
@@ -161,7 +176,7 @@ function makeProxy(options: { autoResolve?: boolean } = {}): FakeProxy {
 			cleanups.count++;
 		},
 	} as unknown as PDFPageProxy;
-	return { proxy, renders, renderCalls, cleanups };
+	return { proxy, renders, renderCalls, viewportCalls, cleanups };
 }
 
 function canvasOf(target: HTMLElement): HTMLCanvasElement {
@@ -259,6 +274,405 @@ describe('PdfPageHandle.render', () => {
 
 		renders[0]?.reject(new Error('out of memory'));
 		await expect(rendering).rejects.toThrow('out of memory');
+	});
+});
+
+describe('PdfPageHandle.render — native /Rotate (issue #33)', () => {
+	/**
+	 * The full composition table, in the shape this describe asserts
+	 * against: every native rotation against every runtime rotation.
+	 * Duplicated from `pdf-rotation.test.ts` on purpose — that file
+	 * tests the arithmetic, this one tests that the *handle* hands the
+	 * answer to pdf.js. A shared constant would let one edit satisfy
+	 * both and hide a change to either.
+	 */
+	const COMPOSITIONS: readonly (readonly [number, number, number])[] = [
+		[0, 0, 0],
+		[0, 90, 90],
+		[0, 180, 180],
+		[0, 270, 270],
+		[90, 0, 90],
+		[90, 90, 180],
+		[90, 180, 270],
+		[90, 270, 0],
+		[180, 0, 180],
+		[180, 90, 270],
+		[180, 180, 0],
+		[180, 270, 90],
+		[270, 0, 270],
+		[270, 90, 0],
+		[270, 180, 90],
+		[270, 270, 180],
+	];
+
+	/** The page box `render` built, which is the viewport it rendered. */
+	function pageBoxOf(target: HTMLElement): HTMLElement {
+		const box = target.querySelector<HTMLElement>(`.${PDF_PAGE_CLASS}`);
+		if (box === null) throw new Error('no page box rendered');
+		return box;
+	}
+
+	/** Every length the handle wrote into the DOM, as raw CSS strings.
+	 *  The point of reading them back as strings is that a `NaN` never
+	 *  survives this far: `style.width` would be the literal text
+	 *  `"NaNpx"`, and a browser resolves that to no box at all. */
+	function cssLengths(target: HTMLElement): readonly string[] {
+		return Array.from(target.querySelectorAll<HTMLElement>('.rm-page, canvas, .rm-text-layer'))
+			.flatMap((element) => [element.style.width, element.style.height])
+			.filter((value) => value !== '');
+	}
+
+	it('hands getViewport the composed total, not the runtime rotation', async () => {
+		// The defect in one assertion. Before the composition, the value
+		// arriving here was the runtime rotation alone — so a page
+		// stored at /Rotate 90 rendered as if it said nothing, and at
+		// runtime 0 that meant the book was displayed sideways.
+		for (const [native, runtime, total] of COMPOSITIONS) {
+			const { proxy, viewportCalls } = makeProxy({ rotate: native });
+			const target = document.createElement('div');
+
+			await new PdfPageHandle(PAGE_ONE, proxy).render(target, {
+				scale: 1,
+				rotation: runtime as 0 | 90 | 180 | 270,
+			});
+
+			expect(viewportCalls[0]?.rotation, `native ${native} + runtime ${runtime}`).toBe(total);
+		}
+	});
+
+	it('renders a page stored sideways at runtime rotation 0', async () => {
+		const { proxy, viewportCalls } = makeProxy({ rotate: 90 });
+		const target = document.createElement('div');
+
+		await new PdfPageHandle(PAGE_ONE, proxy).render(target, { scale: 1 });
+
+		// The observable consequence: a 600x800 page stored at
+		// /Rotate 90 occupies a landscape box, because the reader is
+		// showing the page the way the producer said it should be read.
+		// With the runtime rotation passed straight through this was
+		// 600x800 and the content was sideways inside it.
+		expect(viewportCalls[0]?.rotation).toBe(90);
+		expect(pageBoxOf(target).style.width).toBe(`${PAGE_HEIGHT}px`);
+		expect(pageBoxOf(target).style.height).toBe(`${PAGE_WIDTH}px`);
+	});
+
+	it('reads a page with no /Rotate as 0, leaving the runtime rotation alone', async () => {
+		// The overwhelmingly common case, and the one that must not
+		// regress: a PDF written normally, with no `/Rotate` anywhere.
+		for (const runtime of [0, 90, 180, 270] as const) {
+			const { proxy, viewportCalls } = makeProxy();
+			const target = document.createElement('div');
+
+			await new PdfPageHandle(PAGE_ONE, proxy).render(target, { scale: 1, rotation: runtime });
+
+			expect(viewportCalls[0]?.rotation).toBe(runtime);
+		}
+	});
+
+	it('rejects a malformed /Rotate to 0 rather than writing NaN into the DOM', async () => {
+		// Not "does not throw". The claim is that every length the
+		// handle writes is a real one. `rotate(NaNdeg)` and `NaNpx` do
+		// not throw in a browser — they silently remove the box, so a
+		// page disappears with nothing in the console to explain it.
+		const malformed: readonly unknown[] = [
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+			Number.NEGATIVE_INFINITY,
+			45,
+			-45,
+			'90',
+			null,
+			{},
+		];
+		for (const rotate of malformed) {
+			const { proxy, viewportCalls } = makeProxy({ rotate });
+			const target = document.createElement('div');
+
+			await new PdfPageHandle(PAGE_ONE, proxy).render(target, { scale: 1 });
+
+			expect(viewportCalls[0]?.rotation, String(rotate)).toBe(0);
+			for (const length of cssLengths(target)) {
+				expect(length, `${String(rotate)} → ${length}`).not.toContain('NaN');
+				expect(length, `${String(rotate)} → ${length}`).not.toContain('Infinity');
+				// A real length: a number and a unit.
+				expect(length, `${String(rotate)} → ${length}`).toMatch(/^\d+(\.\d+)?px$/);
+			}
+		}
+	});
+
+	it('wraps an out-of-range /Rotate into [0, 360) instead of passing it on', async () => {
+		// Not malformed — a PDF is allowed to say these, and pdf.js
+		// reduces them to the same answer. The reader has to agree, or
+		// the page and this layer would compute two orientations for
+		// one page. `getViewport` is sent a quarter turn it has a
+		// matrix for, never 450.
+		for (const [written, expected] of [
+			[360, 0],
+			[450, 90],
+			[-450, 270],
+			[-90, 270],
+			[180, 180],
+		] as const) {
+			const { proxy, viewportCalls } = makeProxy({ rotate: written });
+			const target = document.createElement('div');
+
+			await new PdfPageHandle(PAGE_ONE, proxy).render(target, { scale: 1 });
+
+			expect(viewportCalls[0]?.rotation, `/Rotate ${written}`).toBe(expected);
+		}
+	});
+
+	it('does not let a malformed /Rotate reset the reader’s own rotation', async () => {
+		// The reader's rotation is their action on this session; a page
+		// whose `/Rotate` cannot be read must not silently undo it.
+		// Summing before normalising would give `NaN` here, and
+		// normalising the sum rather than the terms would give 0.
+		for (const rotate of [Number.NaN, 45, 'nonsense', null]) {
+			const { proxy, viewportCalls } = makeProxy({ rotate });
+			const target = document.createElement('div');
+
+			await new PdfPageHandle(PAGE_ONE, proxy).render(target, { scale: 1, rotation: 90 });
+
+			expect(viewportCalls[0]?.rotation, String(rotate)).toBe(90);
+		}
+	});
+
+	it('reads the page dictionary and never writes to it', async () => {
+		const fake = makeProxy({ rotate: 90 });
+		const mutable = fake.proxy as unknown as Record<string, unknown>;
+		// A getter with no setter, so the guard below is real rather
+		// than decorative.
+		delete mutable.rotate;
+		let reads = 0;
+		Object.defineProperty(fake.proxy, 'rotate', {
+			get: () => {
+				reads++;
+				return 90;
+			},
+			configurable: true,
+			enumerable: true,
+		});
+		// This module is strict-mode ESM, so writing to a getter-only
+		// property throws. That is the point: it is what makes "the
+		// handle only reads" a testable claim rather than a reviewer's
+		// assumption about a well-behaved caller.
+		expect(() => {
+			mutable.rotate = 0;
+		}).toThrow(TypeError);
+
+		const target = document.createElement('div');
+		await new PdfPageHandle(PAGE_ONE, fake.proxy).render(target, { scale: 1 });
+
+		// It read the page, it composed, and the page is untouched.
+		expect(reads).toBeGreaterThan(0);
+		expect(fake.viewportCalls[0]?.rotation).toBe(90);
+		expect((fake.proxy as unknown as { rotate: number }).rotate).toBe(90);
+	});
+
+	it('gives the canvas, the text layer and the highlight one orientation', async () => {
+		// The three are the reason the composition happens before
+		// `getViewport` rather than as a transform over the result: one
+		// viewport means they cannot disagree. A highlight drawn beside
+		// its text is the failure this rules out, and it is invisible
+		// until a page is actually stored sideways.
+		const { proxy } = makeProxy({ rotate: 90 });
+		const into = document.createElement('div');
+		document.body.appendChild(into);
+		const page = new PdfPageHandle(PAGE_ONE, proxy);
+
+		await page.render(into, { scale: 1, rotation: 90 });
+		await page.paintResolvedAnchor(
+			{
+				format: 'pdf',
+				page: PAGE_ONE,
+				freshness: 'fresh',
+				selectedText: 'the cat',
+				display: [{ x: 100, y: 600, width: 200, height: 40 }],
+				updatedAnchor: null,
+			},
+			into,
+		);
+
+		// Native 90 + runtime 90 = 180: portrait again, and every
+		// surface says so.
+		const box = pageBoxOf(into);
+		expect(box.style.width).toBe(`${PAGE_WIDTH}px`);
+		expect(box.style.height).toBe(`${PAGE_HEIGHT}px`);
+		const canvas = into.querySelector<HTMLElement>('canvas');
+		expect(canvas?.style.width).toBe(`${PAGE_WIDTH}px`);
+		const layer = into.querySelector<HTMLElement>('.rm-text-layer');
+		expect(layer?.style.width).toBe(`${PAGE_WIDTH}px`);
+		// The highlight lives inside the same box, and every one of its
+		// fragments is a real length.
+		const fragments = into.querySelectorAll<HTMLElement>('.rm-highlight__fragment');
+		expect(fragments.length).toBe(1);
+		for (const fragment of fragments) {
+			for (const length of [fragment.style.left, fragment.style.top, fragment.style.width]) {
+				expect(length).toMatch(/^\d+(\.\d+)?px$/);
+			}
+		}
+		into.remove();
+	});
+});
+
+describe('PdfPageHandle.render against the real pdf.js PageViewport', () => {
+	/**
+	 * The stub above proves the handle composes; it cannot prove the
+	 * number it composes is the one pdf.js acts on. This half keeps
+	 * `rotate` and `getViewport` real — a real `PDFPageProxy` reading a
+	 * real `/Rotate` off a real page dictionary, building a real
+	 * `PageViewport` — and fakes only `render()`, which is the one call
+	 * that needs a canvas happy-dom does not have.
+	 *
+	 * So the box asserted below is the box pdf.js computed, not a
+	 * stand-in for it.
+	 */
+	const PORTRAIT = { width: 420, height: 595 } as const;
+
+	async function realPageProxy(nativeRotate: number | null) {
+		const pdf = await PDFDocument.create();
+		const page = pdf.addPage([PORTRAIT.width, PORTRAIT.height]);
+		if (nativeRotate !== null) page.setRotation(degrees(nativeRotate));
+		const doc = await loadPdfDocument(await pdf.save());
+		const real = await doc.getPage(1);
+		const renderCalls: Record<string, unknown>[] = [];
+		const proxy = {
+			// A getter, so `rotate` keeps pdf.js's own property
+			// descriptor rather than being flattened into a value at
+			// construction time.
+			get rotate() {
+				return real.rotate;
+			},
+			// `scale` is required here, as it is in pdf.js's
+			// `GetViewportParameters`: the handle always passes a
+			// resolved scale, and typing it as optional would make this
+			// delegation something the real method does not accept.
+			getViewport: (params: { scale: number; rotation: number }) => real.getViewport(params),
+			render: (params: Record<string, unknown>) => {
+				renderCalls.push(params);
+				let resolve!: () => void;
+				const promise = new Promise<void>((res) => {
+					resolve = res;
+				});
+				queueMicrotask(resolve);
+				return {
+					promise,
+					cancel: () => {},
+				} as unknown as RenderTask;
+			},
+			getTextContent: () => real.getTextContent(),
+			cleanup: () => {
+				real.cleanup();
+			},
+		} as unknown as PDFPageProxy;
+		return { proxy, renderCalls, real, destroy: () => doc.destroy() };
+	}
+
+	function pageBoxOf(target: HTMLElement): HTMLElement {
+		const box = target.querySelector<HTMLElement>(`.${PDF_PAGE_CLASS}`);
+		if (box === null) throw new Error('no page box rendered');
+		return box;
+	}
+
+	it('sizes the page from the real composed viewport, not the runtime rotation', async () => {
+		// The end-to-end claim of #33, in a form a unit test can
+		// actually stand behind: for every native rotation, the box
+		// `render` produces is the box pdf.js's own PageViewport
+		// produced, and it tracks the *sum*.
+		const expectations: readonly (readonly [number | null, number, number, number])[] = [
+			// native, runtime, expected width pt, expected height pt
+			[null, 0, 420, 595],
+			[0, 90, 595, 420],
+			[90, 0, 595, 420],
+			[90, 90, 420, 595],
+			[90, 180, 595, 420],
+			[90, 270, 420, 595],
+			[180, 0, 420, 595],
+			[180, 90, 595, 420],
+			[270, 0, 595, 420],
+			[270, 90, 420, 595],
+			[270, 270, 420, 595],
+		];
+		for (const [native, runtime, widthPt, heightPt] of expectations) {
+			const { proxy, renderCalls, real, destroy } = await realPageProxy(native);
+			try {
+				const target = document.createElement('div');
+				await new PdfPageHandle(PAGE_ONE, proxy).render(target, {
+					scale: 1,
+					rotation: runtime as 0 | 90 | 180 | 270,
+				});
+
+				const label = `native ${String(native)} + runtime ${runtime}`;
+				const box = pageBoxOf(target);
+				expect(box.style.width, label).toBe(`${widthPt}px`);
+				expect(box.style.height, label).toBe(`${heightPt}px`);
+
+				// The very same viewport reached pdf.js's render call.
+				// If these two ever disagree, the canvas and its wrapper
+				// have been sized from different transforms and the page
+				// is drawn into a box that does not fit it.
+				const viewport = renderCalls[0]?.viewport as { rotation: number; width: number };
+				expect(viewport.rotation, label).toBe(((native ?? 0) + runtime) % 360);
+				expect(viewport.width, label).toBe(widthPt);
+				// And the page dictionary was not touched to get here.
+				expect(real.rotate, label).toBe(native ?? 0);
+			} finally {
+				await destroy();
+			}
+		}
+	});
+
+	it('never lets a bad /Rotate in a real file reach the DOM as NaN', async () => {
+		// The guarantee again, this time with the value where it
+		// actually comes from: in the file. A stub can be handed `NaN`;
+		// a real page carries whatever a producer wrote.
+		//
+		// What pdf-lib will not do is write a `/Rotate` that is not a
+		// multiple of 90 — it asserts on `setRotation`. So the values
+		// exercised here are the ones a real producer can actually emit
+		// (absent, and out of range), and the non-multiple / `NaN` cases
+		// stay in the stub-based case above, which is where they are
+		// reachable at all. Both halves matter: this one proves the
+		// value survives the real parser, that one proves the guard is
+		// not conditional on the parser having been kind.
+		for (const [written, expectedWidth, expectedHeight] of [
+			// written /Rotate, and the box it composes to with runtime 90
+			[null, 595, 420],
+			[360, 595, 420],
+			[450, 420, 595],
+			[-450, 420, 595],
+			[-90, 420, 595],
+		] as const) {
+			const { proxy, renderCalls, real, destroy } = await realPageProxy(written);
+			try {
+				const target = document.createElement('div');
+				await new PdfPageHandle(PAGE_ONE, proxy).render(target, { scale: 1, rotation: 90 });
+
+				const viewport = renderCalls[0]?.viewport as {
+					rotation: number;
+					width: number;
+					height: number;
+					transform: readonly number[];
+				};
+				for (const value of viewport.transform) {
+					expect(Number.isFinite(value), `/Rotate ${String(written)}`).toBe(true);
+				}
+				expect(Number.isFinite(viewport.width), `/Rotate ${String(written)}`).toBe(true);
+				expect(Number.isFinite(viewport.height), `/Rotate ${String(written)}`).toBe(true);
+				// A real box, not a missing one. Each expectation is the
+				// page's own rotation as pdf.js read it (450 is 90,
+				// -450 and -90 are 270) plus the reader's 90.
+				expect(viewport.width, `/Rotate ${String(written)}`).toBe(expectedWidth);
+				expect(pageBoxOf(target).style.width).toBe(`${expectedWidth}px`);
+				expect(pageBoxOf(target).style.height).toBe(`${expectedHeight}px`);
+				// The page dictionary is still what the file said.
+				expect(real.rotate, `/Rotate ${String(written)}`).toBe(
+					(((written ?? 0) % 360) + 360) % 360,
+				);
+			} finally {
+				await destroy();
+			}
+		}
 	});
 });
 

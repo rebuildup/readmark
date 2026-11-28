@@ -7,6 +7,13 @@
  * pass, which is the only way to guarantee they stay registered
  * after a zoom or a rotation (gate 6 of the #11 operator note).
  *
+ * The single viewport also carries the page's own native `/Rotate`,
+ * composed with the reader's runtime rotation — see
+ * `pdf-rotation.ts`. One viewport, one orientation: the canvas, the
+ * text layer and the highlight paint all read the same transform, so a
+ * page stored sideways is turned once, in one place, and all three
+ * agree about which way is up (#33).
+ *
  * Re-entrancy is the hard part of this file, because a reader can
  * outrun a render:
  *
@@ -41,6 +48,7 @@ import { isPdfResolvedDisplay } from './anchor.ts';
 import { cssRectsFor, fragmentsForRuns } from './anchor-geometry.ts';
 import { quoteForRange, runsForRange, selectionRangeInLayer } from './anchor-recovery.ts';
 import type { ViewportLike } from './pdf-coords.ts';
+import { composePageRotation } from './pdf-rotation.ts';
 import { buildTextLayer, extractPageTextLayer } from './pdf-text-layer.ts';
 
 /** Class name of the wrapper that holds a page's canvas + text
@@ -100,11 +108,28 @@ export class PdfPageHandle implements PageHandle<'pdf'> {
 		this.lastRender = null;
 
 		const scale = options.scale ?? 1;
-		const rotation = options.rotation ?? 0;
+		// The page's own `/Rotate` composed with the reader's runtime
+		// rotation, as one absolute quarter turn. Not `options.rotation`:
+		// `getViewport` falls back to the page's native rotation only
+		// when `rotation` is *omitted*, so passing the runtime value
+		// through unchanged discards a native rotation entirely — a page
+		// the producer stored sideways comes out in a portrait box with
+		// its content turned the wrong way, which is what a reader sees
+		// as a book on its side. See `pdf-rotation.ts` for why the sum
+		// is the composition, and why it has to happen here, before the
+		// viewport, rather than as a transform layered over the result.
+		//
+		// Read, never written: `pdfPage.rotate` is pdf.js's own view of
+		// the page dictionary, and the reader has no business editing it.
+		const rotation = composePageRotation(this.pdfPage.rotate, options.rotation);
 		// `PageViewport` structurally satisfies the `ViewportLike` the
 		// coordinate / text-layer modules take, so the pdf.js type
 		// stays inside this file: `render()` needs the real thing, and
 		// everything downstream needs four methods.
+		//
+		// One viewport, and canvas / text layer / highlight paint all
+		// derive from it, so the three cannot disagree about which way
+		// the page is facing.
 		const viewport = this.pdfPage.getViewport({ scale, rotation });
 
 		target.replaceChildren();
